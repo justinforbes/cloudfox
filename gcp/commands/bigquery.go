@@ -1,134 +1,411 @@
 package commands
 
 import (
+	"context"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	BigQueryService "github.com/BishopFox/cloudfox/gcp/services/bigqueryService"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/globals"
-
 	"github.com/BishopFox/cloudfox/internal"
 	"github.com/spf13/cobra"
 )
 
 var GCPBigQueryCommand = &cobra.Command{
-	Use:     "bigquery",
-	Aliases: []string{},
-	Short:   "Display Bigquery datasets and tables information",
-	Args:    cobra.MinimumNArgs(0),
-	Long: `
-Display available Bigquery datasets and tables resource information:
-cloudfox gcp bigquery`,
+	Use:     globals.GCP_BIGQUERY_MODULE_NAME,
+	Aliases: []string{"bq"},
+	Short:   "Enumerate GCP BigQuery datasets and tables with security analysis",
+	Long: `Enumerate GCP BigQuery datasets and tables across projects with security-focused analysis.
+
+Features:
+- Lists all BigQuery datasets with security-relevant columns
+- Shows tables within each dataset with encryption and type info
+- Enumerates dataset access control entries (IAM-like)
+- Identifies publicly accessible datasets (allUsers/allAuthenticatedUsers)
+- Shows encryption status (Google-managed vs CMEK)
+- Generates bq commands for data enumeration
+- Generates exploitation commands for data access`,
 	Run: runGCPBigQueryCommand,
 }
 
-// GCPBigQueryResults struct that implements the internal.OutputInterface
-type GCPBigQueryResults struct {
-	DatasetsData []BigQueryService.BigqueryDataset
-	TablesData   []BigQueryService.BigqueryTable
+// ------------------------------
+// Module Struct with embedded BaseGCPModule
+// ------------------------------
+type BigQueryModule struct {
+	gcpinternal.BaseGCPModule
+
+	// Module-specific fields
+	Datasets []BigQueryService.BigqueryDataset
+	Tables   []BigQueryService.BigqueryTable
+	LootMap  map[string]*internal.LootFile
+	mu       sync.Mutex
 }
 
-// Define the format for CSV & JSON output
-func (g GCPBigQueryResults) TableFiles() []internal.TableFile {
-	var tableFiles []internal.TableFile
-
-	// For Datasets
-	datasetHeader := []string{"Name", "DatasetID", "Description", "CreationTime", "LastModifiedTime", "Location", "ProjectID"}
-	var datasetBody [][]string
-	for _, dataset := range g.DatasetsData {
-		datasetBody = append(datasetBody, []string{
-			dataset.Name,
-			dataset.DatasetID,
-			dataset.Description,
-			dataset.CreationTime.Format(time.RFC3339),
-			dataset.LastModifiedTime.Format(time.RFC3339),
-			dataset.Location,
-			dataset.ProjectID,
-		})
-	}
-	datasetTableFile := internal.TableFile{
-		Header: datasetHeader,
-		Body:   datasetBody,
-		Name:   "bigquery-datasets",
-	}
-	tableFiles = append(tableFiles, datasetTableFile)
-
-	// For Tables
-	tableHeader := []string{"TableID", "DatasetID", "Description", "CreationTime", "LastModifiedTime", "NumBytes", "Location", "ProjectID"}
-	var tableBody [][]string
-	for _, table := range g.TablesData {
-		tableBody = append(tableBody, []string{
-			table.TableID,
-			table.DatasetID,
-			table.Description,
-			table.CreationTime.Format(time.RFC3339),
-			table.LastModifiedTime.Format(time.RFC3339),
-			fmt.Sprintf("%d", table.NumBytes),
-			table.Location,
-			table.ProjectID,
-		})
-	}
-	tableTableFile := internal.TableFile{
-		Header: tableHeader,
-		Body:   tableBody,
-		Name:   "bigquery-tables",
-	}
-	tableFiles = append(tableFiles, tableTableFile)
-
-	return tableFiles
+// ------------------------------
+// Output Struct implementing CloudfoxOutput interface
+// ------------------------------
+type BigQueryOutput struct {
+	Table []internal.TableFile
+	Loot  []internal.LootFile
 }
 
-func (g GCPBigQueryResults) LootFiles() []internal.LootFile {
-	// Implement if there's specific data considered as loot
-	return []internal.LootFile{}
-}
+func (o BigQueryOutput) TableFiles() []internal.TableFile { return o.Table }
+func (o BigQueryOutput) LootFiles() []internal.LootFile   { return o.Loot }
 
+// ------------------------------
+// Command Entry Point
+// ------------------------------
 func runGCPBigQueryCommand(cmd *cobra.Command, args []string) {
-	var projectIDs []string
-	var account string
-	parentCmd := cmd.Parent()
-	ctx := cmd.Context()
-	logger := internal.NewLogger()
-	if value, ok := ctx.Value("projectIDs").([]string); ok && len(value) > 0 {
-		projectIDs = value
-	} else {
-		logger.ErrorM("Could not retrieve projectIDs from flag value or value is empty", globals.GCP_BIGQUERY_MODULE_NAME)
+	// Initialize command context
+	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_BIGQUERY_MODULE_NAME)
+	if err != nil {
+		return // Error already logged
+	}
+
+	// Create module instance
+	module := &BigQueryModule{
+		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
+		Datasets:      []BigQueryService.BigqueryDataset{},
+		Tables:        []BigQueryService.BigqueryTable{},
+		LootMap:       make(map[string]*internal.LootFile),
+	}
+
+	// Initialize loot files
+	module.initializeLootFiles()
+
+	// Execute enumeration
+	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
+}
+
+// ------------------------------
+// Module Execution
+// ------------------------------
+func (m *BigQueryModule) Execute(ctx context.Context, logger internal.Logger) {
+	// Run enumeration with concurrency
+	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_BIGQUERY_MODULE_NAME, m.processProject)
+
+	// Check results
+	if len(m.Datasets) == 0 && len(m.Tables) == 0 {
+		logger.InfoM("No BigQuery datasets found", globals.GCP_BIGQUERY_MODULE_NAME)
 		return
 	}
 
-	if value, ok := ctx.Value("account").(string); ok {
-		account = value
-	} else {
-		logger.ErrorM("Could not retrieve account email from command", globals.GCP_BIGQUERY_MODULE_NAME)
+	logger.SuccessM(fmt.Sprintf("Found %d dataset(s) with %d table(s)", len(m.Datasets), len(m.Tables)), globals.GCP_BIGQUERY_MODULE_NAME)
+
+	// Write output
+	m.writeOutput(ctx, logger)
+}
+
+// ------------------------------
+// Project Processor (called concurrently for each project)
+// ------------------------------
+func (m *BigQueryModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Enumerating BigQuery in project: %s", projectID), globals.GCP_BIGQUERY_MODULE_NAME)
 	}
 
+	// Create service and fetch data
 	bqService := BigQueryService.New()
-	var datasetsResults []BigQueryService.BigqueryDataset
-	var tablesResults []BigQueryService.BigqueryTable
+	result, err := bqService.BigqueryDatasetsAndTables(projectID)
+	if err != nil {
+		m.CommandCounter.Error++
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			logger.ErrorM(fmt.Sprintf("Error enumerating BigQuery in project %s: %v", projectID, err), globals.GCP_BIGQUERY_MODULE_NAME)
+		}
+		return
+	}
 
-	// Set output params leveraging parent (gcp) pflag values
-	verbosity, _ := parentCmd.PersistentFlags().GetInt("verbosity")
-	wrap, _ := parentCmd.PersistentFlags().GetBool("wrap")
-	outputDirectory, _ := parentCmd.PersistentFlags().GetString("outdir")
-	format, _ := parentCmd.PersistentFlags().GetString("output")
+	// Thread-safe append
+	m.mu.Lock()
+	m.Datasets = append(m.Datasets, result.Datasets...)
+	m.Tables = append(m.Tables, result.Tables...)
 
-	for _, projectID := range projectIDs {
-		logger.InfoM(fmt.Sprintf("Retrieving BigQuery datasets and tables from project: %s", projectID), globals.GCP_BIGQUERY_MODULE_NAME)
-		result, err := bqService.BigqueryDatasetsAndTables(projectID)
-		if err != nil {
-			logger.ErrorM(err.Error(), globals.GCP_BIGQUERY_MODULE_NAME)
-			return
+	// Generate loot for each dataset and table
+	for _, dataset := range result.Datasets {
+		m.addDatasetToLoot(dataset)
+	}
+	for _, table := range result.Tables {
+		m.addTableToLoot(table)
+	}
+	m.mu.Unlock()
+
+	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+		logger.InfoM(fmt.Sprintf("Found %d dataset(s) and %d table(s) in project %s", len(result.Datasets), len(result.Tables), projectID), globals.GCP_BIGQUERY_MODULE_NAME)
+	}
+}
+
+// ------------------------------
+// Loot File Management
+// ------------------------------
+func (m *BigQueryModule) initializeLootFiles() {
+	m.LootMap["bigquery-bq-commands"] = &internal.LootFile{
+		Name:     "bigquery-bq-commands",
+		Contents: "# GCP BigQuery Commands\n# Generated by CloudFox\n\n",
+	}
+	m.LootMap["bigquery-gcloud-commands"] = &internal.LootFile{
+		Name:     "bigquery-gcloud-commands",
+		Contents: "# GCP BigQuery gcloud Commands\n# Generated by CloudFox\n\n",
+	}
+	m.LootMap["bigquery-exploitation"] = &internal.LootFile{
+		Name:     "bigquery-exploitation",
+		Contents: "# GCP BigQuery Exploitation Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+	}
+	m.LootMap["bigquery-public-datasets"] = &internal.LootFile{
+		Name:     "bigquery-public-datasets",
+		Contents: "# GCP BigQuery Public Datasets\n# Generated by CloudFox\n# These datasets have public access (allUsers or allAuthenticatedUsers)\n\n",
+	}
+	m.LootMap["bigquery-access-bindings"] = &internal.LootFile{
+		Name:     "bigquery-access-bindings",
+		Contents: "# GCP BigQuery Dataset Access Bindings\n# Generated by CloudFox\n\n",
+	}
+}
+
+func (m *BigQueryModule) addDatasetToLoot(dataset BigQueryService.BigqueryDataset) {
+	// bq commands for enumeration
+	m.LootMap["bigquery-bq-commands"].Contents += fmt.Sprintf(
+		"# Dataset: %s (Project: %s, Location: %s)\n"+
+			"bq show --project_id=%s %s\n"+
+			"bq ls --project_id=%s %s\n\n",
+		dataset.DatasetID, dataset.ProjectID, dataset.Location,
+		dataset.ProjectID, dataset.DatasetID,
+		dataset.ProjectID, dataset.DatasetID,
+	)
+
+	// gcloud commands
+	m.LootMap["bigquery-gcloud-commands"].Contents += fmt.Sprintf(
+		"# Dataset: %s\n"+
+			"gcloud alpha bq datasets describe %s --project=%s\n"+
+			"bq show --format=prettyjson %s:%s\n\n",
+		dataset.DatasetID,
+		dataset.DatasetID, dataset.ProjectID,
+		dataset.ProjectID, dataset.DatasetID,
+	)
+
+	// Add to public datasets loot if public
+	if dataset.IsPublic {
+		m.LootMap["bigquery-public-datasets"].Contents += fmt.Sprintf(
+			"# Dataset: %s (Project: %s)\n"+
+				"# Public Access: %s\n"+
+				"# Location: %s\n"+
+				"bq show --project_id=%s %s\n\n",
+			dataset.DatasetID, dataset.ProjectID,
+			dataset.PublicAccess,
+			dataset.Location,
+			dataset.ProjectID, dataset.DatasetID,
+		)
+	}
+
+	// Add access bindings to loot
+	if len(dataset.AccessEntries) > 0 {
+		m.LootMap["bigquery-access-bindings"].Contents += fmt.Sprintf(
+			"# Dataset: %s (Project: %s)\n",
+			dataset.DatasetID, dataset.ProjectID,
+		)
+		for _, entry := range dataset.AccessEntries {
+			m.LootMap["bigquery-access-bindings"].Contents += fmt.Sprintf(
+				"  Role: %s, Type: %s, Entity: %s\n",
+				entry.Role, entry.EntityType, entry.Entity,
+			)
+		}
+		m.LootMap["bigquery-access-bindings"].Contents += "\n"
+	}
+}
+
+func (m *BigQueryModule) addTableToLoot(table BigQueryService.BigqueryTable) {
+	// Exploitation commands for tables
+	m.LootMap["bigquery-exploitation"].Contents += fmt.Sprintf(
+		"# Table: %s.%s (Project: %s)\n"+
+			"# Size: %d bytes\n"+
+			"# Query first 100 rows:\n"+
+			"bq query --project_id=%s --use_legacy_sql=false 'SELECT * FROM `%s.%s.%s` LIMIT 100'\n"+
+			"# Export table to GCS:\n"+
+			"bq extract --project_id=%s '%s:%s.%s' gs://<bucket>/export_%s_%s.json\n\n",
+		table.DatasetID, table.TableID, table.ProjectID,
+		table.NumBytes,
+		table.ProjectID, table.ProjectID, table.DatasetID, table.TableID,
+		table.ProjectID, table.ProjectID, table.DatasetID, table.TableID, table.DatasetID, table.TableID,
+	)
+}
+
+// ------------------------------
+// Output Generation
+// ------------------------------
+func (m *BigQueryModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	// Dataset table with security columns
+	datasetHeader := []string{
+		"Project ID",
+		"Dataset ID",
+		"Name",
+		"Location",
+		"Public",
+		"Encryption",
+		"Access Entries",
+		"Creation Time",
+	}
+
+	var datasetBody [][]string
+	for _, dataset := range m.Datasets {
+		publicStatus := boolToCheckMark(dataset.IsPublic)
+		if dataset.IsPublic {
+			publicStatus = dataset.PublicAccess
 		}
 
-		datasetsResults = append(datasetsResults, result.Datasets...)
-		tablesResults = append(tablesResults, result.Tables...)
-		cloudfoxOutput := GCPBigQueryResults{DatasetsData: datasetsResults, TablesData: tablesResults}
+		datasetBody = append(datasetBody, []string{
+			dataset.ProjectID,
+			dataset.DatasetID,
+			dataset.Name,
+			dataset.Location,
+			publicStatus,
+			dataset.EncryptionType,
+			fmt.Sprintf("%d", len(dataset.AccessEntries)),
+			dataset.CreationTime.Format(time.RFC3339),
+		})
+	}
 
-		err = internal.HandleOutput("gcp", format, outputDirectory, verbosity, wrap, globals.GCP_BIGQUERY_MODULE_NAME, account, projectID, cloudfoxOutput)
-		if err != nil {
-			logger.ErrorM(err.Error(), globals.GCP_BIGQUERY_MODULE_NAME)
-			return
+	// Table table with security columns
+	tableHeader := []string{
+		"Project ID",
+		"Dataset ID",
+		"Table ID",
+		"Type",
+		"Encryption",
+		"Partitioned",
+		"Rows",
+		"Size (bytes)",
+		"Location",
+	}
+
+	var tableBody [][]string
+	for _, table := range m.Tables {
+		partitioned := boolToCheckMark(table.IsPartitioned)
+		if table.IsPartitioned {
+			partitioned = table.PartitioningType
 		}
-		logger.InfoM(fmt.Sprintf("Done writing output for project %s", projectID), globals.GCP_BIGQUERY_MODULE_NAME)
+
+		tableBody = append(tableBody, []string{
+			table.ProjectID,
+			table.DatasetID,
+			table.TableID,
+			table.TableType,
+			table.EncryptionType,
+			partitioned,
+			fmt.Sprintf("%d", table.NumRows),
+			fmt.Sprintf("%d", table.NumBytes),
+			table.Location,
+		})
+	}
+
+	// Access bindings table (one row per access entry)
+	accessHeader := []string{
+		"Dataset",
+		"Project ID",
+		"Location",
+		"Role",
+		"Member Type",
+		"Member",
+	}
+
+	var accessBody [][]string
+	for _, dataset := range m.Datasets {
+		for _, entry := range dataset.AccessEntries {
+			memberType := BigQueryService.GetMemberType(entry.EntityType, entry.Entity)
+			accessBody = append(accessBody, []string{
+				dataset.DatasetID,
+				dataset.ProjectID,
+				dataset.Location,
+				entry.Role,
+				memberType,
+				entry.Entity,
+			})
+		}
+	}
+
+	// Public datasets table
+	publicHeader := []string{
+		"Dataset",
+		"Project ID",
+		"Location",
+		"Public Access",
+		"Encryption",
+	}
+
+	var publicBody [][]string
+	for _, dataset := range m.Datasets {
+		if dataset.IsPublic {
+			publicBody = append(publicBody, []string{
+				dataset.DatasetID,
+				dataset.ProjectID,
+				dataset.Location,
+				dataset.PublicAccess,
+				dataset.EncryptionType,
+			})
+		}
+	}
+
+	// Collect loot files
+	var lootFiles []internal.LootFile
+	for _, loot := range m.LootMap {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+			lootFiles = append(lootFiles, *loot)
+		}
+	}
+
+	// Build tables list
+	tables := []internal.TableFile{
+		{
+			Name:   "bigquery-datasets",
+			Header: datasetHeader,
+			Body:   datasetBody,
+		},
+		{
+			Name:   "bigquery-tables",
+			Header: tableHeader,
+			Body:   tableBody,
+		},
+	}
+
+	// Add access bindings table if there are entries
+	if len(accessBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "bigquery-access",
+			Header: accessHeader,
+			Body:   accessBody,
+		})
+	}
+
+	// Add public datasets table if there are public datasets
+	if len(publicBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "bigquery-public",
+			Header: publicHeader,
+			Body:   publicBody,
+		})
+		logger.InfoM(fmt.Sprintf("[FINDING] Found %d publicly accessible dataset(s)!", len(publicBody)), globals.GCP_BIGQUERY_MODULE_NAME)
+	}
+
+	output := BigQueryOutput{
+		Table: tables,
+		Loot:  lootFiles,
+	}
+
+	// Write output using HandleOutputSmart with scope support
+	err := internal.HandleOutputSmart(
+		"gcp",
+		m.Format,
+		m.OutputDirectory,
+		m.Verbosity,
+		m.WrapTable,
+		"project",           // scopeType
+		m.ProjectIDs,        // scopeIdentifiers
+		m.ProjectIDs,        // scopeNames (same as IDs for GCP projects)
+		m.Account,
+		output,
+	)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_BIGQUERY_MODULE_NAME)
+		m.CommandCounter.Error++
 	}
 }

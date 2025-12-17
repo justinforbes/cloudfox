@@ -102,6 +102,7 @@ func init() {
 		commands.GCPBigQueryCommand,
 		commands.GCPSecretsCommand,
 		commands.GCPIAMCommand,
+		commands.GCPPermissionsCommand,
 		commands.GCPInstancesCommand,
 		commands.GCPWhoAmICommand,
 		GCPAllChecksCommand,

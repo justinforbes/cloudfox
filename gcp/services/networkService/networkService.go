@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	ComputeEngineService "github.com/BishopFox/cloudfox/gcp/services/computeEngineService"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"google.golang.org/api/compute/v1"
 )
 
@@ -57,17 +58,30 @@ type Endpoint struct {
 }
 
 type NetwworkService struct {
-	// DataStoreService datastoreservice.DataStoreService
+	session *gcpinternal.SafeSession
 }
 
+// New creates a new NetworkService (legacy - uses ADC directly)
 func New() *NetwworkService {
 	return &NetwworkService{}
+}
+
+// NewWithSession creates a NetworkService with a SafeSession for managed authentication
+func NewWithSession(session *gcpinternal.SafeSession) *NetwworkService {
+	return &NetwworkService{session: session}
 }
 
 // Returns firewall rules for a project.
 func (ns *NetwworkService) FirewallRules(projectID string) ([]*compute.Firewall, error) {
 	ctx := context.Background()
-	computeService, err := compute.NewService(ctx)
+	var computeService *compute.Service
+	var err error
+
+	if ns.session != nil {
+		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
+	} else {
+		computeService, err = compute.NewService(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
