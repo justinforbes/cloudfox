@@ -61,6 +61,19 @@ const GCP_NETWORKENDPOINTS_MODULE_NAME string = "network-endpoints"
 const GCP_CLOUDARMOR_MODULE_NAME string = "cloud-armor"
 const GCP_CERTMANAGER_MODULE_NAME string = "cert-manager"
 
+// New security analysis modules (Azure equivalents)
+const GCP_SECURITYCENTER_MODULE_NAME string = "security-center"
+const GCP_WHOAMI_ENHANCED_MODULE_NAME string = "whoami-full"
+const GCP_LATERALMOVEMENT_MODULE_NAME string = "lateral-movement"
+const GCP_NETWORKEXPOSURE_MODULE_NAME string = "network-exposure"
+const GCP_DATAEXFILTRATION_MODULE_NAME string = "data-exfiltration"
+const GCP_BACKUPINVENTORY_MODULE_NAME string = "backup-inventory"
+const GCP_COMPLIANCEDASHBOARD_MODULE_NAME string = "compliance-dashboard"
+const GCP_COSTSECURITY_MODULE_NAME string = "cost-security"
+const GCP_MONITORINGALERTS_MODULE_NAME string = "monitoring-alerts"
+const GCP_NETWORKTOPOLOGY_MODULE_NAME string = "network-topology"
+const GCP_IDENTITYPROTECTION_MODULE_NAME string = "identity-protection"
+
 // Verbosity levels (matching Azure pattern)
 var GCP_VERBOSITY int = 0
 

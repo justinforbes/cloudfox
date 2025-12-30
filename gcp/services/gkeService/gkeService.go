@@ -62,6 +62,20 @@ type ClusterInfo struct {
 	TotalNodeCount        int
 	AutoscalingEnabled    bool
 
+	// GKE Autopilot
+	Autopilot             bool
+
+	// Node Auto-provisioning
+	NodeAutoProvisioning  bool
+
+	// Maintenance configuration
+	MaintenanceWindow     string
+	MaintenanceExclusions []string
+
+	// Addons
+	ConfigConnector       bool
+	IstioEnabled          bool    // Anthos Service Mesh / Istio
+
 	// Security issues detected
 	SecurityIssues        []string
 }
@@ -231,6 +245,40 @@ func parseClusterInfo(cluster *container.Cluster, projectID string) ClusterInfo 
 			info.SecureBoot = np.Config.ShieldedInstanceConfig.EnableSecureBoot
 			info.IntegrityMonitoring = np.Config.ShieldedInstanceConfig.EnableIntegrityMonitoring
 		}
+	}
+
+	// GKE Autopilot mode
+	if cluster.Autopilot != nil {
+		info.Autopilot = cluster.Autopilot.Enabled
+	}
+
+	// Node Auto-provisioning
+	if cluster.Autoscaling != nil {
+		info.NodeAutoProvisioning = cluster.Autoscaling.EnableNodeAutoprovisioning
+	}
+
+	// Maintenance configuration
+	if cluster.MaintenancePolicy != nil && cluster.MaintenancePolicy.Window != nil {
+		window := cluster.MaintenancePolicy.Window
+		if window.DailyMaintenanceWindow != nil {
+			info.MaintenanceWindow = fmt.Sprintf("Daily at %s", window.DailyMaintenanceWindow.StartTime)
+		} else if window.RecurringWindow != nil {
+			info.MaintenanceWindow = fmt.Sprintf("Recurring: %s", window.RecurringWindow.Recurrence)
+		}
+		// Maintenance exclusions
+		for name := range window.MaintenanceExclusions {
+			info.MaintenanceExclusions = append(info.MaintenanceExclusions, name)
+		}
+	}
+
+	// Addons configuration
+	if cluster.AddonsConfig != nil {
+		// Config Connector
+		if cluster.AddonsConfig.ConfigConnectorConfig != nil {
+			info.ConfigConnector = cluster.AddonsConfig.ConfigConnectorConfig.Enabled
+		}
+		// Note: IstioConfig was deprecated and removed from the GKE API
+		// Anthos Service Mesh (ASM) is now the recommended approach
 	}
 
 	// Identify security issues

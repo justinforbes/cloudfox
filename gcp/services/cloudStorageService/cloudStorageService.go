@@ -40,6 +40,21 @@ type IAMBinding struct {
 	Members []string `json:"members"`
 }
 
+// LifecycleRule represents a single lifecycle rule on a bucket
+type LifecycleRule struct {
+	Action          string `json:"action"`          // Delete, SetStorageClass, AbortIncompleteMultipartUpload
+	StorageClass    string `json:"storageClass"`    // Target storage class (for SetStorageClass)
+	AgeDays         int64  `json:"ageDays"`         // Age condition in days
+	NumVersions     int64  `json:"numVersions"`     // Number of newer versions condition
+	IsLive          *bool  `json:"isLive"`          // Whether object is live (vs archived)
+	MatchesPrefix   string `json:"matchesPrefix"`   // Object name prefix match
+	MatchesSuffix   string `json:"matchesSuffix"`   // Object name suffix match
+	MatchesStorage  string `json:"matchesStorage"`  // Storage class match
+	CreatedBefore   string `json:"createdBefore"`   // Created before date condition
+	DaysSinceCustom int64  `json:"daysSinceCustom"` // Days since custom time
+	DaysSinceNoncurrent int64 `json:"daysSinceNoncurrent"` // Days since became noncurrent
+}
+
 // BucketInfo contains bucket metadata and security-relevant configuration
 type BucketInfo struct {
 	// Basic info
@@ -65,6 +80,16 @@ type BucketInfo struct {
 	StorageClass             string `json:"storageClass"`             // Default storage class
 	AutoclassEnabled         bool   `json:"autoclassEnabled"`         // Autoclass feature enabled
 	AutoclassTerminalClass   string `json:"autoclassTerminalClass"`   // Terminal storage class for autoclass
+
+	// Lifecycle configuration
+	LifecycleEnabled     bool            `json:"lifecycleEnabled"`     // Has lifecycle rules
+	LifecycleRuleCount   int             `json:"lifecycleRuleCount"`   // Number of lifecycle rules
+	LifecycleRules       []LifecycleRule `json:"lifecycleRules"`       // Parsed lifecycle rules
+	HasDeleteRule        bool            `json:"hasDeleteRule"`        // Has a delete action rule
+	HasArchiveRule       bool            `json:"hasArchiveRule"`       // Has a storage class transition rule
+	ShortestDeleteDays   int64           `json:"shortestDeleteDays"`   // Shortest delete age in days
+	TurboReplication     bool            `json:"turboReplication"`     // Turbo replication enabled (dual-region)
+	LocationType         string          `json:"locationType"`         // "region", "dual-region", or "multi-region"
 
 	// Public access indicators
 	IsPublic     bool   `json:"isPublic"`     // Has allUsers or allAuthenticatedUsers
@@ -333,6 +358,80 @@ func (cs *CloudStorageService) enrichBucketFromRestAPI(ctx context.Context, buck
 		// REST API returns RFC3339 format
 		if t, err := time.Parse(time.RFC3339, restBucket.Updated); err == nil {
 			bucket.Updated = t.Format("2006-01-02")
+		}
+	}
+
+	// Parse location type
+	bucket.LocationType = restBucket.LocationType
+
+	// Parse Turbo Replication (for dual-region buckets)
+	if restBucket.Rpo == "ASYNC_TURBO" {
+		bucket.TurboReplication = true
+	}
+
+	// Parse Lifecycle rules
+	if restBucket.Lifecycle != nil && len(restBucket.Lifecycle.Rule) > 0 {
+		bucket.LifecycleEnabled = true
+		bucket.LifecycleRuleCount = len(restBucket.Lifecycle.Rule)
+		bucket.ShortestDeleteDays = -1 // Initialize to -1 to indicate not set
+
+		for _, rule := range restBucket.Lifecycle.Rule {
+			lcRule := LifecycleRule{}
+
+			// Parse action
+			if rule.Action != nil {
+				lcRule.Action = rule.Action.Type
+				lcRule.StorageClass = rule.Action.StorageClass
+
+				if rule.Action.Type == "Delete" {
+					bucket.HasDeleteRule = true
+				} else if rule.Action.Type == "SetStorageClass" {
+					bucket.HasArchiveRule = true
+				}
+			}
+
+			// Parse conditions
+			if rule.Condition != nil {
+				// Age is a pointer to int64
+				if rule.Condition.Age != nil && *rule.Condition.Age > 0 {
+					lcRule.AgeDays = *rule.Condition.Age
+					// Track shortest delete age
+					if lcRule.Action == "Delete" && (bucket.ShortestDeleteDays == -1 || *rule.Condition.Age < bucket.ShortestDeleteDays) {
+						bucket.ShortestDeleteDays = *rule.Condition.Age
+					}
+				}
+				if rule.Condition.NumNewerVersions > 0 {
+					lcRule.NumVersions = rule.Condition.NumNewerVersions
+				}
+				if rule.Condition.IsLive != nil {
+					lcRule.IsLive = rule.Condition.IsLive
+				}
+				if len(rule.Condition.MatchesPrefix) > 0 {
+					lcRule.MatchesPrefix = strings.Join(rule.Condition.MatchesPrefix, ",")
+				}
+				if len(rule.Condition.MatchesSuffix) > 0 {
+					lcRule.MatchesSuffix = strings.Join(rule.Condition.MatchesSuffix, ",")
+				}
+				if len(rule.Condition.MatchesStorageClass) > 0 {
+					lcRule.MatchesStorage = strings.Join(rule.Condition.MatchesStorageClass, ",")
+				}
+				if rule.Condition.CreatedBefore != "" {
+					lcRule.CreatedBefore = rule.Condition.CreatedBefore
+				}
+				if rule.Condition.DaysSinceCustomTime > 0 {
+					lcRule.DaysSinceCustom = rule.Condition.DaysSinceCustomTime
+				}
+				if rule.Condition.DaysSinceNoncurrentTime > 0 {
+					lcRule.DaysSinceNoncurrent = rule.Condition.DaysSinceNoncurrentTime
+				}
+			}
+
+			bucket.LifecycleRules = append(bucket.LifecycleRules, lcRule)
+		}
+
+		// If no delete rule, reset to 0
+		if bucket.ShortestDeleteDays == -1 {
+			bucket.ShortestDeleteDays = 0
 		}
 	}
 }

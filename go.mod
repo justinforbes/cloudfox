@@ -90,7 +90,6 @@ require (
 	cloud.google.com/go/accesscontextmanager v1.9.7 // indirect
 	cloud.google.com/go/auth v0.17.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
-	cloud.google.com/go/monitoring v1.24.3 // indirect
 	cloud.google.com/go/orgpolicy v1.15.1 // indirect
 	cloud.google.com/go/osconfig v1.15.1 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.30.0 // indirect
@@ -142,6 +141,8 @@ require (
 require (
 	cloud.google.com/go/asset v1.22.0
 	cloud.google.com/go/logging v1.13.1
+	cloud.google.com/go/monitoring v1.24.3
+	cloud.google.com/go/securitycenter v1.38.1
 	github.com/aws/aws-sdk-go-v2/service/kms v1.49.4
 	golang.org/x/oauth2 v0.34.0
 	google.golang.org/api v0.257.0

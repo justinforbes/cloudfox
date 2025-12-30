@@ -36,11 +36,20 @@ type FunctionInfo struct {
 	VPCEgressSettings    string  // PRIVATE_RANGES_ONLY, ALL_TRAFFIC
 	AllTrafficOnLatest   bool
 
+	// Resource configuration (new enhancements)
+	AvailableMemoryMB    int64   // Memory in MB
+	AvailableCPU         string  // CPU (e.g., "1", "2")
+	TimeoutSeconds       int64   // Timeout in seconds
+	MaxInstanceCount     int64   // Max concurrent instances
+	MinInstanceCount     int64   // Min instances (cold start prevention)
+	MaxInstanceRequestConcurrency int64 // Max concurrent requests per instance
+
 	// Trigger info
 	TriggerType          string  // HTTP, Pub/Sub, Cloud Storage, etc.
 	TriggerURL           string  // For HTTP functions
 	TriggerEventType     string
 	TriggerResource      string
+	TriggerRetryPolicy   string  // RETRY_POLICY_RETRY, RETRY_POLICY_DO_NOT_RETRY
 
 	// Environment variables (sanitized - just names, not values)
 	EnvVarCount          int
@@ -59,6 +68,9 @@ type FunctionInfo struct {
 	SourceType           string    // GCS, Repository
 	RiskLevel            string    // CRITICAL, HIGH, MEDIUM, LOW
 	RiskReasons          []string  // Why it's risky
+
+	// Cold start analysis
+	ColdStartRisk        string  // HIGH, MEDIUM, LOW based on min instances
 }
 
 // FunctionSecurityAnalysis contains detailed security analysis for a function
@@ -157,6 +169,35 @@ func parseFunctionInfo(fn *cloudfunctions.Function, projectID string) FunctionIn
 		info.VPCConnector = fn.ServiceConfig.VpcConnector
 		info.VPCEgressSettings = fn.ServiceConfig.VpcConnectorEgressSettings
 		info.AllTrafficOnLatest = fn.ServiceConfig.AllTrafficOnLatestRevision
+
+		// Resource configuration (new enhancements)
+		if fn.ServiceConfig.AvailableMemory != "" {
+			// Parse memory string (e.g., "256M", "1G")
+			memStr := fn.ServiceConfig.AvailableMemory
+			if strings.HasSuffix(memStr, "M") {
+				if val, err := parseMemoryMB(memStr); err == nil {
+					info.AvailableMemoryMB = val
+				}
+			} else if strings.HasSuffix(memStr, "G") {
+				if val, err := parseMemoryMB(memStr); err == nil {
+					info.AvailableMemoryMB = val
+				}
+			}
+		}
+		info.AvailableCPU = fn.ServiceConfig.AvailableCpu
+		info.TimeoutSeconds = fn.ServiceConfig.TimeoutSeconds
+		info.MaxInstanceCount = fn.ServiceConfig.MaxInstanceCount
+		info.MinInstanceCount = fn.ServiceConfig.MinInstanceCount
+		info.MaxInstanceRequestConcurrency = fn.ServiceConfig.MaxInstanceRequestConcurrency
+
+		// Cold start risk analysis
+		if info.MinInstanceCount > 0 {
+			info.ColdStartRisk = "LOW"
+		} else if info.MaxInstanceCount > 100 {
+			info.ColdStartRisk = "MEDIUM"
+		} else {
+			info.ColdStartRisk = "HIGH"
+		}
 
 		// Extract environment variable names (pentest-relevant - may hint at secrets)
 		if fn.ServiceConfig.EnvironmentVariables != nil {
@@ -376,4 +417,32 @@ func containsSensitiveKeyword(name string) bool {
 		}
 	}
 	return false
+}
+
+// parseMemoryMB parses a memory string like "256M" or "1G" to MB
+func parseMemoryMB(memStr string) (int64, error) {
+	memStr = strings.TrimSpace(memStr)
+	if len(memStr) == 0 {
+		return 0, fmt.Errorf("empty memory string")
+	}
+
+	unit := memStr[len(memStr)-1]
+	valueStr := memStr[:len(memStr)-1]
+
+	var value int64
+	_, err := fmt.Sscanf(valueStr, "%d", &value)
+	if err != nil {
+		return 0, err
+	}
+
+	switch unit {
+	case 'M', 'm':
+		return value, nil
+	case 'G', 'g':
+		return value * 1024, nil
+	case 'K', 'k':
+		return value / 1024, nil
+	default:
+		return 0, fmt.Errorf("unknown unit: %c", unit)
+	}
 }
