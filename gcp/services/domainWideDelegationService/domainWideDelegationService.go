@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	iam "google.golang.org/api/iam/v1"
 )
 
@@ -52,7 +53,7 @@ func (s *DomainWideDelegationService) GetDWDServiceAccounts(projectID string) ([
 	ctx := context.Background()
 	service, err := iam.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	var dwdAccounts []DWDServiceAccount
@@ -61,7 +62,7 @@ func (s *DomainWideDelegationService) GetDWDServiceAccounts(projectID string) ([
 	parent := fmt.Sprintf("projects/%s", projectID)
 	resp, err := service.Projects.ServiceAccounts.List(parent).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list service accounts: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	for _, sa := range resp.Accounts {

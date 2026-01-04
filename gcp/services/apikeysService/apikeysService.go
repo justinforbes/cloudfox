@@ -76,7 +76,7 @@ func (s *APIKeysService) ListAPIKeys(projectID string) ([]APIKeyInfo, error) {
 		service, err = apikeys.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create API Keys service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
 	}
 
 	var keys []APIKeyInfo
@@ -91,7 +91,7 @@ func (s *APIKeysService) ListAPIKeys(projectID string) ([]APIKeyInfo, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list API keys: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
 	}
 
 	return keys, nil
@@ -109,12 +109,12 @@ func (s *APIKeysService) GetAPIKey(keyName string) (*APIKeyInfo, error) {
 		service, err = apikeys.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create API Keys service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
 	}
 
 	key, err := service.Projects.Locations.Keys.Get(keyName).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get API key: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
 	}
 
 	// Extract project ID from key name
@@ -141,12 +141,12 @@ func (s *APIKeysService) GetKeyString(keyName string) (string, error) {
 		service, err = apikeys.NewService(ctx)
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to create API Keys service: %v", err)
+		return "", gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
 	}
 
 	resp, err := service.Projects.Locations.Keys.GetKeyString(keyName).Context(ctx).Do()
 	if err != nil {
-		return "", fmt.Errorf("failed to get key string: %v", err)
+		return "", gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
 	}
 
 	return resp.KeyString, nil

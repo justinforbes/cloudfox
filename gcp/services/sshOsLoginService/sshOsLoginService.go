@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	compute "google.golang.org/api/compute/v1"
 	oslogin "google.golang.org/api/oslogin/v1"
 )
@@ -70,7 +71,7 @@ func (s *SSHOsLoginService) GetProjectOSLoginConfig(projectID string) (*OSLoginC
 	ctx := context.Background()
 	service, err := compute.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	config := &OSLoginConfig{
@@ -80,7 +81,7 @@ func (s *SSHOsLoginService) GetProjectOSLoginConfig(projectID string) (*OSLoginC
 
 	project, err := service.Projects.Get(projectID).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get project: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	// Check common instance metadata
@@ -114,14 +115,14 @@ func (s *SSHOsLoginService) GetProjectSSHKeys(projectID string) ([]SSHKeyInfo, e
 	ctx := context.Background()
 	service, err := compute.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var keys []SSHKeyInfo
 
 	project, err := service.Projects.Get(projectID).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get project: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	if project.CommonInstanceMetadata != nil {
@@ -141,7 +142,7 @@ func (s *SSHOsLoginService) GetInstanceSSHAccess(projectID string) ([]InstanceSS
 	ctx := context.Background()
 	service, err := compute.NewService(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create compute service: %v", err)
+		return nil, nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var instances []InstanceSSHAccess
@@ -223,7 +224,7 @@ func (s *SSHOsLoginService) GetOSLoginUsers(projectID string) ([]OSLoginUser, er
 	ctx := context.Background()
 	_, err := oslogin.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create oslogin service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "oslogin.googleapis.com")
 	}
 
 	// Note: OS Login API requires querying per-user, so we return empty

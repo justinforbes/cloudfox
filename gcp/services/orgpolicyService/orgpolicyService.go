@@ -162,7 +162,7 @@ func (s *OrgPolicyService) ListProjectPolicies(projectID string) ([]OrgPolicyInf
 		service, err = orgpolicy.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create org policy service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "orgpolicy.googleapis.com")
 	}
 
 	var policies []OrgPolicyInfo
@@ -176,7 +176,7 @@ func (s *OrgPolicyService) ListProjectPolicies(projectID string) ([]OrgPolicyInf
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list policies: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "orgpolicy.googleapis.com")
 	}
 
 	return policies, nil

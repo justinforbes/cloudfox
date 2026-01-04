@@ -79,7 +79,7 @@ func (s *AccessPolicyService) ListAccessLevels(orgID string) ([]AccessLevelInfo,
 		service, err = accesscontextmanager.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Access Context Manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	var allLevels []AccessLevelInfo
@@ -105,7 +105,7 @@ func (s *AccessPolicyService) ListAccessLevels(orgID string) ([]AccessLevelInfo,
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list access policies: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	return allLevels, nil
@@ -123,7 +123,7 @@ func (s *AccessPolicyService) ListAccessLevelsForPolicy(policyName string) ([]Ac
 		service, err = accesscontextmanager.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Access Context Manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	var levels []AccessLevelInfo
@@ -138,7 +138,7 @@ func (s *AccessPolicyService) ListAccessLevelsForPolicy(policyName string) ([]Ac
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list access levels: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	return levels, nil

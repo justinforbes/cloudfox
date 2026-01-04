@@ -246,9 +246,9 @@ func (m *IdentityProtectionModule) analyzeIAMPolicy(ctx context.Context, project
 	// Get IAM policy for the project
 	policy, err := crmService.Projects.GetIamPolicy(projectID, &cloudresourcemanager.GetIamPolicyRequest{}).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting IAM policy for project %s: %v", projectID, err), GCP_IDENTITYPROTECTION_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_IDENTITYPROTECTION_MODULE_NAME,
+			fmt.Sprintf("Could not get IAM policy for project %s", projectID))
 		return
 	}
 
@@ -373,9 +373,9 @@ func (m *IdentityProtectionModule) analyzeServiceAccounts(ctx context.Context, p
 	// List service accounts
 	saList, err := iamService.Projects.ServiceAccounts.List(fmt.Sprintf("projects/%s", projectID)).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing service accounts for project %s: %v", projectID, err), GCP_IDENTITYPROTECTION_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_IDENTITYPROTECTION_MODULE_NAME,
+			fmt.Sprintf("Could not list service accounts for project %s", projectID))
 		return
 	}
 

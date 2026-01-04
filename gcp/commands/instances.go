@@ -123,9 +123,8 @@ func (m *InstancesModule) processProject(ctx context.Context, projectID string, 
 	instances, projectMeta, err := ces.InstancesWithMetadata(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating instances in project %s: %v", projectID, err), globals.GCP_INSTANCES_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_INSTANCES_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate instances in project %s", projectID))
 		return
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	sqladmin "google.golang.org/api/sqladmin/v1"
 )
 
@@ -76,12 +77,12 @@ func (cs *CloudSQLService) Instances(projectID string) ([]SQLInstanceInfo, error
 
 	service, err := sqladmin.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud SQL service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "sqladmin.googleapis.com")
 	}
 
 	resp, err := service.Instances.List(projectID).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list SQL instances: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "sqladmin.googleapis.com")
 	}
 
 	var instances []SQLInstanceInfo

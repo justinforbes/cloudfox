@@ -303,9 +303,9 @@ func (m *NetworkTopologyModule) enumerateNetworks(ctx context.Context, projectID
 	})
 
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing networks for project %s: %v", projectID, err), GCP_NETWORKTOPOLOGY_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKTOPOLOGY_MODULE_NAME,
+			fmt.Sprintf("Could not list networks in project %s", projectID))
 	}
 
 	// Check for Shared VPC host project
@@ -352,9 +352,9 @@ func (m *NetworkTopologyModule) enumerateSubnets(ctx context.Context, projectID 
 	})
 
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing subnets for project %s: %v", projectID, err), GCP_NETWORKTOPOLOGY_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKTOPOLOGY_MODULE_NAME,
+			fmt.Sprintf("Could not list subnets in project %s", projectID))
 	}
 }
 
@@ -404,9 +404,9 @@ func (m *NetworkTopologyModule) enumerateRoutes(ctx context.Context, projectID s
 	})
 
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing routes for project %s: %v", projectID, err), GCP_NETWORKTOPOLOGY_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKTOPOLOGY_MODULE_NAME,
+			fmt.Sprintf("Could not list routes in project %s", projectID))
 	}
 }
 
@@ -454,9 +454,9 @@ func (m *NetworkTopologyModule) enumerateCloudNAT(ctx context.Context, projectID
 	})
 
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing Cloud NAT for project %s: %v", projectID, err), GCP_NETWORKTOPOLOGY_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKTOPOLOGY_MODULE_NAME,
+			fmt.Sprintf("Could not list Cloud NAT in project %s", projectID))
 	}
 }
 
@@ -491,9 +491,9 @@ func (m *NetworkTopologyModule) checkSharedVPCHost(ctx context.Context, projectI
 			return nil
 		})
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.ErrorM(fmt.Sprintf("Error listing XPN resources for project %s: %v", projectID, err), GCP_NETWORKTOPOLOGY_MODULE_NAME)
-			}
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, GCP_NETWORKTOPOLOGY_MODULE_NAME,
+				fmt.Sprintf("Could not list XPN resources in project %s", projectID))
 		}
 
 		// Mark host networks

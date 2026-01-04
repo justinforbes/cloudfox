@@ -109,9 +109,9 @@ func (m *SourceReposModule) processProject(ctx context.Context, projectID string
 	svc := sourcereposservice.New()
 	repos, err := svc.ListRepos(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list repos in project %s: %v", projectID, err), globals.GCP_SOURCEREPOS_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_SOURCEREPOS_MODULE_NAME,
+			fmt.Sprintf("Could not list repos in project %s", projectID))
 		return
 	}
 

@@ -141,9 +141,8 @@ func (m *PubSubModule) processProject(ctx context.Context, projectID string, log
 	topics, err := ps.Topics(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating Pub/Sub topics in project %s: %v", projectID, err), globals.GCP_PUBSUB_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_PUBSUB_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate Pub/Sub topics in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.Topics = append(m.Topics, topics...)
@@ -157,9 +156,8 @@ func (m *PubSubModule) processProject(ctx context.Context, projectID string, log
 	subs, err := ps.Subscriptions(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating Pub/Sub subscriptions in project %s: %v", projectID, err), globals.GCP_PUBSUB_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_PUBSUB_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate Pub/Sub subscriptions in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.Subscriptions = append(m.Subscriptions, subs...)

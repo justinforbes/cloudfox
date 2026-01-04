@@ -187,9 +187,8 @@ func (m *WorkloadIdentityModule) processProject(ctx context.Context, projectID s
 	gkeSvc := gkeservice.New()
 	clusters, _, err := gkeSvc.Clusters(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not enumerate GKE clusters in project %s: %v", projectID, err), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate GKE clusters in project %s", projectID))
 	}
 
 	var clusterInfos []ClusterWorkloadIdentity
@@ -233,9 +232,8 @@ func (m *WorkloadIdentityModule) processProject(ctx context.Context, projectID s
 	// Get Workload Identity Pools
 	pools, err := wiSvc.ListWorkloadIdentityPools(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list Workload Identity Pools in project %s: %v", projectID, err), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME,
+			fmt.Sprintf("Could not list Workload Identity Pools in project %s", projectID))
 	}
 
 	var providers []workloadidentityservice.WorkloadIdentityProvider
@@ -244,9 +242,8 @@ func (m *WorkloadIdentityModule) processProject(ctx context.Context, projectID s
 	for _, pool := range pools {
 		poolProviders, err := wiSvc.ListWorkloadIdentityProviders(projectID, pool.PoolID)
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.InfoM(fmt.Sprintf("Could not list providers for pool %s: %v", pool.PoolID, err), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
-			}
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME,
+				fmt.Sprintf("Could not list providers for pool %s", pool.PoolID))
 			continue
 		}
 		providers = append(providers, poolProviders...)
@@ -255,9 +252,8 @@ func (m *WorkloadIdentityModule) processProject(ctx context.Context, projectID s
 	// Find federated identity bindings
 	fedBindings, err := wiSvc.FindFederatedIdentityBindings(projectID, pools)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not find federated identity bindings in project %s: %v", projectID, err), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME,
+			fmt.Sprintf("Could not find federated identity bindings in project %s", projectID))
 	}
 
 	// Thread-safe append
@@ -300,7 +296,8 @@ func (m *WorkloadIdentityModule) findWorkloadIdentityBindings(ctx context.Contex
 	iamSvc := IAMService.New()
 	serviceAccounts, err := iamSvc.ServiceAccounts(projectID)
 	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not list service accounts: %v", err), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME,
+			fmt.Sprintf("Could not list service accounts in project %s", projectID))
 		return bindings
 	}
 
@@ -886,7 +883,8 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		output,
 	)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
 		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME,
+			"Could not write output")
 	}
 }

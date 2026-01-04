@@ -143,25 +143,25 @@ func (m *CertManagerModule) processProject(ctx context.Context, projectID string
 	// Get Certificate Manager certs
 	certs, err := svc.GetCertificates(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting certificates for %s: %v", projectID, err), globals.GCP_CERTMANAGER_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CERTMANAGER_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate certificates in project %s", projectID))
 	}
 
 	// Get classic SSL certs
 	sslCerts, err := svc.GetSSLCertificates(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting SSL certificates for %s: %v", projectID, err), globals.GCP_CERTMANAGER_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CERTMANAGER_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate SSL certificates in project %s", projectID))
 	}
 
 	// Get certificate maps
 	certMaps, err := svc.GetCertificateMaps(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting certificate maps for %s: %v", projectID, err), globals.GCP_CERTMANAGER_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CERTMANAGER_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate certificate maps in project %s", projectID))
 	}
 
 	m.mu.Lock()

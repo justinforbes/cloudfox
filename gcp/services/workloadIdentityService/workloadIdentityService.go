@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	iam "google.golang.org/api/iam/v1"
 )
 
@@ -66,7 +67,7 @@ func (s *WorkloadIdentityService) ListWorkloadIdentityPools(projectID string) ([
 
 	iamService, err := iam.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	var pools []WorkloadIdentityPool
@@ -92,7 +93,7 @@ func (s *WorkloadIdentityService) ListWorkloadIdentityPools(projectID string) ([
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list workload identity pools: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	return pools, nil
@@ -104,7 +105,7 @@ func (s *WorkloadIdentityService) ListWorkloadIdentityProviders(projectID, poolI
 
 	iamService, err := iam.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	var providers []WorkloadIdentityProvider
@@ -150,7 +151,7 @@ func (s *WorkloadIdentityService) ListWorkloadIdentityProviders(projectID, poolI
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list workload identity providers: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	return providers, nil
@@ -162,7 +163,7 @@ func (s *WorkloadIdentityService) FindFederatedIdentityBindings(projectID string
 
 	iamService, err := iam.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	var bindings []FederatedIdentityBinding
@@ -199,7 +200,7 @@ func (s *WorkloadIdentityService) FindFederatedIdentityBindings(projectID string
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to find federated identity bindings: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	return bindings, nil

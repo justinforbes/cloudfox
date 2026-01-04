@@ -122,12 +122,12 @@ func (ces *ComputeEngineService) Instances(projectID string) ([]ComputeEngineInf
 	ctx := context.Background()
 	computeService, err := ces.getService(ctx)
 	if err != nil {
-		return nil, err
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	regions, err := computeService.Regions.List(projectID).Do()
 	if err != nil {
-		return nil, err
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var instanceInfos []ComputeEngineInfo
@@ -136,7 +136,7 @@ func (ces *ComputeEngineService) Instances(projectID string) ([]ComputeEngineInf
 			zone := getZoneNameFromURL(zoneURL)
 			instanceList, err := computeService.Instances.List(projectID, zone).Do()
 			if err != nil {
-				return nil, fmt.Errorf("error retrieving instances from zone %s: %v", zone, err)
+				return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 			}
 			for _, instance := range instanceList.Items {
 				info := ComputeEngineInfo{
@@ -418,7 +418,7 @@ func (ces *ComputeEngineService) GetProjectMetadata(projectID string) (*ProjectM
 
 	project, err := computeService.Projects.Get(projectID).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get project metadata: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	info := &ProjectMetadataInfo{
@@ -501,7 +501,7 @@ func (ces *ComputeEngineService) GetInstanceIAMPolicy(projectID, zone, instanceN
 
 	policy, err := computeService.Instances.GetIamPolicy(projectID, zone, instanceName).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get instance IAM policy: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	info := &InstanceIAMInfo{

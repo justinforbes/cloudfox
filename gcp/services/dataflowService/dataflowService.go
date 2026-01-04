@@ -2,7 +2,6 @@ package dataflowservice
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -67,7 +66,7 @@ func (s *DataflowService) ListJobs(projectID string) ([]JobInfo, error) {
 		service, err = dataflow.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Dataflow service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "dataflow.googleapis.com")
 	}
 
 	var jobs []JobInfo
@@ -82,7 +81,7 @@ func (s *DataflowService) ListJobs(projectID string) ([]JobInfo, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list Dataflow jobs: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "dataflow.googleapis.com")
 	}
 
 	return jobs, nil

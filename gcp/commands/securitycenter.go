@@ -204,9 +204,9 @@ func (m *SecurityCenterModule) processProject(ctx context.Context, projectID str
 			break
 		}
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.ErrorM(fmt.Sprintf("Error listing findings for project %s: %v", projectID, err), GCP_SECURITYCENTER_MODULE_NAME)
-			}
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, GCP_SECURITYCENTER_MODULE_NAME,
+				fmt.Sprintf("Could not enumerate findings in project %s", projectID))
 			break
 		}
 

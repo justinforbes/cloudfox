@@ -130,9 +130,9 @@ func (m *LoggingGapsModule) processProject(ctx context.Context, projectID string
 	svc := logginggapsservice.New()
 	gaps, auditConfig, err := svc.EnumerateLoggingGaps(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error scanning project %s: %v", projectID, err), globals.GCP_LOGGINGGAPS_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_LOGGINGGAPS_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate logging gaps in project %s", projectID))
 		return
 	}
 

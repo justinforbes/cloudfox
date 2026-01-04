@@ -104,17 +104,17 @@ func (m *CloudBuildModule) processProject(ctx context.Context, projectID string,
 	// Get triggers
 	triggers, err := cbSvc.ListTriggers(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list triggers: %v", err), globals.GCP_CLOUDBUILD_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CLOUDBUILD_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate Cloud Build triggers in project %s", projectID))
 	}
 
 	// Get recent builds
 	builds, err := cbSvc.ListBuilds(projectID, 20)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list builds: %v", err), globals.GCP_CLOUDBUILD_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CLOUDBUILD_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate Cloud Build builds in project %s", projectID))
 	}
 
 	m.mu.Lock()

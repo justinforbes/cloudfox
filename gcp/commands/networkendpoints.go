@@ -124,25 +124,25 @@ func (m *NetworkEndpointsModule) processProject(ctx context.Context, projectID s
 	// Get PSC endpoints
 	pscEndpoints, err := svc.GetPrivateServiceConnectEndpoints(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting PSC endpoints for %s: %v", projectID, err), globals.GCP_NETWORKENDPOINTS_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_NETWORKENDPOINTS_MODULE_NAME,
+			fmt.Sprintf("Could not get PSC endpoints in project %s", projectID))
 	}
 
 	// Get private connections
 	privateConns, err := svc.GetPrivateConnections(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting private connections for %s: %v", projectID, err), globals.GCP_NETWORKENDPOINTS_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_NETWORKENDPOINTS_MODULE_NAME,
+			fmt.Sprintf("Could not get private connections in project %s", projectID))
 	}
 
 	// Get service attachments
 	attachments, err := svc.GetServiceAttachments(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting service attachments for %s: %v", projectID, err), globals.GCP_NETWORKENDPOINTS_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_NETWORKENDPOINTS_MODULE_NAME,
+			fmt.Sprintf("Could not get service attachments in project %s", projectID))
 	}
 
 	m.mu.Lock()

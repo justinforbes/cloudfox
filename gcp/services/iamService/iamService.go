@@ -8,11 +8,11 @@ import (
 
 	iampb "cloud.google.com/go/iam/apiv1/iampb"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
-	resourcemanagerpb "cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	cloudidentity "google.golang.org/api/cloudidentity/v1"
+	crmv1 "google.golang.org/api/cloudresourcemanager/v1"
 	iam "google.golang.org/api/iam/v1"
 	"google.golang.org/api/option"
 )
@@ -187,65 +187,41 @@ type CombinedIAMData struct {
 	InheritedRoles   []PolicyBinding       `json:"inheritedRoles"`
 }
 
-var logger internal.Logger
+var logger = internal.NewLogger()
 
 func (s *IAMService) projectAncestry(projectID string) ([]AncestryResource, error) {
 	ctx := context.Background()
-	var projectsClient *resourcemanager.ProjectsClient
-	var foldersClient *resourcemanager.FoldersClient
+
+	// Use the v1 GetAncestry API which only requires project-level read permissions
+	// This avoids needing resourcemanager.folders.get on each folder in the hierarchy
+	var crmService *crmv1.Service
 	var err error
 
 	if s.session != nil {
-		projectsClient, err = resourcemanager.NewProjectsClient(ctx, s.session.GetClientOption())
+		crmService, err = crmv1.NewService(ctx, s.session.GetClientOption())
 	} else {
-		projectsClient, err = resourcemanager.NewProjectsClient(ctx)
+		crmService, err = crmv1.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create projects client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
-	defer projectsClient.Close()
 
-	if s.session != nil {
-		foldersClient, err = resourcemanager.NewFoldersClient(ctx, s.session.GetClientOption())
-	} else {
-		foldersClient, err = resourcemanager.NewFoldersClient(ctx)
-	}
+	resp, err := crmService.Projects.GetAncestry(projectID, &crmv1.GetAncestryRequest{}).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create folders client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
-	defer foldersClient.Close()
 
-	resourceID := "projects/" + projectID
+	// GetAncestry returns ancestors from bottom to top (project first, then parent folders, then org)
+	// We need to reverse to get org -> folders -> project order
 	var ancestry []AncestryResource
-
-	for {
-		if strings.HasPrefix(resourceID, "organizations/") {
-			ancestry = append(ancestry, AncestryResource{Type: "organization", Id: strings.TrimPrefix(resourceID, "organizations/")})
-			break
-		} else if strings.HasPrefix(resourceID, "folders/") {
-			resp, err := foldersClient.GetFolder(ctx, &resourcemanagerpb.GetFolderRequest{Name: resourceID})
-			if err != nil {
-				logger.ErrorM(fmt.Sprintf("failed to access folder %s, %v", resourceID, err), globals.GCP_IAM_MODULE_NAME)
-				break // Stop processing further if a folder is inaccessible
-			}
-			ancestry = append(ancestry, AncestryResource{Type: "folder", Id: strings.TrimPrefix(resp.Name, "folders/")})
-			resourceID = resp.Parent
-		} else if strings.HasPrefix(resourceID, "projects/") {
-			resp, err := projectsClient.GetProject(ctx, &resourcemanagerpb.GetProjectRequest{Name: resourceID})
-			if err != nil {
-				logger.ErrorM(fmt.Sprintf("failed to access project %s, %v", resourceID, err), globals.GCP_IAM_MODULE_NAME)
-				return nil, fmt.Errorf("failed to get project: %v", err)
-			}
-			ancestry = append(ancestry, AncestryResource{Type: "project", Id: strings.TrimPrefix(resp.Name, "projects/")})
-			resourceID = resp.Parent
-		} else {
-			return nil, fmt.Errorf("unknown resource type for: %s", resourceID)
+	for i := len(resp.Ancestor) - 1; i >= 0; i-- {
+		ancestor := resp.Ancestor[i]
+		if ancestor.ResourceId != nil {
+			ancestry = append(ancestry, AncestryResource{
+				Type: ancestor.ResourceId.Type,
+				Id:   ancestor.ResourceId.Id,
+			})
 		}
-	}
-
-	// Reverse the slice as we've built it from child to ancestor
-	for i, j := 0, len(ancestry)-1; i < j; i, j = i+1, j-1 {
-		ancestry[i], ancestry[j] = ancestry[j], ancestry[i]
 	}
 
 	return ancestry, nil
@@ -263,7 +239,7 @@ func (s *IAMService) Policies(resourceID string, resourceType string) ([]PolicyB
 		client, err = resourcemanager.NewProjectsClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("resourcemanager.NewProjectsClient: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 	defer client.Close()
 
@@ -286,7 +262,7 @@ func (s *IAMService) Policies(resourceID string, resourceType string) ([]PolicyB
 	// Fetch the IAM policy for the resource
 	policy, err := client.GetIamPolicy(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("client.GetIamPolicy: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 
 	// Assemble the policy bindings
@@ -419,7 +395,7 @@ func (s *IAMService) ServiceAccounts(projectID string) ([]ServiceAccountInfo, er
 		iamService, err = iam.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	var serviceAccounts []ServiceAccountInfo
@@ -462,7 +438,7 @@ func (s *IAMService) ServiceAccounts(projectID string) ([]ServiceAccountInfo, er
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list service accounts: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	return serviceAccounts, nil
@@ -516,7 +492,7 @@ func (s *IAMService) CustomRoles(projectID string) ([]CustomRole, error) {
 		iamService, err = iam.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	var customRoles []CustomRole
@@ -844,7 +820,7 @@ func (s *IAMService) GetRolePermissions(ctx context.Context, roleName string) ([
 		iamService, err = iam.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	var permissions []string
@@ -854,21 +830,21 @@ func (s *IAMService) GetRolePermissions(ctx context.Context, roleName string) ([
 		// Predefined role
 		role, err := iamService.Roles.Get(roleName).Context(ctx).Do()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get role %s: %v", roleName, err)
+			return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 		}
 		permissions = role.IncludedPermissions
 	} else if strings.HasPrefix(roleName, "projects/") {
 		// Project-level custom role
 		role, err := iamService.Projects.Roles.Get(roleName).Context(ctx).Do()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get custom role %s: %v", roleName, err)
+			return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 		}
 		permissions = role.IncludedPermissions
 	} else if strings.HasPrefix(roleName, "organizations/") {
 		// Organization-level custom role
 		role, err := iamService.Organizations.Roles.Get(roleName).Context(ctx).Do()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get org custom role %s: %v", roleName, err)
+			return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 		}
 		permissions = role.IncludedPermissions
 	}
@@ -1003,7 +979,7 @@ func (s *IAMService) GetGroupMembership(ctx context.Context, groupEmail string) 
 		ciService, err = cloudidentity.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Identity service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudidentity.googleapis.com")
 	}
 
 	groupInfo := &GroupInfo{
@@ -1018,7 +994,7 @@ func (s *IAMService) GetGroupMembership(ctx context.Context, groupEmail string) 
 
 	lookupResp, err := lookupReq.Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to lookup group %s: %v", groupEmail, err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudidentity.googleapis.com")
 	}
 
 	groupName := lookupResp.Name
@@ -1026,7 +1002,7 @@ func (s *IAMService) GetGroupMembership(ctx context.Context, groupEmail string) 
 	// Get group details
 	group, err := ciService.Groups.Get(groupName).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get group details for %s: %v", groupEmail, err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudidentity.googleapis.com")
 	}
 
 	groupInfo.DisplayName = group.DisplayName
@@ -1061,7 +1037,7 @@ func (s *IAMService) GetGroupMembership(ctx context.Context, groupEmail string) 
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list memberships for group %s: %v", groupEmail, err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudidentity.googleapis.com")
 	}
 
 	groupInfo.MemberCount = len(groupInfo.Members)
@@ -1264,14 +1240,14 @@ func (s *IAMService) GetServiceAccountIAMPolicy(ctx context.Context, saEmail str
 		iamService, err = iam.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	saResource := fmt.Sprintf("projects/%s/serviceAccounts/%s", projectID, saEmail)
 
 	policy, err := iamService.Projects.ServiceAccounts.GetIamPolicy(saResource).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get IAM policy for SA %s: %v", saEmail, err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	info := &SAImpersonationInfo{

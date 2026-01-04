@@ -92,9 +92,9 @@ func (m *LoadBalancersModule) processProject(ctx context.Context, projectID stri
 	// Get load balancers
 	lbs, err := svc.ListLoadBalancers(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list load balancers: %v", err), globals.GCP_LOADBALANCERS_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_LOADBALANCERS_MODULE_NAME,
+			fmt.Sprintf("Could not list load balancers in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.LoadBalancers = append(m.LoadBalancers, lbs...)

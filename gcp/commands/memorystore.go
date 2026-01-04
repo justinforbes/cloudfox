@@ -87,9 +87,9 @@ func (m *MemorystoreModule) processProject(ctx context.Context, projectID string
 	svc := memorystoreservice.New()
 	instances, err := svc.ListRedisInstances(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list Redis instances: %v", err), globals.GCP_MEMORYSTORE_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_MEMORYSTORE_MODULE_NAME,
+			fmt.Sprintf("Could not list Redis instances in project %s", projectID))
 		return
 	}
 

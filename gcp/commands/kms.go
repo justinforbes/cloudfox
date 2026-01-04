@@ -137,9 +137,8 @@ func (m *KMSModule) processProject(ctx context.Context, projectID string, logger
 	keyRings, err := ks.KeyRings(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating KMS key rings in project %s: %v", projectID, err), globals.GCP_KMS_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_KMS_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate KMS key rings in project %s", projectID))
 		return
 	}
 
@@ -151,9 +150,8 @@ func (m *KMSModule) processProject(ctx context.Context, projectID string, logger
 	keys, err := ks.CryptoKeys(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating KMS keys in project %s: %v", projectID, err), globals.GCP_KMS_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_KMS_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate KMS keys in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.CryptoKeys = append(m.CryptoKeys, keys...)

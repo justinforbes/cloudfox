@@ -90,9 +90,9 @@ func (m *NotebooksModule) processProject(ctx context.Context, projectID string, 
 	// Get instances
 	instances, err := svc.ListInstances(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list notebook instances: %v", err), globals.GCP_NOTEBOOKS_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_NOTEBOOKS_MODULE_NAME,
+			fmt.Sprintf("Could not list notebook instances in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.Instances = append(m.Instances, instances...)

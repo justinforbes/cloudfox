@@ -89,7 +89,7 @@ func (s *VPCSCService) ListAccessPolicies(orgID string) ([]AccessPolicyInfo, err
 		service, err = accesscontextmanager.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Access Context Manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	var policies []AccessPolicyInfo
@@ -110,7 +110,7 @@ func (s *VPCSCService) ListAccessPolicies(orgID string) ([]AccessPolicyInfo, err
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list access policies: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	return policies, nil
@@ -128,7 +128,7 @@ func (s *VPCSCService) ListServicePerimeters(policyName string) ([]ServicePerime
 		service, err = accesscontextmanager.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Access Context Manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	var perimeters []ServicePerimeterInfo
@@ -143,7 +143,7 @@ func (s *VPCSCService) ListServicePerimeters(policyName string) ([]ServicePerime
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list service perimeters: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	return perimeters, nil
@@ -161,7 +161,7 @@ func (s *VPCSCService) ListAccessLevels(policyName string) ([]AccessLevelInfo, e
 		service, err = accesscontextmanager.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Access Context Manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	var levels []AccessLevelInfo
@@ -176,7 +176,7 @@ func (s *VPCSCService) ListAccessLevels(policyName string) ([]AccessLevelInfo, e
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list access levels: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
 
 	return levels, nil

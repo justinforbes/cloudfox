@@ -73,9 +73,9 @@ func (m *SpannerModule) processProject(ctx context.Context, projectID string, lo
 	svc := spannerservice.New()
 	instances, err := svc.ListInstances(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list Spanner instances: %v", err), globals.GCP_SPANNER_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_SPANNER_MODULE_NAME,
+			fmt.Sprintf("Could not list Spanner instances in project %s", projectID))
 		return
 	}
 

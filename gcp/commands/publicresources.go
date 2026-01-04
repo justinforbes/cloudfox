@@ -124,9 +124,9 @@ func (m *PublicResourcesModule) processProject(ctx context.Context, projectID st
 	svc := publicresourcesservice.New()
 	resources, err := svc.EnumeratePublicResources(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error scanning project %s: %v", projectID, err), globals.GCP_PUBLICRESOURCES_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_PUBLICRESOURCES_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate public resources in project %s", projectID))
 		return
 	}
 

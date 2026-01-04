@@ -82,7 +82,7 @@ func (s *NotebooksService) ListInstances(projectID string) ([]NotebookInstanceIn
 		service, err = notebooks.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Notebooks service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "notebooks.googleapis.com")
 	}
 
 	var instances []NotebookInstanceInfo
@@ -98,7 +98,7 @@ func (s *NotebooksService) ListInstances(projectID string) ([]NotebookInstanceIn
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list notebook instances: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "notebooks.googleapis.com")
 	}
 
 	return instances, nil
@@ -116,7 +116,7 @@ func (s *NotebooksService) ListRuntimes(projectID string) ([]RuntimeInfo, error)
 		service, err = notebooks.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Notebooks service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "notebooks.googleapis.com")
 	}
 
 	var runtimes []RuntimeInfo

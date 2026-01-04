@@ -187,9 +187,9 @@ func (m *NetworkExposureModule) processProject(ctx context.Context, projectID st
 func (m *NetworkExposureModule) findExposedInstances(ctx context.Context, projectID string, logger internal.Logger) {
 	computeService, err := compute.NewService(ctx)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error creating Compute service: %v", err), GCP_NETWORKEXPOSURE_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKEXPOSURE_MODULE_NAME,
+			fmt.Sprintf("Could not create Compute service in project %s", projectID))
 		return
 	}
 
@@ -237,9 +237,9 @@ func (m *NetworkExposureModule) findExposedInstances(ctx context.Context, projec
 	})
 
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing instances: %v", err), GCP_NETWORKEXPOSURE_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKEXPOSURE_MODULE_NAME,
+			fmt.Sprintf("Could not list instances in project %s", projectID))
 	}
 }
 
@@ -285,8 +285,10 @@ func (m *NetworkExposureModule) findExposedLoadBalancers(ctx context.Context, pr
 		return nil
 	})
 
-	if err != nil && globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.ErrorM(fmt.Sprintf("Error listing forwarding rules: %v", err), GCP_NETWORKEXPOSURE_MODULE_NAME)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKEXPOSURE_MODULE_NAME,
+			fmt.Sprintf("Could not list forwarding rules in project %s", projectID))
 	}
 }
 
@@ -294,9 +296,9 @@ func (m *NetworkExposureModule) findExposedLoadBalancers(ctx context.Context, pr
 func (m *NetworkExposureModule) findExposedCloudRun(ctx context.Context, projectID string, logger internal.Logger) {
 	runService, err := run.NewService(ctx)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error creating Cloud Run service: %v", err), GCP_NETWORKEXPOSURE_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKEXPOSURE_MODULE_NAME,
+			fmt.Sprintf("Could not create Cloud Run service in project %s", projectID))
 		return
 	}
 
@@ -304,9 +306,9 @@ func (m *NetworkExposureModule) findExposedCloudRun(ctx context.Context, project
 	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
 	resp, err := runService.Projects.Locations.Services.List(parent).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing Cloud Run services: %v", err), GCP_NETWORKEXPOSURE_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKEXPOSURE_MODULE_NAME,
+			fmt.Sprintf("Could not list Cloud Run services in project %s", projectID))
 		return
 	}
 
@@ -403,8 +405,10 @@ func (m *NetworkExposureModule) analyzeFirewallExposure(ctx context.Context, pro
 		return nil
 	})
 
-	if err != nil && globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.ErrorM(fmt.Sprintf("Error listing firewall rules: %v", err), GCP_NETWORKEXPOSURE_MODULE_NAME)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_NETWORKEXPOSURE_MODULE_NAME,
+			fmt.Sprintf("Could not list firewall rules in project %s", projectID))
 	}
 }
 

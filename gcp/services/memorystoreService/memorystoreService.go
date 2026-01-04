@@ -55,7 +55,7 @@ func (s *MemorystoreService) ListRedisInstances(projectID string) ([]RedisInstan
 		service, err = redis.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Redis service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "redis.googleapis.com")
 	}
 
 	var instances []RedisInstanceInfo
@@ -70,7 +70,7 @@ func (s *MemorystoreService) ListRedisInstances(projectID string) ([]RedisInstan
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list Redis instances: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "redis.googleapis.com")
 	}
 
 	return instances, nil

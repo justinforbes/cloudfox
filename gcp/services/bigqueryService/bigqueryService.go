@@ -148,7 +148,7 @@ func (bq *BigQueryService) BigqueryDatasets(projectID string) ([]BigqueryDataset
 		client, err = bigquery.NewClient(ctx, projectID)
 	}
 	if err != nil {
-		return nil, err
+		return nil, gcpinternal.ParseGCPError(err, "bigquery.googleapis.com")
 	}
 	defer client.Close()
 
@@ -160,11 +160,11 @@ func (bq *BigQueryService) BigqueryDatasets(projectID string) ([]BigqueryDataset
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "bigquery.googleapis.com")
 		}
 		meta, err := ds.Metadata(ctx)
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "bigquery.googleapis.com")
 		}
 
 		dataset := BigqueryDataset{
@@ -298,7 +298,7 @@ func (bq *BigQueryService) BigqueryTables(projectID string, datasetID string) ([
 		client, err = bigquery.NewClient(ctx, projectID)
 	}
 	if err != nil {
-		return nil, err
+		return nil, gcpinternal.ParseGCPError(err, "bigquery.googleapis.com")
 	}
 	defer client.Close()
 
@@ -311,11 +311,11 @@ func (bq *BigQueryService) BigqueryTables(projectID string, datasetID string) ([
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "bigquery.googleapis.com")
 		}
 		meta, err := table.Metadata(ctx)
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "bigquery.googleapis.com")
 		}
 
 		tbl := BigqueryTable{

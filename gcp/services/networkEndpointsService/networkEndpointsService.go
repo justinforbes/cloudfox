@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	compute "google.golang.org/api/compute/v1"
 	servicenetworking "google.golang.org/api/servicenetworking/v1"
 )
@@ -65,7 +66,7 @@ func (s *NetworkEndpointsService) GetPrivateServiceConnectEndpoints(projectID st
 	ctx := context.Background()
 	service, err := compute.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var endpoints []PrivateServiceConnectEndpoint
@@ -140,7 +141,7 @@ func (s *NetworkEndpointsService) GetPrivateConnections(projectID string) ([]Pri
 	ctx := context.Background()
 	service, err := servicenetworking.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create service networking service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "servicenetworking.googleapis.com")
 	}
 
 	var connections []PrivateConnection
@@ -195,7 +196,7 @@ func (s *NetworkEndpointsService) GetServiceAttachments(projectID string) ([]Ser
 	ctx := context.Background()
 	service, err := compute.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var attachments []ServiceAttachment

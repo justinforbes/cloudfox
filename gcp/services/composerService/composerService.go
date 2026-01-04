@@ -67,7 +67,7 @@ func (s *ComposerService) ListEnvironments(projectID string) ([]EnvironmentInfo,
 		service, err = composer.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Composer service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "composer.googleapis.com")
 	}
 
 	var environments []EnvironmentInfo
@@ -83,7 +83,7 @@ func (s *ComposerService) ListEnvironments(projectID string) ([]EnvironmentInfo,
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list Composer environments: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "composer.googleapis.com")
 	}
 
 	return environments, nil

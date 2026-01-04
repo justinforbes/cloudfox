@@ -123,9 +123,9 @@ func (m *CustomRolesModule) processProject(ctx context.Context, projectID string
 
 	roles, err := svc.ListCustomRoles(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list custom roles in project %s: %v", projectID, err), globals.GCP_CUSTOMROLES_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CUSTOMROLES_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate custom roles in project %s", projectID))
 		return
 	}
 

@@ -2,6 +2,7 @@ package gcpinternal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,7 +10,89 @@ import (
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	"github.com/spf13/cobra"
+	"google.golang.org/api/googleapi"
 )
+
+// ------------------------------
+// Common GCP API Error Types
+// ------------------------------
+var (
+	ErrAPINotEnabled    = errors.New("API not enabled")
+	ErrPermissionDenied = errors.New("permission denied")
+	ErrNotFound         = errors.New("resource not found")
+)
+
+// ParseGCPError converts GCP API errors into cleaner, standardized error types
+// This should be used by all GCP service modules for consistent error handling
+func ParseGCPError(err error, apiName string) error {
+	if err == nil {
+		return nil
+	}
+
+	var googleErr *googleapi.Error
+	if errors.As(err, &googleErr) {
+		errStr := googleErr.Error()
+
+		switch googleErr.Code {
+		case 403:
+			// Check for SERVICE_DISABLED first - this is usually the root cause
+			if strings.Contains(errStr, "SERVICE_DISABLED") {
+				return fmt.Errorf("%w: %s", ErrAPINotEnabled, apiName)
+			}
+			// Permission denied
+			if strings.Contains(errStr, "PERMISSION_DENIED") ||
+				strings.Contains(errStr, "does not have") ||
+				strings.Contains(errStr, "permission") {
+				return ErrPermissionDenied
+			}
+			// Generic 403
+			return ErrPermissionDenied
+
+		case 404:
+			return ErrNotFound
+
+		case 400:
+			return fmt.Errorf("bad request: %s", googleErr.Message)
+
+		case 429:
+			return fmt.Errorf("rate limited - too many requests")
+
+		case 500, 502, 503, 504:
+			return fmt.Errorf("GCP service error (code %d)", googleErr.Code)
+		}
+
+		// Default: return cleaner error message
+		return fmt.Errorf("API error (code %d): %s", googleErr.Code, googleErr.Message)
+	}
+
+	return err
+}
+
+// HandleGCPError logs an appropriate message for a GCP API error and returns true if execution should continue
+// Returns false if the error is fatal and the caller should stop processing
+func HandleGCPError(err error, logger internal.Logger, moduleName string, resourceDesc string) bool {
+	if err == nil {
+		return true // No error, continue
+	}
+
+	switch {
+	case errors.Is(err, ErrAPINotEnabled):
+		logger.ErrorM(fmt.Sprintf("%s - API not enabled", resourceDesc), moduleName)
+		return false // Can't continue without API enabled
+
+	case errors.Is(err, ErrPermissionDenied):
+		logger.ErrorM(fmt.Sprintf("%s - permission denied", resourceDesc), moduleName)
+		return true // Can continue with other resources
+
+	case errors.Is(err, ErrNotFound):
+		// Not found is often expected, don't log as error
+		return true
+
+	default:
+		logger.ErrorM(fmt.Sprintf("%s: %v", resourceDesc, err), moduleName)
+		return true // Continue with other resources
+	}
+}
 
 // ------------------------------
 // CommandContext holds all common initialization data for GCP commands

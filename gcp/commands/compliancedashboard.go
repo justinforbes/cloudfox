@@ -250,9 +250,8 @@ func (m *ComplianceDashboardModule) Execute(ctx context.Context, logger internal
 func (m *ComplianceDashboardModule) gatherSCCFindings(ctx context.Context, logger internal.Logger) {
 	client, err := securitycenter.NewClient(ctx)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Failed to create Security Command Center client: %v", err), GCP_COMPLIANCEDASHBOARD_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, GCP_COMPLIANCEDASHBOARD_MODULE_NAME,
+			"Could not create Security Command Center client")
 		return
 	}
 	defer client.Close()
@@ -292,9 +291,8 @@ func (m *ComplianceDashboardModule) gatherSCCFindings(ctx context.Context, logge
 func (m *ComplianceDashboardModule) gatherOrgPolicies(ctx context.Context, logger internal.Logger) {
 	crmService, err := cloudresourcemanager.NewService(ctx)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Failed to create Resource Manager client: %v", err), GCP_COMPLIANCEDASHBOARD_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, GCP_COMPLIANCEDASHBOARD_MODULE_NAME,
+			"Could not create Resource Manager client")
 		return
 	}
 
@@ -1817,7 +1815,8 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 		output,
 	)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), GCP_COMPLIANCEDASHBOARD_MODULE_NAME)
 		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_COMPLIANCEDASHBOARD_MODULE_NAME,
+			"Could not write output")
 	}
 }

@@ -38,7 +38,7 @@ func (s *BigtableService) ListInstances(projectID string) ([]BigtableInstanceInf
 	ctx := context.Background()
 	service, err := bigtableadmin.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Bigtable Admin service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "bigtableadmin.googleapis.com")
 	}
 
 	var instances []BigtableInstanceInfo
@@ -46,7 +46,7 @@ func (s *BigtableService) ListInstances(projectID string) ([]BigtableInstanceInf
 
 	resp, err := service.Projects.Instances.List(parent).Context(ctx).Do()
 	if err != nil {
-		return nil, err
+		return nil, gcpinternal.ParseGCPError(err, "bigtableadmin.googleapis.com")
 	}
 
 	for _, instance := range resp.Instances {

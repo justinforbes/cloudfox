@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	container "google.golang.org/api/container/v1"
 )
 
@@ -123,7 +124,7 @@ func (gs *GKEService) Clusters(projectID string) ([]ClusterInfo, []NodePoolInfo,
 
 	service, err := container.NewService(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create GKE service: %v", err)
+		return nil, nil, gcpinternal.ParseGCPError(err, "container.googleapis.com")
 	}
 
 	// List clusters across all locations
@@ -131,7 +132,7 @@ func (gs *GKEService) Clusters(projectID string) ([]ClusterInfo, []NodePoolInfo,
 
 	resp, err := service.Projects.Locations.Clusters.List(parent).Do()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to list clusters: %v", err)
+		return nil, nil, gcpinternal.ParseGCPError(err, "container.googleapis.com")
 	}
 
 	var clusters []ClusterInfo

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	logging "google.golang.org/api/logging/v2"
 )
 
@@ -67,7 +68,7 @@ func (ls *LoggingService) Sinks(projectID string) ([]SinkInfo, error) {
 
 	service, err := logging.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Logging service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "logging.googleapis.com")
 	}
 
 	var sinks []SinkInfo
@@ -83,7 +84,7 @@ func (ls *LoggingService) Sinks(projectID string) ([]SinkInfo, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list sinks: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "logging.googleapis.com")
 	}
 
 	return sinks, nil
@@ -95,7 +96,7 @@ func (ls *LoggingService) Metrics(projectID string) ([]MetricInfo, error) {
 
 	service, err := logging.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Logging service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "logging.googleapis.com")
 	}
 
 	var metrics []MetricInfo
@@ -111,7 +112,7 @@ func (ls *LoggingService) Metrics(projectID string) ([]MetricInfo, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list metrics: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "logging.googleapis.com")
 	}
 
 	return metrics, nil

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	sourcerepo "google.golang.org/api/sourcerepo/v1"
 )
 
@@ -33,7 +34,7 @@ func (s *SourceReposService) ListRepos(projectID string) ([]RepoInfo, error) {
 	ctx := context.Background()
 	service, err := sourcerepo.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Source Repo service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "sourcerepo.googleapis.com")
 	}
 
 	var repos []RepoInfo
@@ -41,7 +42,7 @@ func (s *SourceReposService) ListRepos(projectID string) ([]RepoInfo, error) {
 	parent := fmt.Sprintf("projects/%s", projectID)
 	resp, err := service.Projects.Repos.List(parent).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list repos: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "sourcerepo.googleapis.com")
 	}
 
 	for _, repo := range resp.Repos {

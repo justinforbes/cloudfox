@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	cloudfunctions "google.golang.org/api/cloudfunctions/v2"
 )
 
@@ -92,7 +93,7 @@ func (fs *FunctionsService) Functions(projectID string) ([]FunctionInfo, error) 
 
 	service, err := cloudfunctions.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Functions service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudfunctions.googleapis.com")
 	}
 
 	var functions []FunctionInfo
@@ -117,7 +118,7 @@ func (fs *FunctionsService) Functions(projectID string) ([]FunctionInfo, error) 
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list functions: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudfunctions.googleapis.com")
 	}
 
 	return functions, nil

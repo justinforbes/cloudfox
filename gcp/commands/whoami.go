@@ -13,7 +13,9 @@ import (
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/spf13/cobra"
 
+	cloudidentity "google.golang.org/api/cloudidentity/v1"
 	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v1"
+	crmv3 "google.golang.org/api/cloudresourcemanager/v3"
 )
 
 // Flag for extended enumeration
@@ -46,12 +48,20 @@ func init() {
 // ------------------------------
 
 type IdentityContext struct {
-	Email         string
-	Type          string // "user" or "serviceAccount"
-	UniqueID      string
-	ProjectIDs    []string
-	Organizations []OrgInfo
-	Folders       []FolderInfo
+	Email             string
+	Type              string // "user" or "serviceAccount"
+	UniqueID          string
+	ProjectIDs        []string      // Keep for backward compatibility
+	Projects          []ProjectInfo // New: stores project ID and display name
+	Organizations     []OrgInfo
+	Folders           []FolderInfo
+	Groups            []GroupMembership // Groups the identity is a member of
+	GroupsEnumerated  bool              // Whether group enumeration was successful
+}
+
+type ProjectInfo struct {
+	ProjectID   string
+	DisplayName string
 }
 
 type OrgInfo struct {
@@ -66,12 +76,19 @@ type FolderInfo struct {
 	Parent      string
 }
 
+type GroupMembership struct {
+	GroupID     string // e.g., "groups/abc123"
+	Email       string // e.g., "security-team@example.com"
+	DisplayName string // e.g., "Security Team"
+}
+
 type RoleBinding struct {
-	Role      string
-	Scope     string // "organization", "folder", "project"
-	ScopeID   string
-	Inherited bool
-	Condition string
+	Role         string
+	Scope        string // "organization", "folder", "project"
+	ScopeID      string
+	ScopeName    string // Display name of the scope resource
+	Inherited    bool
+	Condition    string
 }
 
 type ImpersonationTarget struct {
@@ -179,7 +196,10 @@ func (m *WhoAmIModule) Execute(ctx context.Context, logger internal.Logger) {
 	// Step 2: Get organization context (always run)
 	m.getOrganizationContext(ctx, logger)
 
-	// Step 3: Get role bindings across projects (always run)
+	// Step 3: Get group memberships for the current identity
+	m.getGroupMemberships(ctx, logger)
+
+	// Step 4: Get role bindings across projects (always run)
 	m.getRoleBindings(ctx, logger)
 
 	// Extended mode: Additional enumeration
@@ -200,22 +220,42 @@ func (m *WhoAmIModule) Execute(ctx context.Context, logger internal.Logger) {
 
 // getOrganizationContext retrieves organization and folder hierarchy
 func (m *WhoAmIModule) getOrganizationContext(ctx context.Context, logger internal.Logger) {
-	// Create resource manager client
+	// Create resource manager clients
 	crmService, err := cloudresourcemanager.NewService(ctx)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error creating CRM client: %v", err), globals.GCP_WHOAMI_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME,
+			"Could not create Cloud Resource Manager client")
 		return
+	}
+
+	// Create v3 client for fetching folder details
+	crmv3Service, err := crmv3.NewService(ctx)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME,
+			"Could not create Cloud Resource Manager v3 client")
+		// Continue without v3, we just won't get display names for folders
 	}
 
 	// Get project ancestry for each project
 	for _, projectID := range m.ProjectIDs {
+		// Fetch project details to get display name
+		projectInfo := ProjectInfo{
+			ProjectID: projectID,
+		}
+		project, err := crmService.Projects.Get(projectID).Do()
+		if err == nil && project != nil {
+			projectInfo.DisplayName = project.Name
+		}
+		m.Identity.Projects = append(m.Identity.Projects, projectInfo)
+
+		// Get ancestry
 		resp, err := crmService.Projects.GetAncestry(projectID, &cloudresourcemanager.GetAncestryRequest{}).Do()
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.ErrorM(fmt.Sprintf("Error getting ancestry for project %s: %v", projectID, err), globals.GCP_WHOAMI_MODULE_NAME)
-			}
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME,
+				fmt.Sprintf("Could not get ancestry for project %s", projectID))
 			continue
 		}
 
@@ -225,6 +265,11 @@ func (m *WhoAmIModule) getOrganizationContext(ctx context.Context, logger intern
 				orgInfo := OrgInfo{
 					OrgID: ancestor.ResourceId.Id,
 					Name:  fmt.Sprintf("organizations/%s", ancestor.ResourceId.Id),
+				}
+				// Try to get display name for organization
+				org, err := crmService.Organizations.Get(orgInfo.Name).Do()
+				if err == nil && org != nil {
+					orgInfo.DisplayName = org.DisplayName
 				}
 				// Check if already added
 				exists := false
@@ -238,8 +283,17 @@ func (m *WhoAmIModule) getOrganizationContext(ctx context.Context, logger intern
 					m.Identity.Organizations = append(m.Identity.Organizations, orgInfo)
 				}
 			case "folder":
+				folderName := fmt.Sprintf("folders/%s", ancestor.ResourceId.Id)
 				folderInfo := FolderInfo{
-					Name: fmt.Sprintf("folders/%s", ancestor.ResourceId.Id),
+					Name: folderName,
+				}
+				// Try to get display name for folder using v3 API
+				if crmv3Service != nil {
+					folder, err := crmv3Service.Folders.Get(folderName).Do()
+					if err == nil && folder != nil {
+						folderInfo.DisplayName = folder.DisplayName
+						folderInfo.Parent = folder.Parent
+					}
 				}
 				// Check if already added
 				exists := false
@@ -261,6 +315,54 @@ func (m *WhoAmIModule) getOrganizationContext(ctx context.Context, logger intern
 	}
 }
 
+// getGroupMemberships retrieves the groups that the current identity is a member of
+func (m *WhoAmIModule) getGroupMemberships(ctx context.Context, logger internal.Logger) {
+	// Only applicable for user identities (not service accounts)
+	if m.Identity.Type != "user" {
+		m.Identity.GroupsEnumerated = true // N/A for service accounts
+		return
+	}
+
+	ciService, err := cloudidentity.NewService(ctx)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME,
+			"Could not create Cloud Identity client")
+		// GroupsEnumerated stays false - will show "Unknown"
+		return
+	}
+
+	// Search for groups that the user is a direct member of
+	// The parent must be "groups/-" to search across all groups
+	query := fmt.Sprintf("member_key_id == '%s'", m.Identity.Email)
+	resp, err := ciService.Groups.Memberships.SearchDirectGroups("groups/-").Query(query).Do()
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME,
+			"Could not fetch group memberships")
+		// GroupsEnumerated stays false - will show "Unknown"
+		return
+	}
+
+	// Successfully enumerated groups
+	m.Identity.GroupsEnumerated = true
+
+	for _, membership := range resp.Memberships {
+		group := GroupMembership{
+			GroupID:     membership.Group,
+			DisplayName: membership.DisplayName,
+		}
+		if membership.GroupKey != nil {
+			group.Email = membership.GroupKey.Id
+		}
+		m.Identity.Groups = append(m.Identity.Groups, group)
+	}
+
+	if len(m.Identity.Groups) > 0 {
+		logger.InfoM(fmt.Sprintf("Found %d group membership(s)", len(m.Identity.Groups)), globals.GCP_WHOAMI_MODULE_NAME)
+	}
+}
+
 // getRoleBindings retrieves IAM role bindings for the current identity
 func (m *WhoAmIModule) getRoleBindings(ctx context.Context, logger internal.Logger) {
 	iamService := IAMService.New()
@@ -279,9 +381,9 @@ func (m *WhoAmIModule) getRoleBindings(ctx context.Context, logger internal.Logg
 		// Use PrincipalsWithRolesEnhanced which includes inheritance
 		principals, err := iamService.PrincipalsWithRolesEnhanced(projectID)
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.ErrorM(fmt.Sprintf("Error getting IAM bindings for project %s: %v", projectID, err), globals.GCP_WHOAMI_MODULE_NAME)
-			}
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME,
+				fmt.Sprintf("Could not get IAM bindings for project %s", projectID))
 			continue
 		}
 
@@ -504,16 +606,10 @@ func getPrivEscPathsForRole(role, projectID string) []PrivilegeEscalationPath {
 // Loot File Management
 // ------------------------------
 func (m *WhoAmIModule) initializeLootFiles() {
-	m.LootMap["whoami-context"] = &internal.LootFile{
-		Name:     "whoami-context",
-		Contents: "# GCP Identity Context\n# Generated by CloudFox\n\n",
-	}
-	m.LootMap["whoami-permissions"] = &internal.LootFile{
-		Name:     "whoami-permissions",
-		Contents: "# Current Identity Permissions\n# Generated by CloudFox\n\n",
-	}
+	// Note: whoami-context and whoami-permissions loot files removed as redundant
+	// The same information is already saved to table/csv/json files
 
-	// Extended mode loot files
+	// Extended mode loot files - these contain actionable commands
 	if m.Extended {
 		m.LootMap["whoami-impersonation"] = &internal.LootFile{
 			Name:     "whoami-impersonation",
@@ -527,29 +623,8 @@ func (m *WhoAmIModule) initializeLootFiles() {
 }
 
 func (m *WhoAmIModule) generateLoot() {
-	// Context loot
-	m.LootMap["whoami-context"].Contents += fmt.Sprintf(
-		"Identity: %s\n"+
-			"Type: %s\n"+
-			"Projects: %s\n"+
-			"Organizations: %d\n"+
-			"Folders: %d\n\n",
-		m.Identity.Email,
-		m.Identity.Type,
-		strings.Join(m.Identity.ProjectIDs, ", "),
-		len(m.Identity.Organizations),
-		len(m.Identity.Folders),
-	)
-
-	// Permissions loot
-	for _, rb := range m.RoleBindings {
-		m.LootMap["whoami-permissions"].Contents += fmt.Sprintf(
-			"%s on %s/%s\n",
-			rb.Role,
-			rb.Scope,
-			rb.ScopeID,
-		)
-	}
+	// Note: Context and permissions info is already saved to table/csv/json files
+	// Only generate loot files for extended mode (actionable commands)
 
 	// Extended mode loot
 	if m.Extended {
@@ -604,10 +679,100 @@ func (m *WhoAmIModule) writeOutput(ctx context.Context, logger internal.Logger) 
 	identityBody := [][]string{
 		{"Email", m.Identity.Email},
 		{"Type", m.Identity.Type},
-		{"Projects", strings.Join(m.Identity.ProjectIDs, ", ")},
-		{"Organizations", fmt.Sprintf("%d", len(m.Identity.Organizations))},
-		{"Folders", fmt.Sprintf("%d", len(m.Identity.Folders))},
-		{"Role Bindings", fmt.Sprintf("%d", len(m.RoleBindings))},
+	}
+
+	// Add project details (expanded)
+	for i, proj := range m.Identity.Projects {
+		label := "Project"
+		if len(m.Identity.Projects) > 1 {
+			label = fmt.Sprintf("Project %d", i+1)
+		}
+		if proj.DisplayName != "" {
+			identityBody = append(identityBody, []string{label, fmt.Sprintf("%s (%s)", proj.DisplayName, proj.ProjectID)})
+		} else {
+			identityBody = append(identityBody, []string{label, proj.ProjectID})
+		}
+	}
+	if len(m.Identity.Projects) == 0 {
+		identityBody = append(identityBody, []string{"Projects", "0"})
+	}
+
+	// Add organization details (expanded)
+	for i, org := range m.Identity.Organizations {
+		label := "Organization"
+		if len(m.Identity.Organizations) > 1 {
+			label = fmt.Sprintf("Organization %d", i+1)
+		}
+		if org.DisplayName != "" {
+			identityBody = append(identityBody, []string{label, fmt.Sprintf("%s (%s)", org.DisplayName, org.OrgID)})
+		} else {
+			identityBody = append(identityBody, []string{label, org.OrgID})
+		}
+	}
+	if len(m.Identity.Organizations) == 0 {
+		identityBody = append(identityBody, []string{"Organizations", "0"})
+	}
+
+	// Add folder details (expanded)
+	for i, folder := range m.Identity.Folders {
+		label := "Folder"
+		if len(m.Identity.Folders) > 1 {
+			label = fmt.Sprintf("Folder %d", i+1)
+		}
+		folderID := strings.TrimPrefix(folder.Name, "folders/")
+		if folder.DisplayName != "" {
+			identityBody = append(identityBody, []string{label, fmt.Sprintf("%s (%s)", folder.DisplayName, folderID)})
+		} else {
+			identityBody = append(identityBody, []string{label, folderID})
+		}
+	}
+	if len(m.Identity.Folders) == 0 {
+		identityBody = append(identityBody, []string{"Folders", "0"})
+	}
+
+	// Add group membership details (expanded)
+	for i, group := range m.Identity.Groups {
+		label := "Group"
+		if len(m.Identity.Groups) > 1 {
+			label = fmt.Sprintf("Group %d", i+1)
+		}
+		if group.DisplayName != "" && group.Email != "" {
+			identityBody = append(identityBody, []string{label, fmt.Sprintf("%s (%s)", group.DisplayName, group.Email)})
+		} else if group.Email != "" {
+			identityBody = append(identityBody, []string{label, group.Email})
+		} else if group.DisplayName != "" {
+			identityBody = append(identityBody, []string{label, group.DisplayName})
+		} else {
+			identityBody = append(identityBody, []string{label, group.GroupID})
+		}
+	}
+	if len(m.Identity.Groups) == 0 {
+		if m.Identity.GroupsEnumerated {
+			identityBody = append(identityBody, []string{"Groups", "0"})
+		} else {
+			identityBody = append(identityBody, []string{"Groups", "Unknown (permission denied)"})
+		}
+	}
+
+	// Add role binding details (expanded)
+	for i, rb := range m.RoleBindings {
+		label := "Role Binding"
+		if len(m.RoleBindings) > 1 {
+			label = fmt.Sprintf("Role Binding %d", i+1)
+		}
+		// Format: Role -> Scope (ScopeID)
+		scopeDisplay := rb.ScopeID
+		if rb.ScopeName != "" {
+			scopeDisplay = fmt.Sprintf("%s (%s)", rb.ScopeName, rb.ScopeID)
+		}
+		inheritedStr := ""
+		if rb.Inherited {
+			inheritedStr = " [inherited]"
+		}
+		identityBody = append(identityBody, []string{label, fmt.Sprintf("%s on %s/%s%s", rb.Role, rb.Scope, scopeDisplay, inheritedStr)})
+	}
+	if len(m.RoleBindings) == 0 {
+		identityBody = append(identityBody, []string{"Role Bindings", "0"})
 	}
 
 	// Add extended info to identity table

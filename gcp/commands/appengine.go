@@ -233,11 +233,11 @@ func (m *AppEngineModule) processProject(ctx context.Context, projectID string, 
 	// Get App Engine application
 	app, err := aeService.Apps.Get(projectID).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			// App Engine not enabled is common, don't show as error
-			if !strings.Contains(err.Error(), "404") {
-				logger.ErrorM(fmt.Sprintf("Error getting App Engine app for project %s: %v", projectID, err), GCP_APPENGINE_MODULE_NAME)
-			}
+		// App Engine not enabled is common, don't show as error
+		if !strings.Contains(err.Error(), "404") {
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, GCP_APPENGINE_MODULE_NAME,
+				fmt.Sprintf("Could not get App Engine app in project %s", projectID))
 		}
 		return
 	}
@@ -276,9 +276,9 @@ func (m *AppEngineModule) processProject(ctx context.Context, projectID string, 
 func (m *AppEngineModule) enumerateServices(ctx context.Context, projectID string, aeService *appengine.APIService, logger internal.Logger) {
 	services, err := aeService.Apps.Services.List(projectID).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing App Engine services for project %s: %v", projectID, err), GCP_APPENGINE_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_APPENGINE_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate App Engine services in project %s", projectID))
 		return
 	}
 
@@ -316,9 +316,9 @@ func (m *AppEngineModule) enumerateServices(ctx context.Context, projectID strin
 func (m *AppEngineModule) enumerateVersions(ctx context.Context, projectID, serviceID, ingressSettings string, aeService *appengine.APIService, logger internal.Logger) {
 	versions, err := aeService.Apps.Services.Versions.List(projectID, serviceID).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing App Engine versions for service %s: %v", serviceID, err), GCP_APPENGINE_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_APPENGINE_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate App Engine versions for service %s", serviceID))
 		return
 	}
 
@@ -444,9 +444,9 @@ func (m *AppEngineModule) enumerateVersions(ctx context.Context, projectID, serv
 func (m *AppEngineModule) enumerateFirewallRules(ctx context.Context, projectID string, aeService *appengine.APIService, logger internal.Logger) {
 	rules, err := aeService.Apps.Firewall.IngressRules.List(projectID).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing App Engine firewall rules for project %s: %v", projectID, err), GCP_APPENGINE_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_APPENGINE_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate App Engine firewall rules in project %s", projectID))
 		return
 	}
 

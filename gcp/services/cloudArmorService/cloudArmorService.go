@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	compute "google.golang.org/api/compute/v1"
 )
 
@@ -52,7 +53,7 @@ func (s *CloudArmorService) GetSecurityPolicies(projectID string) ([]SecurityPol
 	ctx := context.Background()
 	service, err := compute.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var policies []SecurityPolicy
@@ -60,7 +61,7 @@ func (s *CloudArmorService) GetSecurityPolicies(projectID string) ([]SecurityPol
 	// List security policies
 	resp, err := service.SecurityPolicies.List(projectID).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list security policies: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	for _, policy := range resp.Items {
@@ -265,7 +266,7 @@ func (s *CloudArmorService) GetUnprotectedLoadBalancers(projectID string) ([]str
 	ctx := context.Background()
 	service, err := compute.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var unprotected []string

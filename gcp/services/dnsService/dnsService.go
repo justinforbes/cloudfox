@@ -2,9 +2,9 @@ package dnsservice
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	dns "google.golang.org/api/dns/v1"
 )
 
@@ -57,7 +57,7 @@ func (ds *DNSService) Zones(projectID string) ([]ZoneInfo, error) {
 
 	service, err := dns.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create DNS service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "dns.googleapis.com")
 	}
 
 	var zones []ZoneInfo
@@ -72,7 +72,7 @@ func (ds *DNSService) Zones(projectID string) ([]ZoneInfo, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list zones: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "dns.googleapis.com")
 	}
 
 	return zones, nil
@@ -84,7 +84,7 @@ func (ds *DNSService) Records(projectID, zoneName string) ([]RecordInfo, error) 
 
 	service, err := dns.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create DNS service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "dns.googleapis.com")
 	}
 
 	var records []RecordInfo
@@ -106,7 +106,7 @@ func (ds *DNSService) Records(projectID, zoneName string) ([]RecordInfo, error) 
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list records: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "dns.googleapis.com")
 	}
 
 	return records, nil

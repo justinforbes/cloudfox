@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	certificatemanager "google.golang.org/api/certificatemanager/v1"
 	compute "google.golang.org/api/compute/v1"
 )
@@ -61,7 +62,7 @@ func (s *CertManagerService) GetCertificates(projectID string) ([]Certificate, e
 	ctx := context.Background()
 	service, err := certificatemanager.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create certificate manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "certificatemanager.googleapis.com")
 	}
 
 	var certificates []Certificate
@@ -119,7 +120,7 @@ func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertific
 	ctx := context.Background()
 	service, err := compute.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var certificates []SSLCertificate
@@ -127,7 +128,7 @@ func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertific
 	// Global SSL certificates
 	resp, err := service.SslCertificates.List(projectID).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list SSL certificates: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	for _, cert := range resp.Items {
@@ -203,7 +204,7 @@ func (s *CertManagerService) GetCertificateMaps(projectID string) ([]Certificate
 	ctx := context.Background()
 	service, err := certificatemanager.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create certificate manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "certificatemanager.googleapis.com")
 	}
 
 	var maps []CertificateMap

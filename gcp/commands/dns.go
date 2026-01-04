@@ -132,9 +132,8 @@ func (m *DNSModule) processProject(ctx context.Context, projectID string, logger
 	zones, err := ds.Zones(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating DNS zones in project %s: %v", projectID, err), globals.GCP_DNS_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_DNS_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate DNS zones in project %s", projectID))
 		return
 	}
 
@@ -147,9 +146,9 @@ func (m *DNSModule) processProject(ctx context.Context, projectID string, logger
 		// Get records for each zone
 		records, err := ds.Records(projectID, zone.Name)
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.ErrorM(fmt.Sprintf("Error enumerating DNS records in zone %s: %v", zone.Name, err), globals.GCP_DNS_MODULE_NAME)
-			}
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_DNS_MODULE_NAME,
+				fmt.Sprintf("Could not enumerate DNS records in zone %s", zone.Name))
 			continue
 		}
 

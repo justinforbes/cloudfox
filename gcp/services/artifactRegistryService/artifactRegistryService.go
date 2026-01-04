@@ -53,7 +53,7 @@ func NewWithSession(session *gcpinternal.SafeSession) (ArtifactRegistryService, 
 		client, err = artifactregistry.NewClient(ctx)
 	}
 	if err != nil {
-		return ArtifactRegistryService{}, fmt.Errorf("failed to create artifact registry client: %v", err)
+		return ArtifactRegistryService{}, gcpinternal.ParseGCPError(err, "artifactregistry.googleapis.com")
 	}
 
 	ars := ArtifactRegistryService{
@@ -87,7 +87,7 @@ func (ars *ArtifactRegistryService) RepositoriesAndArtifacts(projectID string) (
 	// Retrieve repositories.
 	repos, err := ars.Repositories(projectID)
 	if err != nil {
-		return combinedInfo, fmt.Errorf("failed to retrieve repositories: %v", err)
+		return combinedInfo, gcpinternal.ParseGCPError(err, "artifactregistry.googleapis.com")
 	}
 	combinedInfo.Repositories = repos
 
@@ -259,7 +259,7 @@ func (ars *ArtifactRegistryService) Artifacts(projectID string, location string,
 	// Fetch repository details to determine its format
 	repo, err := ars.Client.GetRepository(ctx, &artifactregistrypb.GetRepositoryRequest{Name: repoFullName})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get repository details: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "artifactregistry.googleapis.com")
 	}
 
 	// Handle different repository formats
@@ -379,7 +379,7 @@ func (ars *ArtifactRegistryService) projectLocations(projectID string) ([]string
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to list locations: %w", err)
+			return nil, gcpinternal.ParseGCPError(err, "artifactregistry.googleapis.com")
 		}
 		locations = append(locations, loc.LocationId)
 	}

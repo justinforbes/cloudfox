@@ -95,7 +95,7 @@ func (s *DataprocService) ListClusters(projectID string) ([]ClusterInfo, error) 
 		service, err = dataproc.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Dataproc service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "dataproc.googleapis.com")
 	}
 
 	var clusters []ClusterInfo
@@ -128,14 +128,14 @@ func (s *DataprocService) ListJobs(projectID, region string) ([]JobInfo, error) 
 		service, err = dataproc.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Dataproc service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "dataproc.googleapis.com")
 	}
 
 	var jobs []JobInfo
 
 	resp, err := service.Projects.Regions.Jobs.List(projectID, region).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list jobs: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "dataproc.googleapis.com")
 	}
 
 	for _, job := range resp.Jobs {

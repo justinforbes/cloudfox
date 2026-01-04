@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	scheduler "google.golang.org/api/cloudscheduler/v1"
 )
 
@@ -53,7 +54,7 @@ func (ss *SchedulerService) Jobs(projectID string) ([]JobInfo, error) {
 
 	service, err := scheduler.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Scheduler service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudscheduler.googleapis.com")
 	}
 
 	var jobs []JobInfo
@@ -71,7 +72,7 @@ func (ss *SchedulerService) Jobs(projectID string) ([]JobInfo, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list jobs: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudscheduler.googleapis.com")
 	}
 
 	return jobs, nil

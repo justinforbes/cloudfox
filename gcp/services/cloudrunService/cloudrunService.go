@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	run "google.golang.org/api/run/v2"
 )
 
@@ -85,7 +86,7 @@ func (cs *CloudRunService) Services(projectID string) ([]ServiceInfo, error) {
 
 	service, err := run.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Run service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "run.googleapis.com")
 	}
 
 	var services []ServiceInfo
@@ -110,7 +111,7 @@ func (cs *CloudRunService) Services(projectID string) ([]ServiceInfo, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list services: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "run.googleapis.com")
 	}
 
 	return services, nil
@@ -122,7 +123,7 @@ func (cs *CloudRunService) Jobs(projectID string) ([]JobInfo, error) {
 
 	service, err := run.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Run service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "run.googleapis.com")
 	}
 
 	var jobs []JobInfo
@@ -140,7 +141,7 @@ func (cs *CloudRunService) Jobs(projectID string) ([]JobInfo, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list jobs: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "run.googleapis.com")
 	}
 
 	return jobs, nil

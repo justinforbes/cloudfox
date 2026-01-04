@@ -130,9 +130,8 @@ func (m *BucketsModule) processProject(ctx context.Context, projectID string, lo
 	buckets, err := cs.Buckets(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating buckets in project %s: %v", projectID, err), globals.GCP_BUCKETS_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_BUCKETS_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate buckets in project %s", projectID))
 		return
 	}
 

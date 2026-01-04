@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v1"
 )
 
@@ -111,7 +112,7 @@ func (s *ServiceAgentsService) GetServiceAgents(projectID string) ([]ServiceAgen
 	ctx := context.Background()
 	service, err := cloudresourcemanager.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create resource manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 
 	var agents []ServiceAgentInfo
@@ -119,7 +120,7 @@ func (s *ServiceAgentsService) GetServiceAgents(projectID string) ([]ServiceAgen
 	// Get IAM policy
 	policy, err := service.Projects.GetIamPolicy(projectID, &cloudresourcemanager.GetIamPolicyRequest{}).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get IAM policy: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 
 	// Track which service agents we've seen

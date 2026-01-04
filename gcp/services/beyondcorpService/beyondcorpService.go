@@ -65,7 +65,7 @@ func (s *BeyondCorpService) ListAppConnectors(projectID string) ([]AppConnectorI
 		service, err = beyondcorp.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create BeyondCorp service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "beyondcorp.googleapis.com")
 	}
 
 	var connectors []AppConnectorInfo
@@ -81,8 +81,7 @@ func (s *BeyondCorpService) ListAppConnectors(projectID string) ([]AppConnectorI
 		return nil
 	})
 	if err != nil {
-		// API might not be enabled
-		return connectors, nil
+		return connectors, gcpinternal.ParseGCPError(err, "beyondcorp.googleapis.com")
 	}
 
 	return connectors, nil
@@ -100,7 +99,7 @@ func (s *BeyondCorpService) ListAppConnections(projectID string) ([]AppConnectio
 		service, err = beyondcorp.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create BeyondCorp service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "beyondcorp.googleapis.com")
 	}
 
 	var connections []AppConnectionInfo
@@ -115,7 +114,7 @@ func (s *BeyondCorpService) ListAppConnections(projectID string) ([]AppConnectio
 		return nil
 	})
 	if err != nil {
-		return connections, nil
+		return connections, gcpinternal.ParseGCPError(err, "beyondcorp.googleapis.com")
 	}
 
 	return connections, nil

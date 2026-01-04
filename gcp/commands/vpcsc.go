@@ -85,7 +85,9 @@ func (m *VPCSCModule) Execute(ctx context.Context, logger internal.Logger) {
 	// List access policies
 	policies, err := svc.ListAccessPolicies(m.OrgID)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Could not list access policies: %v", err), globals.GCP_VPCSC_MODULE_NAME)
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_VPCSC_MODULE_NAME,
+			fmt.Sprintf("Could not list access policies for organization %s", m.OrgID))
 		return
 	}
 	m.Policies = policies
@@ -99,18 +101,16 @@ func (m *VPCSCModule) Execute(ctx context.Context, logger internal.Logger) {
 	for _, policy := range m.Policies {
 		perimeters, err := svc.ListServicePerimeters(policy.Name)
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.InfoM(fmt.Sprintf("Could not list perimeters for policy %s: %v", policy.Name, err), globals.GCP_VPCSC_MODULE_NAME)
-			}
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_VPCSC_MODULE_NAME,
+				fmt.Sprintf("Could not list perimeters for policy %s", policy.Name))
 		} else {
 			m.Perimeters = append(m.Perimeters, perimeters...)
 		}
 
 		levels, err := svc.ListAccessLevels(policy.Name)
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.InfoM(fmt.Sprintf("Could not list access levels for policy %s: %v", policy.Name, err), globals.GCP_VPCSC_MODULE_NAME)
-			}
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_VPCSC_MODULE_NAME,
+				fmt.Sprintf("Could not list access levels for policy %s", policy.Name))
 		} else {
 			m.AccessLevels = append(m.AccessLevels, levels...)
 		}
@@ -262,6 +262,8 @@ func (m *VPCSCModule) writeOutput(ctx context.Context, logger internal.Logger) {
 	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
 		"org", []string{m.OrgID}, []string{m.OrgID}, m.Account, output)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_VPCSC_MODULE_NAME)
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_VPCSC_MODULE_NAME,
+			"Could not write output")
 	}
 }

@@ -271,9 +271,9 @@ func (m *MonitoringAlertsModule) enumerateAlertPolicies(ctx context.Context, pro
 			break
 		}
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.ErrorM(fmt.Sprintf("Error listing alert policies for project %s: %v", projectID, err), GCP_MONITORINGALERTS_MODULE_NAME)
-			}
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, GCP_MONITORINGALERTS_MODULE_NAME,
+				fmt.Sprintf("Could not enumerate alert policies in project %s", projectID))
 			break
 		}
 
@@ -365,9 +365,9 @@ func (m *MonitoringAlertsModule) enumerateNotificationChannels(ctx context.Conte
 			break
 		}
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.ErrorM(fmt.Sprintf("Error listing notification channels for project %s: %v", projectID, err), GCP_MONITORINGALERTS_MODULE_NAME)
-			}
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, GCP_MONITORINGALERTS_MODULE_NAME,
+				fmt.Sprintf("Could not enumerate notification channels in project %s", projectID))
 			break
 		}
 
@@ -417,9 +417,9 @@ func (m *MonitoringAlertsModule) enumerateUptimeChecks(ctx context.Context, proj
 			break
 		}
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.ErrorM(fmt.Sprintf("Error listing uptime checks for project %s: %v", projectID, err), GCP_MONITORINGALERTS_MODULE_NAME)
-			}
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, GCP_MONITORINGALERTS_MODULE_NAME,
+				fmt.Sprintf("Could not enumerate uptime checks in project %s", projectID))
 			break
 		}
 

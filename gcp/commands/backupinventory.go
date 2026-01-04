@@ -286,9 +286,9 @@ func (m *BackupInventoryModule) enumerateDisks(ctx context.Context, projectID st
 	})
 
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing disks for project %s: %v", projectID, err), GCP_BACKUPINVENTORY_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_BACKUPINVENTORY_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate disks in project %s", projectID))
 	}
 }
 
@@ -320,9 +320,9 @@ func (m *BackupInventoryModule) enumerateSnapshots(ctx context.Context, projectI
 	})
 
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing snapshots for project %s: %v", projectID, err), GCP_BACKUPINVENTORY_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_BACKUPINVENTORY_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate snapshots in project %s", projectID))
 	}
 
 	// Track protected resources from snapshots
@@ -440,9 +440,9 @@ func (m *BackupInventoryModule) enumerateSnapshotSchedules(ctx context.Context, 
 	})
 
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing snapshot schedules for project %s: %v", projectID, err), GCP_BACKUPINVENTORY_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_BACKUPINVENTORY_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate snapshot schedules in project %s", projectID))
 	}
 }
 
@@ -450,9 +450,9 @@ func (m *BackupInventoryModule) enumerateSQLBackups(ctx context.Context, project
 	// List SQL instances
 	instances, err := sqlService.Instances.List(projectID).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing SQL instances for project %s: %v", projectID, err), GCP_BACKUPINVENTORY_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_BACKUPINVENTORY_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate SQL instances in project %s", projectID))
 		return
 	}
 

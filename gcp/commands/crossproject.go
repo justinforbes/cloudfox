@@ -99,9 +99,9 @@ func (m *CrossProjectModule) Execute(ctx context.Context, logger internal.Logger
 	// Analyze cross-project bindings
 	bindings, err := svc.AnalyzeCrossProjectAccess(m.ProjectIDs)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error analyzing cross-project access: %v", err), globals.GCP_CROSSPROJECT_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CROSSPROJECT_MODULE_NAME,
+			"Could not analyze cross-project access")
 	} else {
 		m.CrossBindings = bindings
 	}
@@ -109,9 +109,9 @@ func (m *CrossProjectModule) Execute(ctx context.Context, logger internal.Logger
 	// Get cross-project service accounts
 	sas, err := svc.GetCrossProjectServiceAccounts(m.ProjectIDs)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting cross-project service accounts: %v", err), globals.GCP_CROSSPROJECT_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CROSSPROJECT_MODULE_NAME,
+			"Could not get cross-project service accounts")
 	} else {
 		m.CrossProjectSAs = sas
 	}
@@ -119,9 +119,9 @@ func (m *CrossProjectModule) Execute(ctx context.Context, logger internal.Logger
 	// Find lateral movement paths
 	paths, err := svc.FindLateralMovementPaths(m.ProjectIDs)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error finding lateral movement paths: %v", err), globals.GCP_CROSSPROJECT_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CROSSPROJECT_MODULE_NAME,
+			"Could not find lateral movement paths")
 	} else {
 		m.LateralMovementPaths = paths
 	}

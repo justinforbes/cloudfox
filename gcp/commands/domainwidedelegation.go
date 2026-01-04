@@ -129,9 +129,9 @@ func (m *DomainWideDelegationModule) processProject(ctx context.Context, project
 	svc := domainwidedelegationservice.New()
 	accounts, err := svc.GetDWDServiceAccounts(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error checking project %s: %v", projectID, err), globals.GCP_DOMAINWIDEDELEGATION_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_DOMAINWIDEDELEGATION_MODULE_NAME,
+			fmt.Sprintf("Could not check DWD service accounts in project %s", projectID))
 		return
 	}
 
@@ -257,7 +257,11 @@ func (m *DomainWideDelegationModule) writeOutput(ctx context.Context, logger int
 		if len(email) > 40 {
 			parts := strings.Split(email, "@")
 			if len(parts) == 2 {
-				email = parts[0][:15] + "...@" + parts[1]
+				username := parts[0]
+				if len(username) > 15 {
+					username = username[:15] + "..."
+				}
+				email = username + "@" + parts[1]
 			}
 		}
 

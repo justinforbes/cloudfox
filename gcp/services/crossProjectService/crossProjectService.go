@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v1"
 	iam "google.golang.org/api/iam/v1"
 )
@@ -53,7 +54,7 @@ func (s *CrossProjectService) AnalyzeCrossProjectAccess(projectIDs []string) ([]
 
 	crmService, err := cloudresourcemanager.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Resource Manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 
 	var crossProjectBindings []CrossProjectBinding
@@ -108,12 +109,12 @@ func (s *CrossProjectService) GetCrossProjectServiceAccounts(projectIDs []string
 
 	iamService, err := iam.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
 	crmService, err := cloudresourcemanager.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Resource Manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 
 	var crossProjectSAs []CrossProjectServiceAccount
@@ -184,7 +185,7 @@ func (s *CrossProjectService) FindLateralMovementPaths(projectIDs []string) ([]L
 
 	crmService, err := cloudresourcemanager.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Resource Manager service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 
 	var paths []LateralMovementPath

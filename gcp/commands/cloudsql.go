@@ -136,9 +136,8 @@ func (m *CloudSQLModule) processProject(ctx context.Context, projectID string, l
 	instances, err := cs.Instances(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating Cloud SQL in project %s: %v", projectID, err), globals.GCP_CLOUDSQL_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_CLOUDSQL_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate Cloud SQL in project %s", projectID))
 		return
 	}
 

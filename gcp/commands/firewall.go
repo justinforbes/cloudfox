@@ -146,9 +146,8 @@ func (m *FirewallModule) processProject(ctx context.Context, projectID string, l
 	networks, err := ns.Networks(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating networks in project %s: %v", projectID, err), globals.GCP_FIREWALL_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_FIREWALL_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate networks in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.Networks = append(m.Networks, networks...)
@@ -162,9 +161,8 @@ func (m *FirewallModule) processProject(ctx context.Context, projectID string, l
 	subnets, err := ns.Subnets(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating subnets in project %s: %v", projectID, err), globals.GCP_FIREWALL_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_FIREWALL_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate subnets in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.Subnets = append(m.Subnets, subnets...)
@@ -175,9 +173,8 @@ func (m *FirewallModule) processProject(ctx context.Context, projectID string, l
 	rules, err := ns.FirewallRulesEnhanced(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating firewall rules in project %s: %v", projectID, err), globals.GCP_FIREWALL_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_FIREWALL_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate firewall rules in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.FirewallRules = append(m.FirewallRules, rules...)

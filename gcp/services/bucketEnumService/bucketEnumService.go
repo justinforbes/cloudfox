@@ -129,7 +129,7 @@ func (s *BucketEnumService) EnumerateBucketSensitiveFiles(bucketName, projectID 
 		storageService, err = storage.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create storage service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
 	}
 
 	var sensitiveFiles []SensitiveFileInfo
@@ -152,7 +152,7 @@ func (s *BucketEnumService) EnumerateBucketSensitiveFiles(bucketName, projectID 
 	})
 
 	if err != nil && err != iterator.Done {
-		return nil, fmt.Errorf("failed to list objects: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
 	}
 
 	return sensitiveFiles, nil
@@ -260,7 +260,7 @@ func (s *BucketEnumService) GetBucketsList(projectID string) ([]string, error) {
 		storageService, err = storage.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create storage service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
 	}
 
 	var buckets []string
@@ -271,7 +271,7 @@ func (s *BucketEnumService) GetBucketsList(projectID string) ([]string, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list buckets: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
 	}
 
 	return buckets, nil

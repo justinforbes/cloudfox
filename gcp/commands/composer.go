@@ -91,9 +91,9 @@ func (m *ComposerModule) processProject(ctx context.Context, projectID string, l
 	svc := composerservice.New()
 	environments, err := svc.ListEnvironments(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list Composer environments: %v", err), globals.GCP_COMPOSER_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_COMPOSER_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate Composer environments in project %s", projectID))
 		return
 	}
 

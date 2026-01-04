@@ -168,9 +168,9 @@ func (m *DataExfiltrationModule) processProject(ctx context.Context, projectID s
 func (m *DataExfiltrationModule) findPublicSnapshots(ctx context.Context, projectID string, logger internal.Logger) {
 	computeService, err := compute.NewService(ctx)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error creating Compute service: %v", err), GCP_DATAEXFILTRATION_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME,
+			fmt.Sprintf("Could not create Compute service in project %s", projectID))
 		return
 	}
 
@@ -236,8 +236,10 @@ func (m *DataExfiltrationModule) findPublicSnapshots(ctx context.Context, projec
 		return nil
 	})
 
-	if err != nil && globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.ErrorM(fmt.Sprintf("Error listing snapshots: %v", err), GCP_DATAEXFILTRATION_MODULE_NAME)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME,
+			fmt.Sprintf("Could not list snapshots in project %s", projectID))
 	}
 }
 
@@ -310,8 +312,10 @@ func (m *DataExfiltrationModule) findPublicImages(ctx context.Context, projectID
 		return nil
 	})
 
-	if err != nil && globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.ErrorM(fmt.Sprintf("Error listing images: %v", err), GCP_DATAEXFILTRATION_MODULE_NAME)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME,
+			fmt.Sprintf("Could not list images in project %s", projectID))
 	}
 }
 
@@ -319,18 +323,18 @@ func (m *DataExfiltrationModule) findPublicImages(ctx context.Context, projectID
 func (m *DataExfiltrationModule) findPublicBuckets(ctx context.Context, projectID string, logger internal.Logger) {
 	storageService, err := storage.NewService(ctx)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error creating Storage service: %v", err), GCP_DATAEXFILTRATION_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME,
+			fmt.Sprintf("Could not create Storage service in project %s", projectID))
 		return
 	}
 
 	// List buckets
 	resp, err := storageService.Buckets.List(projectID).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing buckets: %v", err), GCP_DATAEXFILTRATION_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME,
+			fmt.Sprintf("Could not list buckets in project %s", projectID))
 		return
 	}
 

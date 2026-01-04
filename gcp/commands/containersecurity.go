@@ -230,9 +230,9 @@ func (m *ContainerSecurityModule) analyzeCloudRunServices(ctx context.Context, p
 
 	services, err := runService.Projects.Locations.Services.List(parent).Do()
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error listing Cloud Run services for project %s: %v", projectID, err), GCP_CONTAINERSECURITY_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_CONTAINERSECURITY_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate Cloud Run services in project %s", projectID))
 		return
 	}
 

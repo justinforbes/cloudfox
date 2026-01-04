@@ -227,9 +227,9 @@ func (m *ResourceGraphModule) processProject(ctx context.Context, projectID stri
 			break
 		}
 		if err != nil {
-			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-				logger.ErrorM(fmt.Sprintf("Error listing assets for project %s: %v", projectID, err), GCP_RESOURCEGRAPH_MODULE_NAME)
-			}
+			m.CommandCounter.Error++
+			gcpinternal.HandleGCPError(err, logger, GCP_RESOURCEGRAPH_MODULE_NAME,
+				fmt.Sprintf("Could not enumerate assets in project %s", projectID))
 			break
 		}
 

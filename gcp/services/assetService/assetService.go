@@ -86,7 +86,7 @@ func (s *AssetService) ListAssets(projectID string, assetTypes []string) ([]Asse
 		client, err = asset.NewClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Asset Inventory client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
 	}
 	defer client.Close()
 
@@ -110,7 +110,7 @@ func (s *AssetService) ListAssets(projectID string, assetTypes []string) ([]Asse
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to iterate assets: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
 		}
 
 		info := s.parseAsset(assetResult, projectID)
@@ -132,7 +132,7 @@ func (s *AssetService) ListAssetsWithIAM(projectID string, assetTypes []string) 
 		client, err = asset.NewClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Asset Inventory client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
 	}
 	defer client.Close()
 
@@ -156,7 +156,7 @@ func (s *AssetService) ListAssetsWithIAM(projectID string, assetTypes []string) 
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to iterate assets: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
 		}
 
 		info := s.parseAssetWithIAM(assetResult, projectID)
@@ -178,7 +178,7 @@ func (s *AssetService) GetAssetTypeCounts(projectID string) ([]AssetTypeCount, e
 		client, err = asset.NewClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Asset Inventory client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
 	}
 	defer client.Close()
 
@@ -198,7 +198,7 @@ func (s *AssetService) GetAssetTypeCounts(projectID string) ([]AssetTypeCount, e
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to iterate assets: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
 		}
 
 		counts[assetResult.AssetType]++
@@ -227,7 +227,7 @@ func (s *AssetService) SearchAllResources(scope string, query string) ([]AssetIn
 		client, err = asset.NewClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Asset Inventory client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
 	}
 	defer client.Close()
 
@@ -245,7 +245,7 @@ func (s *AssetService) SearchAllResources(scope string, query string) ([]AssetIn
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to search resources: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
 		}
 
 		info := AssetInfo{

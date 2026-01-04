@@ -82,7 +82,7 @@ func (s *OrganizationsService) SearchOrganizations() ([]OrganizationInfo, error)
 		client, err = resourcemanager.NewOrganizationsClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create organizations client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 	defer client.Close()
 
@@ -96,7 +96,7 @@ func (s *OrganizationsService) SearchOrganizations() ([]OrganizationInfo, error)
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to search organizations: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 
 		orgInfo := OrganizationInfo{
@@ -132,7 +132,7 @@ func (s *OrganizationsService) SearchFolders(parent string) ([]FolderInfo, error
 		client, err = resourcemanager.NewFoldersClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create folders client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 	defer client.Close()
 
@@ -150,7 +150,7 @@ func (s *OrganizationsService) SearchFolders(parent string) ([]FolderInfo, error
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to search folders: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 
 		folderInfo := FolderInfo{
@@ -187,7 +187,7 @@ func (s *OrganizationsService) SearchAllFolders() ([]FolderInfo, error) {
 		client, err = resourcemanager.NewFoldersClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create folders client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 	defer client.Close()
 
@@ -201,7 +201,7 @@ func (s *OrganizationsService) SearchAllFolders() ([]FolderInfo, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to search folders: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 
 		folderInfo := FolderInfo{
@@ -238,7 +238,7 @@ func (s *OrganizationsService) SearchProjects(parent string) ([]ProjectInfo, err
 		client, err = resourcemanager.NewProjectsClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create projects client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 	defer client.Close()
 
@@ -258,7 +258,7 @@ func (s *OrganizationsService) SearchProjects(parent string) ([]ProjectInfo, err
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to search projects: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 
 		projectInfo := ProjectInfo{
@@ -299,7 +299,7 @@ func (s *OrganizationsService) GetProjectAncestry(projectID string) ([]Hierarchy
 		projectsClient, err = resourcemanager.NewProjectsClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create projects client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 	defer projectsClient.Close()
 
@@ -309,7 +309,7 @@ func (s *OrganizationsService) GetProjectAncestry(projectID string) ([]Hierarchy
 		foldersClient, err = resourcemanager.NewFoldersClient(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create folders client: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 	defer foldersClient.Close()
 

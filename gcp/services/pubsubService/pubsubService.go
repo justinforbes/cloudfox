@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	pubsub "google.golang.org/api/pubsub/v1"
 )
 
@@ -73,7 +74,7 @@ func (ps *PubSubService) Topics(projectID string) ([]TopicInfo, error) {
 
 	service, err := pubsub.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Pub/Sub service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "pubsub.googleapis.com")
 	}
 
 	var topics []TopicInfo
@@ -101,7 +102,7 @@ func (ps *PubSubService) Topics(projectID string) ([]TopicInfo, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list topics: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "pubsub.googleapis.com")
 	}
 
 	return topics, nil
@@ -113,7 +114,7 @@ func (ps *PubSubService) Subscriptions(projectID string) ([]SubscriptionInfo, er
 
 	service, err := pubsub.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Pub/Sub service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "pubsub.googleapis.com")
 	}
 
 	var subscriptions []SubscriptionInfo
@@ -136,7 +137,7 @@ func (ps *PubSubService) Subscriptions(projectID string) ([]SubscriptionInfo, er
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list subscriptions: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "pubsub.googleapis.com")
 	}
 
 	return subscriptions, nil

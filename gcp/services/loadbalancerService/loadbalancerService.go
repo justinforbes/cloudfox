@@ -2,7 +2,6 @@ package loadbalancerservice
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -89,7 +88,7 @@ func (s *LoadBalancerService) ListLoadBalancers(projectID string) ([]LoadBalance
 		service, err = compute.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var loadBalancers []LoadBalancerInfo
@@ -132,14 +131,14 @@ func (s *LoadBalancerService) ListSSLPolicies(projectID string) ([]SSLPolicyInfo
 		service, err = compute.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var policies []SSLPolicyInfo
 
 	resp, err := service.SslPolicies.List(projectID).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list SSL policies: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	for _, policy := range resp.Items {
@@ -170,7 +169,7 @@ func (s *LoadBalancerService) ListBackendServices(projectID string) ([]BackendSe
 		service, err = compute.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var backends []BackendServiceInfo

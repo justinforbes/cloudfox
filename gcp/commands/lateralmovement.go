@@ -174,9 +174,9 @@ func (m *LateralMovementModule) findImpersonationChains(ctx context.Context, pro
 	// Get all service accounts
 	serviceAccounts, err := iamService.ServiceAccounts(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting service accounts: %v", err), GCP_LATERALMOVEMENT_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME,
+			fmt.Sprintf("Could not get service accounts in project %s", projectID))
 		return
 	}
 
@@ -297,9 +297,9 @@ func (m *LateralMovementModule) findCrossProjectAccess(ctx context.Context, proj
 	// Get IAM policy for the project using PoliciesWithInheritance for comprehensive view
 	bindings, err := iamService.PoliciesWithInheritance(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting IAM policy: %v", err), GCP_LATERALMOVEMENT_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME,
+			fmt.Sprintf("Could not get IAM policy for project %s", projectID))
 		return
 	}
 

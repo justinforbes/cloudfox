@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	kms "google.golang.org/api/cloudkms/v1"
 )
 
@@ -65,7 +66,7 @@ func (ks *KMSService) KeyRings(projectID string) ([]KeyRingInfo, error) {
 
 	service, err := kms.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create KMS service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudkms.googleapis.com")
 	}
 
 	var keyRings []KeyRingInfo
@@ -88,7 +89,7 @@ func (ks *KMSService) KeyRings(projectID string) ([]KeyRingInfo, error) {
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to list key rings: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudkms.googleapis.com")
 	}
 
 	return keyRings, nil
@@ -100,7 +101,7 @@ func (ks *KMSService) CryptoKeys(projectID string) ([]CryptoKeyInfo, error) {
 
 	service, err := kms.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create KMS service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudkms.googleapis.com")
 	}
 
 	var keys []CryptoKeyInfo

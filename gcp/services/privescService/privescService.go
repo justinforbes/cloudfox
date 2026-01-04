@@ -125,12 +125,12 @@ func (s *PrivescService) AnalyzeProjectPrivesc(projectID string) ([]PrivescPath,
 		crmService, err = cloudresourcemanager.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create CRM service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 
 	policy, err := crmService.Projects.GetIamPolicy(projectID, &cloudresourcemanager.GetIamPolicyRequest{}).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get project IAM policy: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
 
 	var paths []PrivescPath

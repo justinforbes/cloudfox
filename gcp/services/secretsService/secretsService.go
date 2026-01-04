@@ -68,7 +68,7 @@ func NewWithSession(session *gcpinternal.SafeSession) (SecretsService, error) {
 		client, err = secretmanager.NewClient(ctx)
 	}
 	if err != nil {
-		return SecretsService{}, fmt.Errorf("failed to create secret manager client: %v", err)
+		return SecretsService{}, gcpinternal.ParseGCPError(err, "secretmanager.googleapis.com")
 	}
 
 	ss := SecretsService{
@@ -148,7 +148,7 @@ func (ss *SecretsService) Secrets(projectID string) ([]SecretInfo, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to list secrets: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "secretmanager.googleapis.com")
 		}
 
 		secret := SecretInfo{

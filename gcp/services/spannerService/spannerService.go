@@ -31,7 +31,7 @@ func (s *SpannerService) ListInstances(projectID string) ([]SpannerInstanceInfo,
 	ctx := context.Background()
 	service, err := spanner.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Spanner service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "spanner.googleapis.com")
 	}
 
 	var instances []SpannerInstanceInfo

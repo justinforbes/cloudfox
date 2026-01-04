@@ -95,14 +95,14 @@ func (s *VPCService) ListVPCNetworks(projectID string) ([]VPCNetworkInfo, error)
 		service, err = compute.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var networks []VPCNetworkInfo
 
 	resp, err := service.Networks.List(projectID).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list VPC networks: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	for _, network := range resp.Items {
@@ -125,7 +125,7 @@ func (s *VPCService) ListSubnets(projectID string) ([]SubnetInfo, error) {
 		service, err = compute.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var subnets []SubnetInfo
@@ -141,7 +141,7 @@ func (s *VPCService) ListSubnets(projectID string) ([]SubnetInfo, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list subnets: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	return subnets, nil
@@ -159,14 +159,14 @@ func (s *VPCService) ListVPCPeerings(projectID string) ([]VPCPeeringInfo, error)
 		service, err = compute.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var peerings []VPCPeeringInfo
 
 	networks, err := service.Networks.List(projectID).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list networks: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	for _, network := range networks.Items {
@@ -208,14 +208,14 @@ func (s *VPCService) ListRoutes(projectID string) ([]RouteInfo, error) {
 		service, err = compute.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Compute service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	var routes []RouteInfo
 
 	resp, err := service.Routes.List(projectID).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list routes: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
 
 	for _, route := range resp.Items {

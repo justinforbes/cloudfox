@@ -80,9 +80,9 @@ func (m *IAPModule) processProject(ctx context.Context, projectID string, logger
 	// Get tunnel destination groups
 	groups, err := svc.ListTunnelDestGroups(projectID)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.InfoM(fmt.Sprintf("Could not list IAP tunnel groups: %v", err), globals.GCP_IAP_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAP_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate IAP tunnel groups in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.TunnelDestGroups = append(m.TunnelDestGroups, groups...)

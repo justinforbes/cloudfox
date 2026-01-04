@@ -102,7 +102,7 @@ func (s *CloudBuildService) ListTriggers(projectID string) ([]TriggerInfo, error
 		service, err = cloudbuild.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Build service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudbuild.googleapis.com")
 	}
 
 	var triggers []TriggerInfo
@@ -127,7 +127,7 @@ func (s *CloudBuildService) ListTriggers(projectID string) ([]TriggerInfo, error
 			return nil
 		})
 		if err2 != nil {
-			return nil, fmt.Errorf("failed to list triggers: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudbuild.googleapis.com")
 		}
 	}
 
@@ -146,7 +146,7 @@ func (s *CloudBuildService) ListBuilds(projectID string, limit int64) ([]BuildIn
 		service, err = cloudbuild.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Cloud Build service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "cloudbuild.googleapis.com")
 	}
 
 	var builds []BuildInfo
@@ -159,7 +159,7 @@ func (s *CloudBuildService) ListBuilds(projectID string, limit int64) ([]BuildIn
 		req2 := service.Projects.Builds.List(projectID).PageSize(limit)
 		resp, err = req2.Do()
 		if err != nil {
-			return nil, fmt.Errorf("failed to list builds: %v", err)
+			return nil, gcpinternal.ParseGCPError(err, "cloudbuild.googleapis.com")
 		}
 	}
 

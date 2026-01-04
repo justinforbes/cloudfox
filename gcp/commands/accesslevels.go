@@ -10,6 +10,7 @@ import (
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/spf13/cobra"
+	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v1"
 )
 
 var accessLevelOrgID string
@@ -26,7 +27,9 @@ Features:
 - Identifies overly permissive access levels
 - Analyzes device policy requirements
 
-Note: Requires organization ID (--org flag).`,
+Organization Discovery:
+- Automatically discovers organization from project ancestry if --org not specified
+- Use --org to explicitly specify an organization ID`,
 	Run: runGCPAccessLevelsCommand,
 }
 
@@ -55,19 +58,60 @@ func runGCPAccessLevelsCommand(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if accessLevelOrgID == "" {
-		cmdCtx.Logger.ErrorM("Organization ID is required. Use --org flag.", globals.GCP_ACCESSLEVELS_MODULE_NAME)
-		return
+	// Discover organizations if not specified
+	orgIDs := []string{}
+	if accessLevelOrgID != "" {
+		orgIDs = append(orgIDs, accessLevelOrgID)
+	} else {
+		// Auto-discover organizations from project ancestry
+		discoveredOrgs := discoverOrganizations(cmdCtx.Ctx, cmdCtx.ProjectIDs, cmdCtx.Logger)
+		if len(discoveredOrgs) == 0 {
+			cmdCtx.Logger.ErrorM("Could not discover any organizations. Use --org flag to specify one.", globals.GCP_ACCESSLEVELS_MODULE_NAME)
+			return
+		}
+		orgIDs = discoveredOrgs
+		cmdCtx.Logger.InfoM(fmt.Sprintf("Discovered %d organization(s) from project ancestry", len(orgIDs)), globals.GCP_ACCESSLEVELS_MODULE_NAME)
 	}
 
-	module := &AccessLevelsModule{
-		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
-		OrgID:         accessLevelOrgID,
-		AccessLevels:  []accesspolicyservice.AccessLevelInfo{},
-		LootMap:       make(map[string]*internal.LootFile),
+	// Run for each organization
+	for _, orgID := range orgIDs {
+		module := &AccessLevelsModule{
+			BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
+			OrgID:         orgID,
+			AccessLevels:  []accesspolicyservice.AccessLevelInfo{},
+			LootMap:       make(map[string]*internal.LootFile),
+		}
+		module.initializeLootFiles()
+		module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 	}
-	module.initializeLootFiles()
-	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
+}
+
+// discoverOrganizations finds organization IDs from project ancestry
+func discoverOrganizations(ctx context.Context, projectIDs []string, logger internal.Logger) []string {
+	crmService, err := cloudresourcemanager.NewService(ctx)
+	if err != nil {
+		return nil
+	}
+
+	orgMap := make(map[string]bool)
+	for _, projectID := range projectIDs {
+		resp, err := crmService.Projects.GetAncestry(projectID, &cloudresourcemanager.GetAncestryRequest{}).Do()
+		if err != nil {
+			continue
+		}
+
+		for _, ancestor := range resp.Ancestor {
+			if ancestor.ResourceId.Type == "organization" {
+				orgMap[ancestor.ResourceId.Id] = true
+			}
+		}
+	}
+
+	var orgs []string
+	for orgID := range orgMap {
+		orgs = append(orgs, orgID)
+	}
+	return orgs
 }
 
 func (m *AccessLevelsModule) Execute(ctx context.Context, logger internal.Logger) {
@@ -77,7 +121,9 @@ func (m *AccessLevelsModule) Execute(ctx context.Context, logger internal.Logger
 
 	levels, err := svc.ListAccessLevels(m.OrgID)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Could not list access levels: %v", err), globals.GCP_ACCESSLEVELS_MODULE_NAME)
+		// Use shared error handling
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_ACCESSLEVELS_MODULE_NAME,
+			fmt.Sprintf("Could not list access levels for org %s", m.OrgID))
 		return
 	}
 

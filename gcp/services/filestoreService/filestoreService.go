@@ -38,7 +38,7 @@ func (s *FilestoreService) ListInstances(projectID string) ([]FilestoreInstanceI
 	ctx := context.Background()
 	service, err := file.NewService(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Filestore service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "file.googleapis.com")
 	}
 
 	var instances []FilestoreInstanceInfo

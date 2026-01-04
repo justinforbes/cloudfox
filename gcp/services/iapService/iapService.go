@@ -71,7 +71,7 @@ func (s *IAPService) ListTunnelDestGroups(projectID string) ([]TunnelDestGroup, 
 		service, err = iap.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAP service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iap.googleapis.com")
 	}
 
 	var groups []TunnelDestGroup
@@ -115,12 +115,12 @@ func (s *IAPService) GetIAPSettings(projectID, resourcePath string) (*IAPSetting
 		service, err = iap.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAP service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iap.googleapis.com")
 	}
 
 	settings, err := service.V1.GetIapSettings(resourcePath).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get IAP settings: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iap.googleapis.com")
 	}
 
 	info := &IAPSettingsInfo{
@@ -161,12 +161,12 @@ func (s *IAPService) GetIAPBindings(projectID, resourcePath string) ([]IAPBindin
 		service, err = iap.NewService(ctx)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create IAP service: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iap.googleapis.com")
 	}
 
 	policy, err := service.V1.GetIamPolicy(resourcePath, &iap.GetIamPolicyRequest{}).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get IAP IAM policy: %v", err)
+		return nil, gcpinternal.ParseGCPError(err, "iap.googleapis.com")
 	}
 
 	var bindings []IAPBinding

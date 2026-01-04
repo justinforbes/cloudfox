@@ -133,9 +133,8 @@ func (m *LoggingModule) processProject(ctx context.Context, projectID string, lo
 	sinks, err := ls.Sinks(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating logging sinks in project %s: %v", projectID, err), globals.GCP_LOGGING_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_LOGGING_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate logging sinks in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.Sinks = append(m.Sinks, sinks...)
@@ -149,9 +148,8 @@ func (m *LoggingModule) processProject(ctx context.Context, projectID string, lo
 	metrics, err := ls.Metrics(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating log metrics in project %s: %v", projectID, err), globals.GCP_LOGGING_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_LOGGING_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate log metrics in project %s", projectID))
 	} else {
 		m.mu.Lock()
 		m.Metrics = append(m.Metrics, metrics...)

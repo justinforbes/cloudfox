@@ -129,9 +129,8 @@ func (m *ArtifactRegistryModule) processProject(ctx context.Context, projectID s
 	result, err := ars.RepositoriesAndArtifacts(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error enumerating artifact registries in project %s: %v", projectID, err), globals.GCP_ARTIFACT_RESGISTRY_MODULE_NAME)
-		}
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_ARTIFACT_RESGISTRY_MODULE_NAME,
+			fmt.Sprintf("Could not enumerate artifact registries in project %s", projectID))
 		return
 	}
 
