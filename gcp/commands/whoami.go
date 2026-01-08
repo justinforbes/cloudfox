@@ -18,8 +18,9 @@ import (
 	crmv3 "google.golang.org/api/cloudresourcemanager/v3"
 )
 
-// Flag for extended enumeration
+// Flags for whoami command
 var whoamiExtended bool
+var whoamiGroups []string
 
 var GCPWhoAmICommand = &cobra.Command{
 	Use:     globals.GCP_WHOAMI_MODULE_NAME,
@@ -30,17 +31,23 @@ var GCPWhoAmICommand = &cobra.Command{
 Default output:
 - Current identity details (email, type)
 - Organization and folder context
-- Effective role bindings across projects
+- Effective role bindings across projects (with inheritance source)
 
 With --extended flag (adds):
 - Service accounts that can be impersonated
 - Privilege escalation opportunities
-- Exploitation commands`,
+- Exploitation commands
+
+With --groups flag:
+- Provide known group email addresses when group enumeration is permission denied
+- Role bindings from these groups will be included in the output
+- Use comma-separated list: --groups=group1@domain.com,group2@domain.com`,
 	Run: runGCPWhoAmICommand,
 }
 
 func init() {
 	GCPWhoAmICommand.Flags().BoolVarP(&whoamiExtended, "extended", "e", false, "Enable extended enumeration (impersonation targets, privilege escalation paths)")
+	GCPWhoAmICommand.Flags().StringSliceVarP(&whoamiGroups, "groups", "g", []string{}, "Comma-separated list of known group email addresses (used when group enumeration is permission denied)")
 }
 
 // ------------------------------
@@ -57,6 +64,8 @@ type IdentityContext struct {
 	Folders           []FolderInfo
 	Groups            []GroupMembership // Groups the identity is a member of
 	GroupsEnumerated  bool              // Whether group enumeration was successful
+	GroupsProvided    []string          // Groups provided via --groups flag
+	GroupsMismatch    bool              // True if provided groups differ from enumerated
 }
 
 type ProjectInfo struct {
@@ -80,15 +89,18 @@ type GroupMembership struct {
 	GroupID     string // e.g., "groups/abc123"
 	Email       string // e.g., "security-team@example.com"
 	DisplayName string // e.g., "Security Team"
+	Source      string // "enumerated" or "provided"
 }
 
 type RoleBinding struct {
-	Role         string
-	Scope        string // "organization", "folder", "project"
-	ScopeID      string
-	ScopeName    string // Display name of the scope resource
-	Inherited    bool
-	Condition    string
+	Role            string
+	Scope           string // "organization", "folder", "project"
+	ScopeID         string
+	ScopeName       string // Display name of the scope resource
+	Inherited       bool
+	Condition       string
+	InheritedFrom   string // Source of binding: "direct", group email, or parent resource
+	MemberType      string // "user", "serviceAccount", "group"
 }
 
 type ImpersonationTarget struct {
@@ -119,6 +131,7 @@ type WhoAmIModule struct {
 	DangerousPermissions []string
 	LootMap              map[string]*internal.LootFile
 	Extended             bool
+	ProvidedGroups       []string // Groups provided via --groups flag
 	mu                   sync.Mutex
 }
 
@@ -152,6 +165,7 @@ func runGCPWhoAmICommand(cmd *cobra.Command, args []string) {
 		DangerousPermissions: []string{},
 		LootMap:              make(map[string]*internal.LootFile),
 		Extended:             whoamiExtended,
+		ProvidedGroups:       whoamiGroups,
 	}
 
 	// Initialize loot files
@@ -175,7 +189,9 @@ func (m *WhoAmIModule) Execute(ctx context.Context, logger internal.Logger) {
 	oauthService := OAuthService.NewOAuthService()
 	principal, err := oauthService.WhoAmI()
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Error retrieving token info: %v", err), globals.GCP_WHOAMI_MODULE_NAME)
+		parsedErr := gcpinternal.ParseGCPError(err, "oauth2.googleapis.com")
+		gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_WHOAMI_MODULE_NAME,
+			"Could not retrieve token info")
 		return
 	}
 
@@ -317,18 +333,33 @@ func (m *WhoAmIModule) getOrganizationContext(ctx context.Context, logger intern
 
 // getGroupMemberships retrieves the groups that the current identity is a member of
 func (m *WhoAmIModule) getGroupMemberships(ctx context.Context, logger internal.Logger) {
+	// Store provided groups
+	m.Identity.GroupsProvided = m.ProvidedGroups
+
 	// Only applicable for user identities (not service accounts)
 	if m.Identity.Type != "user" {
 		m.Identity.GroupsEnumerated = true // N/A for service accounts
+		// If groups were provided for a service account, add them as provided
+		if len(m.ProvidedGroups) > 0 {
+			for _, groupEmail := range m.ProvidedGroups {
+				m.Identity.Groups = append(m.Identity.Groups, GroupMembership{
+					Email:  groupEmail,
+					Source: "provided",
+				})
+			}
+			logger.InfoM(fmt.Sprintf("Using %d provided group(s) for service account", len(m.ProvidedGroups)), globals.GCP_WHOAMI_MODULE_NAME)
+		}
 		return
 	}
 
 	ciService, err := cloudidentity.NewService(ctx)
 	if err != nil {
 		m.CommandCounter.Error++
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME,
+		parsedErr := gcpinternal.ParseGCPError(err, "cloudidentity.googleapis.com")
+		gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_WHOAMI_MODULE_NAME,
 			"Could not create Cloud Identity client")
-		// GroupsEnumerated stays false - will show "Unknown"
+		// GroupsEnumerated stays false - use provided groups if available
+		m.useProvidedGroups(logger)
 		return
 	}
 
@@ -338,28 +369,90 @@ func (m *WhoAmIModule) getGroupMemberships(ctx context.Context, logger internal.
 	resp, err := ciService.Groups.Memberships.SearchDirectGroups("groups/-").Query(query).Do()
 	if err != nil {
 		m.CommandCounter.Error++
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME,
+		parsedErr := gcpinternal.ParseGCPError(err, "cloudidentity.googleapis.com")
+		gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_WHOAMI_MODULE_NAME,
 			"Could not fetch group memberships")
-		// GroupsEnumerated stays false - will show "Unknown"
+		// GroupsEnumerated stays false - use provided groups if available
+		m.useProvidedGroups(logger)
 		return
 	}
 
 	// Successfully enumerated groups
 	m.Identity.GroupsEnumerated = true
 
+	var enumeratedEmails []string
 	for _, membership := range resp.Memberships {
 		group := GroupMembership{
 			GroupID:     membership.Group,
 			DisplayName: membership.DisplayName,
+			Source:      "enumerated",
 		}
 		if membership.GroupKey != nil {
 			group.Email = membership.GroupKey.Id
+			enumeratedEmails = append(enumeratedEmails, strings.ToLower(membership.GroupKey.Id))
 		}
 		m.Identity.Groups = append(m.Identity.Groups, group)
 	}
 
+	// Check for mismatch with provided groups
+	if len(m.ProvidedGroups) > 0 {
+		m.checkGroupMismatch(enumeratedEmails, logger)
+	}
+
 	if len(m.Identity.Groups) > 0 {
 		logger.InfoM(fmt.Sprintf("Found %d group membership(s)", len(m.Identity.Groups)), globals.GCP_WHOAMI_MODULE_NAME)
+	}
+}
+
+// useProvidedGroups adds provided groups when enumeration fails
+func (m *WhoAmIModule) useProvidedGroups(logger internal.Logger) {
+	if len(m.ProvidedGroups) > 0 {
+		for _, groupEmail := range m.ProvidedGroups {
+			m.Identity.Groups = append(m.Identity.Groups, GroupMembership{
+				Email:  groupEmail,
+				Source: "provided",
+			})
+		}
+		logger.InfoM(fmt.Sprintf("Using %d provided group(s) (enumeration failed)", len(m.ProvidedGroups)), globals.GCP_WHOAMI_MODULE_NAME)
+	}
+}
+
+// checkGroupMismatch compares provided groups with enumerated groups
+func (m *WhoAmIModule) checkGroupMismatch(enumeratedEmails []string, logger internal.Logger) {
+	enumeratedSet := make(map[string]bool)
+	for _, email := range enumeratedEmails {
+		enumeratedSet[strings.ToLower(email)] = true
+	}
+
+	providedSet := make(map[string]bool)
+	for _, email := range m.ProvidedGroups {
+		providedSet[strings.ToLower(email)] = true
+	}
+
+	// Check for provided groups not in enumerated
+	var notInEnumerated []string
+	for _, email := range m.ProvidedGroups {
+		if !enumeratedSet[strings.ToLower(email)] {
+			notInEnumerated = append(notInEnumerated, email)
+		}
+	}
+
+	// Check for enumerated groups not in provided
+	var notInProvided []string
+	for _, email := range enumeratedEmails {
+		if !providedSet[strings.ToLower(email)] {
+			notInProvided = append(notInProvided, email)
+		}
+	}
+
+	if len(notInEnumerated) > 0 || len(notInProvided) > 0 {
+		m.Identity.GroupsMismatch = true
+		if len(notInEnumerated) > 0 {
+			logger.InfoM(fmt.Sprintf("[WARNING] Provided groups not found in enumerated: %s", strings.Join(notInEnumerated, ", ")), globals.GCP_WHOAMI_MODULE_NAME)
+		}
+		if len(notInProvided) > 0 {
+			logger.InfoM(fmt.Sprintf("[WARNING] Enumerated groups not in provided list: %s", strings.Join(notInProvided, ", ")), globals.GCP_WHOAMI_MODULE_NAME)
+		}
 	}
 }
 
@@ -376,6 +469,14 @@ func (m *WhoAmIModule) getRoleBindings(ctx context.Context, logger internal.Logg
 	}
 	fullMember := memberPrefix + m.Identity.Email
 
+	// Build list of group members to check
+	groupMembers := make(map[string]string) // group:email -> email for display
+	for _, group := range m.Identity.Groups {
+		if group.Email != "" {
+			groupMembers["group:"+group.Email] = group.Email
+		}
+	}
+
 	// Get role bindings from each project
 	for _, projectID := range m.ProjectIDs {
 		// Use PrincipalsWithRolesEnhanced which includes inheritance
@@ -387,18 +488,24 @@ func (m *WhoAmIModule) getRoleBindings(ctx context.Context, logger internal.Logg
 			continue
 		}
 
-		// Find bindings for the current identity
+		// Find bindings for the current identity (direct)
 		for _, principal := range principals {
 			if principal.Name == fullMember || principal.Email == m.Identity.Email {
 				for _, binding := range principal.PolicyBindings {
 					rb := RoleBinding{
-						Role:      binding.Role,
-						Scope:     binding.ResourceType,
-						ScopeID:   binding.ResourceID,
-						Inherited: binding.IsInherited,
+						Role:          binding.Role,
+						Scope:         binding.ResourceType,
+						ScopeID:       binding.ResourceID,
+						Inherited:     binding.IsInherited,
+						InheritedFrom: "direct",
+						MemberType:    m.Identity.Type,
 					}
 					if binding.HasCondition && binding.ConditionInfo != nil {
 						rb.Condition = binding.ConditionInfo.Title
+					}
+					// Set inherited source if from parent resource
+					if binding.IsInherited && binding.InheritedFrom != "" {
+						rb.InheritedFrom = binding.InheritedFrom
 					}
 
 					// Check for dangerous permissions
@@ -411,10 +518,50 @@ func (m *WhoAmIModule) getRoleBindings(ctx context.Context, logger internal.Logg
 					m.mu.Unlock()
 				}
 			}
+
+			// Check for group-based bindings
+			if groupEmail, ok := groupMembers[principal.Name]; ok {
+				for _, binding := range principal.PolicyBindings {
+					rb := RoleBinding{
+						Role:          binding.Role,
+						Scope:         binding.ResourceType,
+						ScopeID:       binding.ResourceID,
+						Inherited:     binding.IsInherited,
+						InheritedFrom: fmt.Sprintf("group:%s", groupEmail),
+						MemberType:    "group",
+					}
+					if binding.HasCondition && binding.ConditionInfo != nil {
+						rb.Condition = binding.ConditionInfo.Title
+					}
+
+					// Check for dangerous permissions
+					if isDangerousRole(binding.Role) {
+						m.DangerousPermissions = append(m.DangerousPermissions, fmt.Sprintf("%s on %s (via group %s)", binding.Role, binding.ResourceID, groupEmail))
+					}
+
+					m.mu.Lock()
+					m.RoleBindings = append(m.RoleBindings, rb)
+					m.mu.Unlock()
+				}
+			}
 		}
 	}
 
-	logger.InfoM(fmt.Sprintf("Found %d role binding(s) for current identity", len(m.RoleBindings)), globals.GCP_WHOAMI_MODULE_NAME)
+	directCount := 0
+	groupCount := 0
+	for _, rb := range m.RoleBindings {
+		if rb.MemberType == "group" {
+			groupCount++
+		} else {
+			directCount++
+		}
+	}
+
+	if groupCount > 0 {
+		logger.InfoM(fmt.Sprintf("Found %d role binding(s) (%d direct, %d via groups)", len(m.RoleBindings), directCount, groupCount), globals.GCP_WHOAMI_MODULE_NAME)
+	} else {
+		logger.InfoM(fmt.Sprintf("Found %d role binding(s) for current identity", len(m.RoleBindings)), globals.GCP_WHOAMI_MODULE_NAME)
+	}
 }
 
 // findImpersonationTargets identifies service accounts that can be impersonated
@@ -736,15 +883,27 @@ func (m *WhoAmIModule) writeOutput(ctx context.Context, logger internal.Logger) 
 		if len(m.Identity.Groups) > 1 {
 			label = fmt.Sprintf("Group %d", i+1)
 		}
+
+		// Build display value with source indicator
+		var displayValue string
 		if group.DisplayName != "" && group.Email != "" {
-			identityBody = append(identityBody, []string{label, fmt.Sprintf("%s (%s)", group.DisplayName, group.Email)})
+			displayValue = fmt.Sprintf("%s (%s)", group.DisplayName, group.Email)
 		} else if group.Email != "" {
-			identityBody = append(identityBody, []string{label, group.Email})
+			displayValue = group.Email
 		} else if group.DisplayName != "" {
-			identityBody = append(identityBody, []string{label, group.DisplayName})
+			displayValue = group.DisplayName
 		} else {
-			identityBody = append(identityBody, []string{label, group.GroupID})
+			displayValue = group.GroupID
 		}
+
+		// Add source indicator
+		if group.Source == "provided" {
+			displayValue += " (provided)"
+		} else if group.Source == "enumerated" && m.Identity.GroupsMismatch {
+			displayValue += " (enumerated)"
+		}
+
+		identityBody = append(identityBody, []string{label, displayValue})
 	}
 	if len(m.Identity.Groups) == 0 {
 		if m.Identity.GroupsEnumerated {
@@ -765,11 +924,22 @@ func (m *WhoAmIModule) writeOutput(ctx context.Context, logger internal.Logger) 
 		if rb.ScopeName != "" {
 			scopeDisplay = fmt.Sprintf("%s (%s)", rb.ScopeName, rb.ScopeID)
 		}
-		inheritedStr := ""
-		if rb.Inherited {
-			inheritedStr = " [inherited]"
+
+		// Build source/inheritance info
+		sourceStr := ""
+		if rb.InheritedFrom != "" && rb.InheritedFrom != "direct" {
+			if strings.HasPrefix(rb.InheritedFrom, "group:") {
+				// Group-based binding
+				sourceStr = fmt.Sprintf(" [via %s]", rb.InheritedFrom)
+			} else {
+				// Inherited from parent resource (folder/org)
+				sourceStr = fmt.Sprintf(" [inherited from %s]", rb.InheritedFrom)
+			}
+		} else if rb.InheritedFrom == "direct" {
+			sourceStr = " [direct]"
 		}
-		identityBody = append(identityBody, []string{label, fmt.Sprintf("%s on %s/%s%s", rb.Role, rb.Scope, scopeDisplay, inheritedStr)})
+
+		identityBody = append(identityBody, []string{label, fmt.Sprintf("%s on %s/%s%s", rb.Role, rb.Scope, scopeDisplay, sourceStr)})
 	}
 	if len(m.RoleBindings) == 0 {
 		identityBody = append(identityBody, []string{"Role Bindings", "0"})
@@ -786,14 +956,20 @@ func (m *WhoAmIModule) writeOutput(ctx context.Context, logger internal.Logger) 
 		"Role",
 		"Scope",
 		"Scope ID",
+		"Source",
 	}
 
 	var rolesBody [][]string
 	for _, rb := range m.RoleBindings {
+		source := rb.InheritedFrom
+		if source == "" {
+			source = "direct"
+		}
 		rolesBody = append(rolesBody, []string{
 			rb.Role,
 			rb.Scope,
 			rb.ScopeID,
+			source,
 		})
 	}
 

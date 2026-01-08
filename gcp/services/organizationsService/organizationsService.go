@@ -368,6 +368,23 @@ func (s *OrganizationsService) GetProjectAncestry(projectID string) ([]Hierarchy
 	return ancestry, nil
 }
 
+// GetOrganizationIDFromProject returns the organization ID for a given project
+// by walking up the resource hierarchy until it finds an organization
+func (s *OrganizationsService) GetOrganizationIDFromProject(projectID string) (string, error) {
+	ancestry, err := s.GetProjectAncestry(projectID)
+	if err != nil {
+		return "", err
+	}
+
+	for _, node := range ancestry {
+		if node.Type == "organization" {
+			return node.ID, nil
+		}
+	}
+
+	return "", fmt.Errorf("no organization found in ancestry for project %s", projectID)
+}
+
 // BuildHierarchy builds a complete hierarchy tree
 func (s *OrganizationsService) BuildHierarchy() ([]HierarchyNode, error) {
 	// Get organizations

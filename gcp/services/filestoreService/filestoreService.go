@@ -72,7 +72,7 @@ func (s *FilestoreService) ListInstances(projectID string) ([]FilestoreInstanceI
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, gcpinternal.ParseGCPError(err, "file.googleapis.com")
 	}
 	return instances, nil
 }

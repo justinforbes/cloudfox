@@ -105,7 +105,9 @@ func (ars *ArtifactRegistryService) RepositoriesAndArtifacts(projectID string) (
 		// Fetch artifacts for the current repository.
 		artifacts, err := ars.Artifacts(projectID, location, repositoryName)
 		if err != nil {
-			logger.InfoM(fmt.Sprintf("Failed to retrieve artifacts for repository %s: %v", repositoryName, err), globals.GCP_ARTIFACT_RESGISTRY_MODULE_NAME)
+			parsedErr := gcpinternal.ParseGCPError(err, "artifactregistry.googleapis.com")
+			gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_ARTIFACT_RESGISTRY_MODULE_NAME,
+				fmt.Sprintf("Failed to retrieve artifacts for repository %s", repositoryName))
 			continue // Optionally continue to the next repository or handle error differently.
 		}
 		combinedInfo.Artifacts = append(combinedInfo.Artifacts, artifacts...)

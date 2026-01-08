@@ -419,7 +419,9 @@ func (s *IAMService) ServiceAccounts(projectID string) ([]ServiceAccountInfo, er
 			keys, err := s.getServiceAccountKeys(ctx, iamService, sa.Name)
 			if err != nil {
 				// Log but don't fail - we might not have permission
-				logger.InfoM(fmt.Sprintf("Could not list keys for %s: %v", sa.Email, err), globals.GCP_IAM_MODULE_NAME)
+				parsedErr := gcpinternal.ParseGCPError(err, "iam.googleapis.com")
+				gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_IAM_MODULE_NAME,
+					fmt.Sprintf("Could not list keys for %s", sa.Email))
 			} else {
 				saInfo.Keys = keys
 				// Count user-managed keys only
@@ -520,7 +522,9 @@ func (s *IAMService) CustomRoles(projectID string) ([]CustomRole, error) {
 	})
 	if err != nil {
 		// Don't fail completely - we might just not have access to list roles
-		logger.InfoM(fmt.Sprintf("Could not list custom roles for project %s: %v", projectID, err), globals.GCP_IAM_MODULE_NAME)
+		parsedErr := gcpinternal.ParseGCPError(err, "iam.googleapis.com")
+		gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_IAM_MODULE_NAME,
+			fmt.Sprintf("Could not list custom roles for project %s", projectID))
 	}
 
 	return customRoles, nil
@@ -534,7 +538,8 @@ func (s *IAMService) PoliciesWithInheritance(projectID string) ([]PolicyBinding,
 	ancestry, err := s.projectAncestry(projectID)
 	if err != nil {
 		// If we can't get ancestry, just return project-level policies
-		logger.InfoM(fmt.Sprintf("Could not get ancestry for project %s, returning project-level policies only: %v", projectID, err), globals.GCP_IAM_MODULE_NAME)
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+			fmt.Sprintf("Could not get ancestry for project %s, returning project-level policies only", projectID))
 		return s.Policies(projectID, "project")
 	}
 
@@ -544,7 +549,8 @@ func (s *IAMService) PoliciesWithInheritance(projectID string) ([]PolicyBinding,
 	for _, resource := range ancestry {
 		bindings, err := s.getPoliciesForResource(ctx, resource.Id, resource.Type)
 		if err != nil {
-			logger.InfoM(fmt.Sprintf("Could not get policies for %s/%s: %v", resource.Type, resource.Id, err), globals.GCP_IAM_MODULE_NAME)
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+				fmt.Sprintf("Could not get policies for %s/%s", resource.Type, resource.Id))
 			continue
 		}
 
@@ -576,14 +582,14 @@ func (s *IAMService) getPoliciesForResource(ctx context.Context, resourceID stri
 			client, err = resourcemanager.NewProjectsClient(ctx)
 		}
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 		defer client.Close()
 
 		resourceName = "projects/" + resourceID
 		policy, err := client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 		return convertPolicyToBindings(policy, resourceID, resourceType, resourceName), nil
 
@@ -596,14 +602,14 @@ func (s *IAMService) getPoliciesForResource(ctx context.Context, resourceID stri
 			client, err = resourcemanager.NewFoldersClient(ctx)
 		}
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 		defer client.Close()
 
 		resourceName = "folders/" + resourceID
 		policy, err := client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 		return convertPolicyToBindings(policy, resourceID, resourceType, resourceName), nil
 
@@ -616,14 +622,14 @@ func (s *IAMService) getPoliciesForResource(ctx context.Context, resourceID stri
 			client, err = resourcemanager.NewOrganizationsClient(ctx)
 		}
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 		defer client.Close()
 
 		resourceName = "organizations/" + resourceID
 		policy, err := client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: resourceName})
 		if err != nil {
-			return nil, err
+			return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 		}
 		return convertPolicyToBindings(policy, resourceID, resourceType, resourceName), nil
 
@@ -675,7 +681,8 @@ func (s *IAMService) CombinedIAM(projectID string) (CombinedIAMData, error) {
 	serviceAccounts, err := s.ServiceAccounts(projectID)
 	if err != nil {
 		// Don't fail completely
-		logger.InfoM(fmt.Sprintf("Could not get service accounts: %v", err), globals.GCP_IAM_MODULE_NAME)
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+			"Could not get service accounts")
 	} else {
 		data.ServiceAccounts = serviceAccounts
 	}
@@ -683,7 +690,8 @@ func (s *IAMService) CombinedIAM(projectID string) (CombinedIAMData, error) {
 	// Get custom roles
 	customRoles, err := s.CustomRoles(projectID)
 	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not get custom roles: %v", err), globals.GCP_IAM_MODULE_NAME)
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+			"Could not get custom roles")
 	} else {
 		data.CustomRoles = customRoles
 	}
@@ -910,7 +918,8 @@ func (s *IAMService) GetEntityPermissions(ctx context.Context, projectID string,
 		// Get permissions for this role
 		permissions, err := s.GetRolePermissions(ctx, binding.Role)
 		if err != nil {
-			logger.InfoM(fmt.Sprintf("Could not get permissions for role %s: %v", binding.Role, err), globals.GCP_IAM_MODULE_NAME)
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+				fmt.Sprintf("Could not get permissions for role %s", binding.Role))
 			continue
 		}
 
@@ -959,7 +968,8 @@ func (s *IAMService) GetAllEntityPermissions(projectID string) ([]EntityPermissi
 	for _, principal := range principals {
 		entityPerms, err := s.GetEntityPermissions(ctx, projectID, principal.Name)
 		if err != nil {
-			logger.InfoM(fmt.Sprintf("Could not get permissions for %s: %v", principal.Name, err), globals.GCP_IAM_MODULE_NAME)
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+				fmt.Sprintf("Could not get permissions for %s", principal.Name))
 			continue
 		}
 		allPerms = append(allPerms, *entityPerms)
@@ -1054,7 +1064,8 @@ func (s *IAMService) GetGroupMemberships(ctx context.Context, groups []GroupInfo
 		enrichedGroup, err := s.GetGroupMembership(ctx, group.Email)
 		if err != nil {
 			// Log but don't fail - Cloud Identity API access is often restricted
-			logger.InfoM(fmt.Sprintf("Could not enumerate membership for group %s: %v", group.Email, err), globals.GCP_IAM_MODULE_NAME)
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+				fmt.Sprintf("Could not enumerate membership for group %s", group.Email))
 			// Keep the original group info without membership
 			group.MembershipEnumerated = false
 			enrichedGroups = append(enrichedGroups, group)
@@ -1208,7 +1219,8 @@ func (s *IAMService) GetAllEntityPermissionsWithGroupExpansion(projectID string)
 	// Expand permissions based on group membership
 	expandedPerms, err := s.ExpandGroupPermissions(ctx, projectID, entityPerms)
 	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not expand group permissions: %v", err), globals.GCP_IAM_MODULE_NAME)
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+			"Could not expand group permissions")
 		return entityPerms, enrichedGroups, nil
 	}
 
@@ -1302,7 +1314,8 @@ func (s *IAMService) GetAllServiceAccountImpersonation(projectID string) ([]SAIm
 		info, err := s.GetServiceAccountIAMPolicy(ctx, sa.Email, projectID)
 		if err != nil {
 			// Log but don't fail - we might not have permission
-			logger.InfoM(fmt.Sprintf("Could not get IAM policy for SA %s: %v", sa.Email, err), globals.GCP_IAM_MODULE_NAME)
+			gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
+				fmt.Sprintf("Could not get IAM policy for SA %s", sa.Email))
 			continue
 		}
 		results = append(results, *info)

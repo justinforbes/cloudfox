@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	orgsservice "github.com/BishopFox/cloudfox/gcp/services/organizationsService"
 	vpcscservice "github.com/BishopFox/cloudfox/gcp/services/vpcscService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
@@ -28,12 +29,12 @@ Features:
 - Identifies overly permissive configurations
 - Analyzes ingress/egress policies
 
-Note: Requires organization ID (--org flag) as VPC-SC is org-level.`,
+Note: Organization ID is auto-discovered from project ancestry. Use --org flag to override.`,
 	Run: runGCPVPCSCCommand,
 }
 
 func init() {
-	GCPVPCSCCommand.Flags().StringVar(&orgID, "org", "", "Organization ID (required)")
+	GCPVPCSCCommand.Flags().StringVar(&orgID, "org", "", "Organization ID (auto-discovered if not provided)")
 }
 
 type VPCSCModule struct {
@@ -60,14 +61,31 @@ func runGCPVPCSCCommand(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if orgID == "" {
-		cmdCtx.Logger.ErrorM("Organization ID is required. Use --org flag.", globals.GCP_VPCSC_MODULE_NAME)
-		return
+	// Auto-discover org ID if not provided
+	effectiveOrgID := orgID
+	if effectiveOrgID == "" {
+		if len(cmdCtx.ProjectIDs) == 0 {
+			cmdCtx.Logger.ErrorM("No projects discovered and no --org flag provided. Cannot determine organization.", globals.GCP_VPCSC_MODULE_NAME)
+			return
+		}
+
+		cmdCtx.Logger.InfoM("Auto-discovering organization ID from project ancestry...", globals.GCP_VPCSC_MODULE_NAME)
+		orgsSvc := orgsservice.New()
+
+		// Try to get org ID from the first project
+		discoveredOrgID, err := orgsSvc.GetOrganizationIDFromProject(cmdCtx.ProjectIDs[0])
+		if err != nil {
+			cmdCtx.Logger.ErrorM(fmt.Sprintf("Could not auto-discover organization ID: %v. Use --org flag to specify.", err), globals.GCP_VPCSC_MODULE_NAME)
+			return
+		}
+
+		effectiveOrgID = discoveredOrgID
+		cmdCtx.Logger.InfoM(fmt.Sprintf("Discovered organization ID: %s", effectiveOrgID), globals.GCP_VPCSC_MODULE_NAME)
 	}
 
 	module := &VPCSCModule{
 		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
-		OrgID:         orgID,
+		OrgID:         effectiveOrgID,
 		Policies:      []vpcscservice.AccessPolicyInfo{},
 		Perimeters:    []vpcscservice.ServicePerimeterInfo{},
 		AccessLevels:  []vpcscservice.AccessLevelInfo{},

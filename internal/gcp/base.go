@@ -11,6 +11,8 @@ import (
 	"github.com/BishopFox/cloudfox/internal"
 	"github.com/spf13/cobra"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ------------------------------
@@ -24,11 +26,45 @@ var (
 
 // ParseGCPError converts GCP API errors into cleaner, standardized error types
 // This should be used by all GCP service modules for consistent error handling
+// Handles both REST API errors (googleapi.Error) and gRPC errors (status.Error)
 func ParseGCPError(err error, apiName string) error {
 	if err == nil {
 		return nil
 	}
 
+	// Check for gRPC status errors (used by Cloud Asset, Spanner, and other gRPC-based APIs)
+	if grpcStatus, ok := status.FromError(err); ok {
+		errStr := err.Error()
+
+		switch grpcStatus.Code() {
+		case codes.PermissionDenied:
+			// Check for SERVICE_DISABLED in error details or message
+			if strings.Contains(errStr, "SERVICE_DISABLED") {
+				return fmt.Errorf("%w: %s", ErrAPINotEnabled, apiName)
+			}
+			return ErrPermissionDenied
+
+		case codes.NotFound:
+			return ErrNotFound
+
+		case codes.Unauthenticated:
+			return fmt.Errorf("authentication failed - check credentials")
+
+		case codes.ResourceExhausted:
+			return fmt.Errorf("rate limited - too many requests")
+
+		case codes.Unavailable, codes.Internal:
+			return fmt.Errorf("GCP service error: %s", grpcStatus.Message())
+
+		case codes.InvalidArgument:
+			return fmt.Errorf("bad request: %s", grpcStatus.Message())
+		}
+
+		// Default: return cleaner error message
+		return fmt.Errorf("gRPC error (%s): %s", grpcStatus.Code().String(), grpcStatus.Message())
+	}
+
+	// Check for REST API errors (googleapi.Error)
 	var googleErr *googleapi.Error
 	if errors.As(err, &googleErr) {
 		errStr := googleErr.Error()
@@ -63,6 +99,15 @@ func ParseGCPError(err error, apiName string) error {
 
 		// Default: return cleaner error message
 		return fmt.Errorf("API error (code %d): %s", googleErr.Code, googleErr.Message)
+	}
+
+	// Fallback: check error string for common patterns
+	errStr := err.Error()
+	if strings.Contains(errStr, "SERVICE_DISABLED") {
+		return fmt.Errorf("%w: %s", ErrAPINotEnabled, apiName)
+	}
+	if strings.Contains(errStr, "PERMISSION_DENIED") || strings.Contains(errStr, "PermissionDenied") {
+		return ErrPermissionDenied
 	}
 
 	return err

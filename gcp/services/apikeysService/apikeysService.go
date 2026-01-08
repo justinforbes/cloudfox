@@ -312,7 +312,9 @@ func (s *APIKeysService) ListAPIKeysWithKeyStrings(projectID string) ([]APIKeyIn
 		keyString, err := s.GetKeyString(keys[i].Name)
 		if err != nil {
 			// Log but don't fail - we might not have permission
-			logger.InfoM(fmt.Sprintf("Could not get key string for %s: %v", keys[i].Name, err), globals.GCP_APIKEYS_MODULE_NAME)
+			parsedErr := gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
+			gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_APIKEYS_MODULE_NAME,
+				fmt.Sprintf("Could not get key string for %s", keys[i].Name))
 		} else {
 			keys[i].KeyString = keyString
 		}
