@@ -265,7 +265,9 @@ func (m *AssetInventoryModule) processProjectsDependencies(ctx context.Context, 
 
 	assetClient, err := asset.NewClient(ctx)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Failed to create Cloud Asset client: %v", err), globals.GCP_ASSET_INVENTORY_MODULE_NAME)
+		parsedErr := gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
+		gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_ASSET_INVENTORY_MODULE_NAME,
+			"Could not create Cloud Asset client")
 		return
 	}
 	defer assetClient.Close()
@@ -308,7 +310,8 @@ func (m *AssetInventoryModule) processProjectWithDependencies(ctx context.Contex
 		}
 		if err != nil {
 			m.CommandCounter.Error++
-			gcpinternal.HandleGCPError(err, logger, globals.GCP_ASSET_INVENTORY_MODULE_NAME,
+			parsedErr := gcpinternal.ParseGCPError(err, "cloudasset.googleapis.com")
+			gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_ASSET_INVENTORY_MODULE_NAME,
 				fmt.Sprintf("Could not enumerate assets in project %s", projectID))
 			break
 		}

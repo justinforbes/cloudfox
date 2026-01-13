@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	run "google.golang.org/api/run/v2"
@@ -158,7 +159,27 @@ func (cs *CloudRunService) Services(projectID string) ([]ServiceInfo, error) {
 	return services, nil
 }
 
+// cloudRunRegions contains all Cloud Run regions
+// Note: Cloud Run Jobs API does NOT support the "-" wildcard for locations (unlike Services API)
+// so we need to iterate through regions explicitly
+var cloudRunRegions = []string{
+	// Tier 1 regions
+	"asia-east1", "asia-northeast1", "asia-northeast2", "asia-south1",
+	"europe-north1", "europe-west1", "europe-west4",
+	"me-west1", "us-central1", "us-east1", "us-east4", "us-east5", "us-south1", "us-west1",
+	// Tier 2 regions
+	"africa-south1", "asia-east2", "asia-northeast3", "asia-southeast1", "asia-southeast2", "asia-south2",
+	"australia-southeast1", "australia-southeast2",
+	"europe-central2", "europe-west2", "europe-west3", "europe-west6",
+	"me-central1", "me-central2",
+	"northamerica-northeast1", "northamerica-northeast2",
+	"southamerica-east1", "southamerica-west1",
+	"us-west2", "us-west3", "us-west4",
+}
+
 // Jobs retrieves all Cloud Run jobs in a project across all regions
+// Note: The Cloud Run Jobs API does NOT support the "-" wildcard for locations
+// unlike the Services API, so we must iterate through regions explicitly
 func (cs *CloudRunService) Jobs(projectID string) ([]JobInfo, error) {
 	ctx := context.Background()
 
@@ -168,21 +189,53 @@ func (cs *CloudRunService) Jobs(projectID string) ([]JobInfo, error) {
 	}
 
 	var jobs []JobInfo
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var lastErr error
+	var errMu sync.Mutex
 
-	// List jobs across all locations
-	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
+	// Use a semaphore to limit concurrent API calls
+	semaphore := make(chan struct{}, 10) // Max 10 concurrent requests
 
-	call := service.Projects.Locations.Jobs.List(parent)
-	err = call.Pages(ctx, func(page *run.GoogleCloudRunV2ListJobsResponse) error {
-		for _, job := range page.Jobs {
-			info := parseJobInfo(job, projectID)
-			jobs = append(jobs, info)
-		}
-		return nil
-	})
+	// Iterate through all Cloud Run regions in parallel
+	for _, region := range cloudRunRegions {
+		wg.Add(1)
+		go func(region string) {
+			defer wg.Done()
 
-	if err != nil {
-		return nil, gcpinternal.ParseGCPError(err, "run.googleapis.com")
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
+
+			call := service.Projects.Locations.Jobs.List(parent)
+			err := call.Pages(ctx, func(page *run.GoogleCloudRunV2ListJobsResponse) error {
+				for _, job := range page.Jobs {
+					info := parseJobInfo(job, projectID)
+					mu.Lock()
+					jobs = append(jobs, info)
+					mu.Unlock()
+				}
+				return nil
+			})
+
+			if err != nil {
+				// Track the last error but continue - region may not have jobs or API may not be enabled
+				// Common errors: 404 (no jobs in region), 403 (permission denied)
+				errMu.Lock()
+				lastErr = err
+				errMu.Unlock()
+			}
+		}(region)
+	}
+
+	wg.Wait()
+
+	// Only return error if we got no jobs AND had errors
+	// If we found jobs in some regions, that's success
+	if len(jobs) == 0 && lastErr != nil {
+		return nil, gcpinternal.ParseGCPError(lastErr, "run.googleapis.com")
 	}
 
 	return jobs, nil

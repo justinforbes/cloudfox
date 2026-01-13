@@ -44,7 +44,7 @@ func ParseGCPError(err error, apiName string) error {
 			}
 			// Check for quota project requirement (API not enabled or misconfigured)
 			if strings.Contains(errStr, "requires a quota project") {
-				return fmt.Errorf("%w: %s (enable API or set quota project)", ErrAPINotEnabled, apiName)
+				return fmt.Errorf("%w: %s (set quota project with: gcloud auth application-default set-quota-project PROJECT_ID)", ErrAPINotEnabled, apiName)
 			}
 			return ErrPermissionDenied
 
@@ -109,6 +109,10 @@ func ParseGCPError(err error, apiName string) error {
 	errStr := err.Error()
 	if strings.Contains(errStr, "SERVICE_DISABLED") {
 		return fmt.Errorf("%w: %s", ErrAPINotEnabled, apiName)
+	}
+	// Check for quota project requirement (common with ADC)
+	if strings.Contains(errStr, "requires a quota project") {
+		return fmt.Errorf("%w: %s (set quota project with: gcloud auth application-default set-quota-project PROJECT_ID)", ErrAPINotEnabled, apiName)
 	}
 	if strings.Contains(errStr, "PERMISSION_DENIED") || strings.Contains(errStr, "PermissionDenied") {
 		return ErrPermissionDenied
