@@ -8,6 +8,8 @@ import (
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v1"
 	iam "google.golang.org/api/iam/v1"
+	logging "google.golang.org/api/logging/v2"
+	pubsub "google.golang.org/api/pubsub/v1"
 )
 
 type CrossProjectService struct{}
@@ -46,6 +48,31 @@ type LateralMovementPath struct {
 	TargetRoles        []string `json:"targetRoles"`
 	PrivilegeLevel     string   `json:"privilegeLevel"`     // ADMIN, WRITE, READ
 	ExploitCommands    []string `json:"exploitCommands"`
+}
+
+// CrossProjectLoggingSink represents a logging sink exporting to another project
+type CrossProjectLoggingSink struct {
+	SourceProject   string `json:"sourceProject"`   // Project where sink is configured
+	SinkName        string `json:"sinkName"`        // Name of the logging sink
+	Destination     string `json:"destination"`     // Full destination (bucket, BQ, pubsub, etc)
+	DestinationType string `json:"destinationType"` // storage, bigquery, pubsub, logging
+	TargetProject   string `json:"targetProject"`   // Project where data is sent
+	Filter          string `json:"filter"`          // Log filter
+	RiskLevel       string `json:"riskLevel"`       // CRITICAL, HIGH, MEDIUM, LOW
+	RiskReasons     []string `json:"riskReasons"`
+}
+
+// CrossProjectPubSubExport represents a Pub/Sub subscription exporting to another project
+type CrossProjectPubSubExport struct {
+	SourceProject   string `json:"sourceProject"`   // Project where subscription is
+	TopicProject    string `json:"topicProject"`    // Project where topic is
+	TopicName       string `json:"topicName"`       // Topic name
+	SubscriptionName string `json:"subscriptionName"` // Subscription name
+	ExportType      string `json:"exportType"`      // push, bigquery, cloudstorage
+	ExportDest      string `json:"exportDest"`      // Destination details
+	TargetProject   string `json:"targetProject"`   // Project where data is exported to
+	RiskLevel       string `json:"riskLevel"`
+	RiskReasons     []string `json:"riskReasons"`
 }
 
 // AnalyzeCrossProjectAccess analyzes cross-project IAM bindings for a set of projects
@@ -421,4 +448,315 @@ func categorizePrivilegeLevel(role string) string {
 		return "READ"
 	}
 	return "READ" // Default to READ for unknown
+}
+
+// FindCrossProjectLoggingSinks discovers logging sinks that export to other projects
+func (s *CrossProjectService) FindCrossProjectLoggingSinks(projectIDs []string) ([]CrossProjectLoggingSink, error) {
+	ctx := context.Background()
+
+	loggingService, err := logging.NewService(ctx)
+	if err != nil {
+		return nil, gcpinternal.ParseGCPError(err, "logging.googleapis.com")
+	}
+
+	// Build project lookup map
+	projectMap := make(map[string]bool)
+	for _, p := range projectIDs {
+		projectMap[p] = true
+	}
+
+	var crossProjectSinks []CrossProjectLoggingSink
+
+	for _, sourceProject := range projectIDs {
+		parent := fmt.Sprintf("projects/%s", sourceProject)
+		req := loggingService.Projects.Sinks.List(parent)
+		err := req.Pages(ctx, func(page *logging.ListSinksResponse) error {
+			for _, sink := range page.Sinks {
+				// Parse destination to extract target project
+				destType, targetProject := parseLoggingDestination(sink.Destination)
+
+				// Check if this is a cross-project sink
+				if targetProject != "" && targetProject != sourceProject {
+					riskLevel, riskReasons := analyzeLoggingSinkRisk(sink, targetProject, projectMap)
+
+					crossSink := CrossProjectLoggingSink{
+						SourceProject:   sourceProject,
+						SinkName:        sink.Name,
+						Destination:     sink.Destination,
+						DestinationType: destType,
+						TargetProject:   targetProject,
+						Filter:          sink.Filter,
+						RiskLevel:       riskLevel,
+						RiskReasons:     riskReasons,
+					}
+					crossProjectSinks = append(crossProjectSinks, crossSink)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			// Continue with other projects
+			continue
+		}
+	}
+
+	return crossProjectSinks, nil
+}
+
+// parseLoggingDestination parses a logging sink destination to extract type and project
+func parseLoggingDestination(destination string) (destType, projectID string) {
+	// Destination formats:
+	// storage.googleapis.com/BUCKET_NAME
+	// bigquery.googleapis.com/projects/PROJECT_ID/datasets/DATASET_ID
+	// pubsub.googleapis.com/projects/PROJECT_ID/topics/TOPIC_ID
+	// logging.googleapis.com/projects/PROJECT_ID/locations/LOCATION/buckets/BUCKET_ID
+
+	if strings.HasPrefix(destination, "storage.googleapis.com/") {
+		// GCS bucket - need to look up bucket to get project (not easily extractable)
+		return "storage", ""
+	}
+
+	if strings.HasPrefix(destination, "bigquery.googleapis.com/") {
+		destType = "bigquery"
+		// Format: bigquery.googleapis.com/projects/PROJECT_ID/datasets/DATASET_ID
+		parts := strings.Split(destination, "/")
+		for i, part := range parts {
+			if part == "projects" && i+1 < len(parts) {
+				return destType, parts[i+1]
+			}
+		}
+	}
+
+	if strings.HasPrefix(destination, "pubsub.googleapis.com/") {
+		destType = "pubsub"
+		// Format: pubsub.googleapis.com/projects/PROJECT_ID/topics/TOPIC_ID
+		parts := strings.Split(destination, "/")
+		for i, part := range parts {
+			if part == "projects" && i+1 < len(parts) {
+				return destType, parts[i+1]
+			}
+		}
+	}
+
+	if strings.HasPrefix(destination, "logging.googleapis.com/") {
+		destType = "logging"
+		// Format: logging.googleapis.com/projects/PROJECT_ID/locations/LOCATION/buckets/BUCKET_ID
+		parts := strings.Split(destination, "/")
+		for i, part := range parts {
+			if part == "projects" && i+1 < len(parts) {
+				return destType, parts[i+1]
+			}
+		}
+	}
+
+	return "unknown", ""
+}
+
+// analyzeLoggingSinkRisk analyzes the risk level of a cross-project logging sink
+func analyzeLoggingSinkRisk(sink *logging.LogSink, targetProject string, knownProjects map[string]bool) (string, []string) {
+	var reasons []string
+	score := 0
+
+	// External project is higher risk
+	if !knownProjects[targetProject] {
+		reasons = append(reasons, "Logs exported to project outside analyzed scope")
+		score += 2
+	}
+
+	// Check if filter is broad (empty = all logs)
+	if sink.Filter == "" {
+		reasons = append(reasons, "No filter - ALL logs exported")
+		score += 2
+	}
+
+	// Check for sensitive log types in filter
+	sensitiveLogTypes := []string{"data_access", "admin_activity", "cloudaudit"}
+	for _, lt := range sensitiveLogTypes {
+		if strings.Contains(sink.Filter, lt) {
+			reasons = append(reasons, fmt.Sprintf("Exports sensitive logs: %s", lt))
+			score += 1
+		}
+	}
+
+	// Check if sink has service account (writerIdentity)
+	if sink.WriterIdentity != "" {
+		reasons = append(reasons, fmt.Sprintf("Service account: %s", sink.WriterIdentity))
+	}
+
+	if score >= 3 {
+		return "HIGH", reasons
+	} else if score >= 2 {
+		return "MEDIUM", reasons
+	}
+	return "LOW", reasons
+}
+
+// FindCrossProjectPubSubExports discovers Pub/Sub subscriptions that export to other projects
+func (s *CrossProjectService) FindCrossProjectPubSubExports(projectIDs []string) ([]CrossProjectPubSubExport, error) {
+	ctx := context.Background()
+
+	pubsubService, err := pubsub.NewService(ctx)
+	if err != nil {
+		return nil, gcpinternal.ParseGCPError(err, "pubsub.googleapis.com")
+	}
+
+	// Build project lookup map
+	projectMap := make(map[string]bool)
+	for _, p := range projectIDs {
+		projectMap[p] = true
+	}
+
+	var crossProjectExports []CrossProjectPubSubExport
+
+	for _, sourceProject := range projectIDs {
+		// List all subscriptions in project
+		parent := fmt.Sprintf("projects/%s", sourceProject)
+		req := pubsubService.Projects.Subscriptions.List(parent)
+		err := req.Pages(ctx, func(page *pubsub.ListSubscriptionsResponse) error {
+			for _, sub := range page.Subscriptions {
+				// Extract subscription name and topic project
+				subName := extractResourceNameFromPath(sub.Name)
+				topicProject := extractProjectFromPath(sub.Topic)
+
+				var exportType, exportDest, targetProject string
+
+				// Check for BigQuery export
+				if sub.BigqueryConfig != nil && sub.BigqueryConfig.Table != "" {
+					exportType = "bigquery"
+					exportDest = sub.BigqueryConfig.Table
+					// Extract project from table: PROJECT:DATASET.TABLE
+					if parts := strings.Split(sub.BigqueryConfig.Table, ":"); len(parts) > 0 {
+						targetProject = parts[0]
+					}
+				}
+
+				// Check for Cloud Storage export
+				if sub.CloudStorageConfig != nil && sub.CloudStorageConfig.Bucket != "" {
+					exportType = "cloudstorage"
+					exportDest = sub.CloudStorageConfig.Bucket
+					// Bucket project not easily extractable without additional API call
+					targetProject = ""
+				}
+
+				// Check for push endpoint
+				if sub.PushConfig != nil && sub.PushConfig.PushEndpoint != "" {
+					exportType = "push"
+					exportDest = sub.PushConfig.PushEndpoint
+					// External push endpoints can't be mapped to a project
+					targetProject = "external"
+				}
+
+				// Check if subscription is to a topic in another project
+				if topicProject != "" && topicProject != sourceProject {
+					// This is a cross-project topic subscription
+					riskLevel, riskReasons := analyzePubSubExportRisk(sub, targetProject, projectMap, topicProject, sourceProject)
+					export := CrossProjectPubSubExport{
+						SourceProject:    sourceProject,
+						TopicProject:     topicProject,
+						TopicName:        extractResourceNameFromPath(sub.Topic),
+						SubscriptionName: subName,
+						ExportType:       "cross-project-topic",
+						ExportDest:       sub.Topic,
+						TargetProject:    topicProject,
+						RiskLevel:        riskLevel,
+						RiskReasons:      riskReasons,
+					}
+					crossProjectExports = append(crossProjectExports, export)
+				}
+
+				// If exporting to another project via BQ/GCS
+				if targetProject != "" && targetProject != sourceProject && targetProject != "external" {
+					riskLevel, riskReasons := analyzePubSubExportRisk(sub, targetProject, projectMap, topicProject, sourceProject)
+					export := CrossProjectPubSubExport{
+						SourceProject:    sourceProject,
+						TopicProject:     topicProject,
+						TopicName:        extractResourceNameFromPath(sub.Topic),
+						SubscriptionName: subName,
+						ExportType:       exportType,
+						ExportDest:       exportDest,
+						TargetProject:    targetProject,
+						RiskLevel:        riskLevel,
+						RiskReasons:      riskReasons,
+					}
+					crossProjectExports = append(crossProjectExports, export)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			// Continue with other projects
+			continue
+		}
+	}
+
+	return crossProjectExports, nil
+}
+
+// extractResourceNameFromPath extracts the resource name from a full path
+func extractResourceNameFromPath(path string) string {
+	parts := strings.Split(path, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return path
+}
+
+// extractProjectFromPath extracts the project ID from a resource path
+func extractProjectFromPath(path string) string {
+	// Format: projects/PROJECT_ID/...
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		if part == "projects" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+// analyzePubSubExportRisk analyzes the risk level of a cross-project Pub/Sub export
+func analyzePubSubExportRisk(sub *pubsub.Subscription, targetProject string, knownProjects map[string]bool, topicProject, sourceProject string) (string, []string) {
+	var reasons []string
+	score := 0
+
+	// External target project is higher risk
+	if targetProject != "" && !knownProjects[targetProject] {
+		reasons = append(reasons, "Data exported to project outside analyzed scope")
+		score += 2
+	}
+
+	// Cross-project topic subscription
+	if topicProject != "" && topicProject != sourceProject {
+		reasons = append(reasons, fmt.Sprintf("Subscription to topic in project %s", topicProject))
+		score += 1
+	}
+
+	// Push to external endpoint
+	if sub.PushConfig != nil && sub.PushConfig.PushEndpoint != "" {
+		endpoint := sub.PushConfig.PushEndpoint
+		reasons = append(reasons, fmt.Sprintf("Push endpoint: %s", endpoint))
+		// External endpoints are high risk
+		if !strings.Contains(endpoint, ".run.app") && !strings.Contains(endpoint, ".cloudfunctions.net") {
+			reasons = append(reasons, "Push to external (non-GCP) endpoint")
+			score += 2
+		}
+	}
+
+	// BigQuery export
+	if sub.BigqueryConfig != nil {
+		reasons = append(reasons, fmt.Sprintf("BigQuery export: %s", sub.BigqueryConfig.Table))
+		score += 1
+	}
+
+	// Cloud Storage export
+	if sub.CloudStorageConfig != nil {
+		reasons = append(reasons, fmt.Sprintf("Cloud Storage export: %s", sub.CloudStorageConfig.Bucket))
+		score += 1
+	}
+
+	if score >= 3 {
+		return "HIGH", reasons
+	} else if score >= 2 {
+		return "MEDIUM", reasons
+	}
+	return "LOW", reasons
 }

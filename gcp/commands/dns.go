@@ -47,10 +47,11 @@ Attack Surface:
 type DNSModule struct {
 	gcpinternal.BaseGCPModule
 
-	Zones   []DNSService.ZoneInfo
-	Records []DNSService.RecordInfo
-	LootMap map[string]*internal.LootFile
-	mu      sync.Mutex
+	Zones         []DNSService.ZoneInfo
+	Records       []DNSService.RecordInfo
+	TakeoverRisks []DNSService.TakeoverRisk
+	LootMap       map[string]*internal.LootFile
+	mu            sync.Mutex
 }
 
 // ------------------------------
@@ -77,6 +78,7 @@ func runGCPDNSCommand(cmd *cobra.Command, args []string) {
 		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
 		Zones:         []DNSService.ZoneInfo{},
 		Records:       []DNSService.RecordInfo{},
+		TakeoverRisks: []DNSService.TakeoverRisk{},
 		LootMap:       make(map[string]*internal.LootFile),
 	}
 
@@ -95,16 +97,29 @@ func (m *DNSModule) Execute(ctx context.Context, logger internal.Logger) {
 		return
 	}
 
-	// Count zone types
+	// Count zone types and security issues
 	publicCount := 0
 	privateCount := 0
+	transferModeCount := 0
+	dnssecOffCount := 0
+
 	for _, zone := range m.Zones {
 		if zone.Visibility == "public" {
 			publicCount++
+			// Check DNSSEC status for public zones
+			if zone.DNSSECState == "" || zone.DNSSECState == "off" {
+				dnssecOffCount++
+			} else if zone.DNSSECState == "transfer" {
+				transferModeCount++
+			}
 		} else {
 			privateCount++
 		}
 	}
+
+	// Check for subdomain takeover risks
+	ds := DNSService.New()
+	m.TakeoverRisks = ds.CheckTakeoverRisks(m.Records)
 
 	msg := fmt.Sprintf("Found %d zone(s), %d record(s)", len(m.Zones), len(m.Records))
 	if publicCount > 0 {
@@ -114,6 +129,17 @@ func (m *DNSModule) Execute(ctx context.Context, logger internal.Logger) {
 		msg += fmt.Sprintf(" [%d private]", privateCount)
 	}
 	logger.SuccessM(msg, globals.GCP_DNS_MODULE_NAME)
+
+	// Log security warnings
+	if dnssecOffCount > 0 {
+		logger.InfoM(fmt.Sprintf("[SECURITY] %d public zone(s) have DNSSEC disabled", dnssecOffCount), globals.GCP_DNS_MODULE_NAME)
+	}
+	if transferModeCount > 0 {
+		logger.InfoM(fmt.Sprintf("[SECURITY] %d zone(s) in DNSSEC transfer mode (vulnerable during migration)", transferModeCount), globals.GCP_DNS_MODULE_NAME)
+	}
+	if len(m.TakeoverRisks) > 0 {
+		logger.InfoM(fmt.Sprintf("[SECURITY] %d potential subdomain takeover risk(s) detected", len(m.TakeoverRisks)), globals.GCP_DNS_MODULE_NAME)
+	}
 
 	m.writeOutput(ctx, logger)
 }
@@ -209,6 +235,7 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		"DNS Name",
 		"Visibility",
 		"DNSSEC",
+		"Security",
 		"Networks/Peering",
 		"Forwarding",
 		"IAM Role",
@@ -221,6 +248,18 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		dnssec := zone.DNSSECState
 		if dnssec == "" {
 			dnssec = "off"
+		}
+
+		// Format security status
+		security := "-"
+		if zone.Visibility == "public" {
+			if zone.DNSSECState == "" || zone.DNSSECState == "off" {
+				security = "DNSSEC Disabled"
+			} else if zone.DNSSECState == "transfer" {
+				security = "Transfer Mode (Vulnerable)"
+			} else if zone.DNSSECState == "on" {
+				security = "OK"
+			}
 		}
 
 		// Format networks/peering
@@ -250,6 +289,7 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 					zone.DNSName,
 					zone.Visibility,
 					dnssec,
+					security,
 					networkInfo,
 					forwarding,
 					binding.Role,
@@ -265,6 +305,7 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 				zone.DNSName,
 				zone.Visibility,
 				dnssec,
+				security,
 				networkInfo,
 				forwarding,
 				"-",
@@ -273,13 +314,30 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		}
 	}
 
-	// Records table (interesting types only, no truncation)
+	// Records table (interesting types only, with takeover risk column)
 	recordsHeader := []string{
 		"Zone",
 		"Name",
 		"Type",
 		"TTL",
 		"Data",
+		"Takeover Risk",
+	}
+
+	// Build a map of takeover risks by record name for quick lookup
+	takeoverRiskMap := make(map[string]DNSService.TakeoverRisk)
+	for _, risk := range m.TakeoverRisks {
+		takeoverRiskMap[risk.RecordName] = risk
+
+		// Add to loot file
+		m.LootMap["dns-commands"].Contents += fmt.Sprintf(
+			"# [TAKEOVER RISK] %s -> %s (%s)\n"+
+				"# Risk: %s - %s\n"+
+				"# Verify with:\n%s\n\n",
+			risk.RecordName, risk.Target, risk.Service,
+			risk.RiskLevel, risk.Description,
+			risk.Verification,
+		)
 	}
 
 	var recordsBody [][]string
@@ -292,12 +350,19 @@ func (m *DNSModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		// Format data - no truncation
 		data := strings.Join(record.RRDatas, ", ")
 
+		// Check for takeover risk
+		takeoverRisk := "-"
+		if risk, exists := takeoverRiskMap[record.Name]; exists {
+			takeoverRisk = fmt.Sprintf("%s (%s)", risk.RiskLevel, risk.Service)
+		}
+
 		recordsBody = append(recordsBody, []string{
 			record.ZoneName,
 			record.Name,
 			record.Type,
 			fmt.Sprintf("%d", record.TTL),
 			data,
+			takeoverRisk,
 		})
 	}
 

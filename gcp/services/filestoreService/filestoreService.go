@@ -27,11 +27,21 @@ type FilestoreInstanceInfo struct {
 	IPAddresses []string `json:"ipAddresses"`
 	Shares      []ShareInfo `json:"shares"`
 	CreateTime  string   `json:"createTime"`
+	Protocol    string   `json:"protocol"` // NFS_V3, NFS_V4_1
 }
 
 type ShareInfo struct {
-	Name       string `json:"name"`
-	CapacityGB int64  `json:"capacityGb"`
+	Name            string            `json:"name"`
+	CapacityGB      int64             `json:"capacityGb"`
+	NfsExportOptions []NfsExportOption `json:"nfsExportOptions"`
+}
+
+type NfsExportOption struct {
+	IPRanges   []string `json:"ipRanges"`
+	AccessMode string   `json:"accessMode"` // READ_ONLY, READ_WRITE
+	SquashMode string   `json:"squashMode"` // NO_ROOT_SQUASH, ROOT_SQUASH
+	AnonUID    int64    `json:"anonUid"`
+	AnonGID    int64    `json:"anonGid"`
 }
 
 func (s *FilestoreService) ListInstances(projectID string) ([]FilestoreInstanceInfo, error) {
@@ -54,6 +64,7 @@ func (s *FilestoreService) ListInstances(projectID string) ([]FilestoreInstanceI
 				Tier:        instance.Tier,
 				State:       instance.State,
 				CreateTime:  instance.CreateTime,
+				Protocol:    instance.Protocol, // NFS_V3, NFS_V4_1
 			}
 
 			if len(instance.Networks) > 0 {
@@ -62,10 +73,24 @@ func (s *FilestoreService) ListInstances(projectID string) ([]FilestoreInstanceI
 			}
 
 			for _, share := range instance.FileShares {
-				info.Shares = append(info.Shares, ShareInfo{
+				shareInfo := ShareInfo{
 					Name:       share.Name,
 					CapacityGB: share.CapacityGb,
-				})
+				}
+
+				// Parse NFS export options
+				for _, opt := range share.NfsExportOptions {
+					exportOpt := NfsExportOption{
+						IPRanges:   opt.IpRanges,
+						AccessMode: opt.AccessMode,
+						SquashMode: opt.SquashMode,
+						AnonUID:    opt.AnonUid,
+						AnonGID:    opt.AnonGid,
+					}
+					shareInfo.NfsExportOptions = append(shareInfo.NfsExportOptions, exportOpt)
+				}
+
+				info.Shares = append(info.Shares, shareInfo)
 			}
 			instances = append(instances, info)
 		}

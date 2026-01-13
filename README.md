@@ -54,7 +54,7 @@ For the full documentation please refer to our [wiki](https://github.com/BishopF
 | - | - |
 | AWS | 34 |
 | Azure | 4 |
-| GCP | 57 |
+| GCP | 58 |
 | Kubernetes | Support Planned | 
 
 
@@ -248,13 +248,14 @@ Additional policy notes (as of 09/2022):
 | GCP | organizations | Enumerate GCP organization hierarchy |
 | GCP | asset-inventory | Enumerate Cloud Asset Inventory with optional dependency analysis |
 | GCP | backup-inventory | Enumerate backup policies, protected resources, and identify backup gaps |
-| GCP | cross-project | Analyze cross-project access patterns for lateral movement |
 
 ## Attack Path Analysis
 | Provider | Command Name | Description |
 | - | - | - |
 | GCP | lateral-movement | Map lateral movement paths, credential theft vectors, and pivot opportunities |
-| GCP | data-exfiltration | Identify data exfiltration paths and high-risk data exposure |
+| GCP | data-exfiltration | Identify data exfiltration paths with VPC-SC and Org Policy protection status |
+| GCP | public-access | Find resources with allUsers/allAuthenticatedUsers access across 16 GCP services |
+| GCP | cross-project | Analyze cross-project IAM bindings, logging sinks, and Pub/Sub exports for lateral movement |
 
 
 

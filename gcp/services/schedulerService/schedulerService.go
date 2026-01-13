@@ -4,10 +4,32 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	scheduler "google.golang.org/api/cloudscheduler/v1"
 )
+
+// schedulerRegions contains all Cloud Scheduler regions
+// Note: Cloud Scheduler API does NOT support the "-" wildcard for locations
+// so we need to iterate through regions explicitly
+var schedulerRegions = []string{
+	// Americas
+	"northamerica-northeast1", "northamerica-northeast2",
+	"southamerica-east1", "southamerica-west1",
+	"us-central1", "us-east1", "us-east4", "us-east5",
+	"us-south1", "us-west1", "us-west2", "us-west3", "us-west4",
+	// Europe
+	"europe-central2", "europe-north1",
+	"europe-southwest1", "europe-west1", "europe-west2", "europe-west3",
+	"europe-west4", "europe-west6", "europe-west8", "europe-west9",
+	// Asia Pacific
+	"asia-east1", "asia-east2", "asia-northeast1", "asia-northeast2", "asia-northeast3",
+	"asia-south1", "asia-south2", "asia-southeast1", "asia-southeast2",
+	"australia-southeast1", "australia-southeast2",
+	// Middle East & Africa
+	"africa-south1", "me-central1", "me-west1",
+}
 
 type SchedulerService struct{}
 
@@ -48,7 +70,9 @@ type JobInfo struct {
 	Status            string  // Last attempt status
 }
 
-// Jobs retrieves all Cloud Scheduler jobs in a project
+// Jobs retrieves all Cloud Scheduler jobs in a project across all regions
+// Note: The Cloud Scheduler API does NOT support the "-" wildcard for locations
+// so we must iterate through regions explicitly
 func (ss *SchedulerService) Jobs(projectID string) ([]JobInfo, error) {
 	ctx := context.Background()
 
@@ -58,21 +82,52 @@ func (ss *SchedulerService) Jobs(projectID string) ([]JobInfo, error) {
 	}
 
 	var jobs []JobInfo
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var lastErr error
+	var errMu sync.Mutex
 
-	// List jobs across all locations
-	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
+	// Use a semaphore to limit concurrent API calls
+	semaphore := make(chan struct{}, 10) // Max 10 concurrent requests
 
-	call := service.Projects.Locations.Jobs.List(parent)
-	err = call.Pages(ctx, func(page *scheduler.ListJobsResponse) error {
-		for _, job := range page.Jobs {
-			info := parseJobInfo(job, projectID)
-			jobs = append(jobs, info)
-		}
-		return nil
-	})
+	// Iterate through all Scheduler regions in parallel
+	for _, region := range schedulerRegions {
+		wg.Add(1)
+		go func(region string) {
+			defer wg.Done()
 
-	if err != nil {
-		return nil, gcpinternal.ParseGCPError(err, "cloudscheduler.googleapis.com")
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
+
+			call := service.Projects.Locations.Jobs.List(parent)
+			err := call.Pages(ctx, func(page *scheduler.ListJobsResponse) error {
+				for _, job := range page.Jobs {
+					info := parseJobInfo(job, projectID)
+					mu.Lock()
+					jobs = append(jobs, info)
+					mu.Unlock()
+				}
+				return nil
+			})
+
+			if err != nil {
+				// Track the last error but continue - region may not have jobs or API may not be enabled
+				errMu.Lock()
+				lastErr = err
+				errMu.Unlock()
+			}
+		}(region)
+	}
+
+	wg.Wait()
+
+	// Only return error if we got no jobs AND had errors
+	// If we found jobs in some regions, that's success
+	if len(jobs) == 0 && lastErr != nil {
+		return nil, gcpinternal.ParseGCPError(lastErr, "cloudscheduler.googleapis.com")
 	}
 
 	return jobs, nil

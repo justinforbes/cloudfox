@@ -623,9 +623,9 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 	var chainsBody [][]string
 	for _, chain := range m.ImpersonationChains {
 		// Determine action based on exploit command
-		action := "impersonate (get token)"
+		action := "Impersonate (Get Token)"
 		if strings.Contains(chain.ExploitCommand, "keys create") {
-			action = "create key"
+			action = "Create Key"
 		}
 
 		chainsBody = append(chainsBody, []string{
@@ -648,17 +648,17 @@ func (m *LateralMovementModule) writeOutput(ctx context.Context, logger internal
 
 	var vectorsBody [][]string
 	for _, vector := range m.TokenTheftVectors {
-		// Map attack vector to action description
+		// Map attack vector to action description (Title Case)
 		action := vector.AttackVector
 		switch vector.AttackVector {
 		case "metadata_server":
-			action = "steal token (metadata)"
+			action = "Steal Token (Metadata)"
 		case "function_execution":
-			action = "steal token (function)"
+			action = "Steal Token (Function)"
 		case "container_execution":
-			action = "steal token (container)"
+			action = "Steal Token (Container)"
 		case "pod_service_account":
-			action = "steal token (pod)"
+			action = "Steal Token (Pod)"
 		}
 
 		vectorsBody = append(vectorsBody, []string{

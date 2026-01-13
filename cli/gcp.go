@@ -83,7 +83,7 @@ var (
 			os := oauthservice.NewOAuthService()
 			principal, err := os.WhoAmI()
 			if err != nil {
-				GCPLogger.FatalM(fmt.Sprintf("could not determine default user credential with error %s. \n\nPlease use default application default credentials: https://cloud.google.com/docs/authentication/application-default-credentials", err.Error()), "gcp")
+				GCPLogger.FatalM(fmt.Sprintf("could not determine default user credential with error %s.\n\nPlease use default application default credentials: https://cloud.google.com/docs/authentication/application-default-credentials\n\nTry: gcloud auth application-default login", err.Error()), "gcp")
 			}
 			ctx = context.WithValue(ctx, "account", principal.Email)
 			cmd.SetContext(ctx)
@@ -243,6 +243,7 @@ func init() {
 		commands.GCPCertManagerCommand,
 		commands.GCPLateralMovementCommand,
 		commands.GCPDataExfiltrationCommand,
+		commands.GCPPublicAccessCommand,
 
 		// All checks (last)
 		GCPAllChecksCommand,

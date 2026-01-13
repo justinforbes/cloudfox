@@ -89,35 +89,117 @@ func (m *FilestoreModule) initializeLootFiles() {
 }
 
 func (m *FilestoreModule) addToLoot(instance filestoreservice.FilestoreInstanceInfo) {
+	// Determine protocol display name
+	protocol := instance.Protocol
+	if protocol == "" {
+		protocol = "NFS_V3" // Default
+	}
+
 	m.LootMap["filestore-commands"].Contents += fmt.Sprintf(
-		"# %s (%s)\n"+
-			"# Project: %s\n",
-		instance.Name, instance.Location,
+		"# ==========================================\n"+
+			"# Instance: %s\n"+
+			"# ==========================================\n"+
+			"# Location: %s\n"+
+			"# Project: %s\n"+
+			"# Protocol: %s\n"+
+			"# Tier: %s\n"+
+			"# Network: %s\n"+
+			"# IP(s): %s\n\n",
+		instance.Name,
+		instance.Location,
 		instance.ProjectID,
+		protocol,
+		instance.Tier,
+		instance.Network,
+		strings.Join(instance.IPAddresses, ", "),
 	)
 
-	// gcloud command
+	// gcloud describe command
 	m.LootMap["filestore-commands"].Contents += fmt.Sprintf(
-		"gcloud filestore instances describe %s --location=%s --project=%s\n",
+		"# Describe instance:\n"+
+			"gcloud filestore instances describe %s --location=%s --project=%s\n\n",
 		instance.Name, instance.Location, instance.ProjectID,
 	)
 
 	// Mount commands for each share
 	if len(instance.Shares) > 0 && len(instance.IPAddresses) > 0 {
-		m.LootMap["filestore-commands"].Contents += "# Mount commands:\n"
 		for _, share := range instance.Shares {
+			m.LootMap["filestore-commands"].Contents += fmt.Sprintf(
+				"# ------------------------------------------\n"+
+					"# Share: %s (%d GB)\n"+
+					"# ------------------------------------------\n",
+				share.Name, share.CapacityGB,
+			)
+
+			// Show NFS export options if present
+			if len(share.NfsExportOptions) > 0 {
+				m.LootMap["filestore-commands"].Contents += "# NFS Export Options:\n"
+				for _, opt := range share.NfsExportOptions {
+					ipRanges := strings.Join(opt.IPRanges, ", ")
+					if ipRanges == "" {
+						ipRanges = "all"
+					}
+					m.LootMap["filestore-commands"].Contents += fmt.Sprintf(
+						"#   IP Ranges: %s\n"+
+							"#   Access: %s\n"+
+							"#   Squash: %s\n",
+						ipRanges,
+						opt.AccessMode,
+						opt.SquashMode,
+					)
+					if opt.SquashMode == "NO_ROOT_SQUASH" {
+						m.LootMap["filestore-commands"].Contents += "#   [!] NO_ROOT_SQUASH - root access preserved!\n"
+					}
+				}
+				m.LootMap["filestore-commands"].Contents += "\n"
+			}
+
+			// Generate mount commands based on protocol
 			for _, ip := range instance.IPAddresses {
+				m.LootMap["filestore-commands"].Contents += "# Mount commands (run as root):\n"
+
+				switch protocol {
+				case "NFS_V4_1":
+					// NFSv4.1 mount command
+					m.LootMap["filestore-commands"].Contents += fmt.Sprintf(
+						"# NFSv4.1 mount:\n"+
+							"sudo mkdir -p /mnt/%s\n"+
+							"sudo mount -t nfs -o vers=4.1 %s:/%s /mnt/%s\n"+
+							"# With Kerberos (if configured):\n"+
+							"# sudo mount -t nfs -o vers=4.1,sec=krb5p %s:/%s /mnt/%s\n\n",
+						share.Name,
+						ip, share.Name, share.Name,
+						ip, share.Name, share.Name,
+					)
+				default: // NFS_V3 or empty
+					// NFSv3 mount command
+					m.LootMap["filestore-commands"].Contents += fmt.Sprintf(
+						"# NFSv3 mount:\n"+
+							"sudo mkdir -p /mnt/%s\n"+
+							"sudo mount -t nfs -o vers=3 %s:/%s /mnt/%s\n\n",
+						share.Name,
+						ip, share.Name, share.Name,
+					)
+				}
+
+				// List contents after mounting
 				m.LootMap["filestore-commands"].Contents += fmt.Sprintf(
-					"# Share: %s (%dGB)\n"+
-						"mount -t nfs %s:/%s /mnt/%s\n",
-					share.Name, share.CapacityGB,
-					ip, share.Name, share.Name,
+					"# After mounting, list contents:\n"+
+						"ls -la /mnt/%s\n"+
+						"# Check disk usage:\n"+
+						"df -h /mnt/%s\n\n",
+					share.Name, share.Name,
+				)
+
+				// Unmount command
+				m.LootMap["filestore-commands"].Contents += fmt.Sprintf(
+					"# Unmount when done:\n"+
+						"sudo umount /mnt/%s\n\n",
+					share.Name,
 				)
 			}
 		}
 	}
-
-	m.LootMap["filestore-commands"].Contents += "\n"
 }
 
 func (m *FilestoreModule) writeOutput(ctx context.Context, logger internal.Logger) {
@@ -127,17 +209,31 @@ func (m *FilestoreModule) writeOutput(ctx context.Context, logger internal.Logge
 		"Name",
 		"Location",
 		"Tier",
+		"Protocol",
 		"Network",
 		"IP",
 		"Shares",
+		"Access",
+		"Security",
 		"State",
 	}
 
 	var body [][]string
 	for _, instance := range m.Instances {
 		var shareNames []string
+		var accessModes []string
+		hasNoRootSquash := false
+
 		for _, share := range instance.Shares {
-			shareNames = append(shareNames, share.Name)
+			shareNames = append(shareNames, fmt.Sprintf("%s (%dGB)", share.Name, share.CapacityGB))
+			for _, opt := range share.NfsExportOptions {
+				if opt.AccessMode != "" {
+					accessModes = append(accessModes, opt.AccessMode)
+				}
+				if opt.SquashMode == "NO_ROOT_SQUASH" {
+					hasNoRootSquash = true
+				}
+			}
 		}
 
 		ip := strings.Join(instance.IPAddresses, ", ")
@@ -155,15 +251,43 @@ func (m *FilestoreModule) writeOutput(ctx context.Context, logger internal.Logge
 			network = "-"
 		}
 
+		protocol := instance.Protocol
+		if protocol == "" {
+			protocol = "NFS_V3"
+		}
+
+		// Deduplicate and format access modes
+		access := "-"
+		if len(accessModes) > 0 {
+			uniqueAccess := make(map[string]bool)
+			for _, a := range accessModes {
+				uniqueAccess[a] = true
+			}
+			var accessList []string
+			for a := range uniqueAccess {
+				accessList = append(accessList, a)
+			}
+			access = strings.Join(accessList, ", ")
+		}
+
+		// Security findings
+		security := "OK"
+		if hasNoRootSquash {
+			security = "NO_ROOT_SQUASH"
+		}
+
 		body = append(body, []string{
 			m.GetProjectName(instance.ProjectID),
 			instance.ProjectID,
 			instance.Name,
 			instance.Location,
 			instance.Tier,
+			protocol,
 			network,
 			ip,
 			shares,
+			access,
+			security,
 			instance.State,
 		})
 	}

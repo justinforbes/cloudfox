@@ -4,10 +4,33 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	composer "google.golang.org/api/composer/v1"
 )
+
+// composerRegions contains all Cloud Composer regions
+// Note: Cloud Composer API does NOT support the "-" wildcard for locations
+// so we need to iterate through regions explicitly
+var composerRegions = []string{
+	// Americas
+	"northamerica-northeast1", "northamerica-northeast2", "northamerica-south1",
+	"southamerica-east1", "southamerica-west1",
+	"us-central1", "us-east1", "us-east4", "us-east5", "us-east7",
+	"us-south1", "us-west1", "us-west2", "us-west3", "us-west4",
+	// Europe
+	"europe-central2", "europe-north1", "europe-north2",
+	"europe-southwest1", "europe-west1", "europe-west2", "europe-west3",
+	"europe-west4", "europe-west6", "europe-west8", "europe-west9",
+	"europe-west10", "europe-west12",
+	// Asia Pacific
+	"asia-east1", "asia-east2", "asia-northeast1", "asia-northeast2", "asia-northeast3",
+	"asia-south1", "asia-south2", "asia-southeast1", "asia-southeast2",
+	"australia-southeast1", "australia-southeast2",
+	// Middle East & Africa
+	"africa-south1", "me-central1", "me-central2", "me-west1",
+}
 
 type ComposerService struct {
 	session *gcpinternal.SafeSession
@@ -51,7 +74,9 @@ type EnvironmentInfo struct {
 	EnablePrivateEndpoint bool     `json:"enablePrivateEndpoint"`
 }
 
-// ListEnvironments retrieves all Composer environments in a project
+// ListEnvironments retrieves all Composer environments in a project across all regions
+// Note: The Cloud Composer API does NOT support the "-" wildcard for locations
+// so we must iterate through regions explicitly
 func (s *ComposerService) ListEnvironments(projectID string) ([]EnvironmentInfo, error) {
 	ctx := context.Background()
 	var service *composer.Service
@@ -67,19 +92,51 @@ func (s *ComposerService) ListEnvironments(projectID string) ([]EnvironmentInfo,
 	}
 
 	var environments []EnvironmentInfo
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var lastErr error
+	var errMu sync.Mutex
 
-	// List environments across all locations
-	parent := fmt.Sprintf("projects/%s/locations/-", projectID)
-	req := service.Projects.Locations.Environments.List(parent)
-	err = req.Pages(ctx, func(page *composer.ListEnvironmentsResponse) error {
-		for _, env := range page.Environments {
-			info := s.parseEnvironment(env, projectID)
-			environments = append(environments, info)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, gcpinternal.ParseGCPError(err, "composer.googleapis.com")
+	// Use a semaphore to limit concurrent API calls
+	semaphore := make(chan struct{}, 10) // Max 10 concurrent requests
+
+	// Iterate through all Composer regions in parallel
+	for _, region := range composerRegions {
+		wg.Add(1)
+		go func(region string) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
+			req := service.Projects.Locations.Environments.List(parent)
+			err := req.Pages(ctx, func(page *composer.ListEnvironmentsResponse) error {
+				for _, env := range page.Environments {
+					info := s.parseEnvironment(env, projectID)
+					mu.Lock()
+					environments = append(environments, info)
+					mu.Unlock()
+				}
+				return nil
+			})
+
+			if err != nil {
+				// Track the last error but continue - region may not have environments or API may not be enabled
+				errMu.Lock()
+				lastErr = err
+				errMu.Unlock()
+			}
+		}(region)
+	}
+
+	wg.Wait()
+
+	// Only return error if we got no environments AND had errors
+	// If we found environments in some regions, that's success
+	if len(environments) == 0 && lastErr != nil {
+		return nil, gcpinternal.ParseGCPError(lastErr, "composer.googleapis.com")
 	}
 
 	return environments, nil
