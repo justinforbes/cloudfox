@@ -207,18 +207,30 @@ var GCPAllChecksCommand = &cobra.Command{
 		startTime := time.Now()
 		ctx := cmd.Context()
 
-		// Run privesc analysis first and populate cache for other modules
-		GCPLogger.InfoM("Running privilege escalation analysis first to populate cache...", "all-checks")
-		privescCache := runPrivescAndPopulateCache(ctx)
-		if privescCache != nil && privescCache.IsPopulated() {
-			// Store cache in context for other modules to use
-			ctx = gcpinternal.SetPrivescCacheInContext(ctx, privescCache)
-			cmd.SetContext(ctx)
-			GCPLogger.SuccessM("Privesc cache populated - other modules will show Priv Esc column", "all-checks")
-		} else {
-			GCPLogger.InfoM("Privesc analysis not available - Priv Esc column will show '-'", "all-checks")
+		// Find the privesc command to run first
+		var privescCmd *cobra.Command
+		for _, childCmd := range GCPCommands.Commands() {
+			if childCmd.Use == "privesc" {
+				privescCmd = childCmd
+				break
+			}
 		}
-		GCPLogger.InfoM("", "all-checks")
+
+		// Run privesc command first (produces output) and populate cache for other modules
+		if privescCmd != nil {
+			GCPLogger.InfoM("Running privilege escalation analysis first...", "all-checks")
+			privescCmd.Run(cmd, args)
+			executedModules = append(executedModules, "privesc")
+
+			// After running privesc, populate cache from the analysis for other modules
+			privescCache := runPrivescAndPopulateCache(ctx)
+			if privescCache != nil && privescCache.IsPopulated() {
+				ctx = gcpinternal.SetPrivescCacheInContext(ctx, privescCache)
+				cmd.SetContext(ctx)
+				GCPLogger.SuccessM("Privesc cache populated - other modules will show Priv Esc column", "all-checks")
+			}
+			GCPLogger.InfoM("", "all-checks")
+		}
 
 		// Count total modules to execute (excluding self, hidden, and privesc which we already ran)
 		var modulesToRun []*cobra.Command
@@ -238,9 +250,6 @@ var GCPAllChecksCommand = &cobra.Command{
 
 		GCPLogger.InfoM(fmt.Sprintf("Starting execution of %d modules...", totalModules), "all-checks")
 		GCPLogger.InfoM("", "all-checks")
-
-		// Add privesc to executed list since we ran it first
-		executedModules = append(executedModules, "privesc")
 
 		for i, childCmd := range modulesToRun {
 			GCPLogger.InfoM(fmt.Sprintf("[%d/%d] Running: %s", i+1, totalModules, childCmd.Use), "all-checks")

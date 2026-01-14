@@ -110,6 +110,32 @@ func (m *PrivescModule) Execute(ctx context.Context, logger internal.Logger) {
 	m.OrgNames = result.OrgNames
 	m.FolderNames = result.FolderNames
 
+	// Update hierarchy with discovered org names so path builder uses display names
+	if m.Hierarchy != nil && len(m.OrgIDs) > 0 {
+		for _, orgID := range m.OrgIDs {
+			orgName := m.OrgNames[orgID]
+			// Check if org exists in hierarchy and update display name if needed
+			found := false
+			for i := range m.Hierarchy.Organizations {
+				if m.Hierarchy.Organizations[i].ID == orgID {
+					if orgName != "" && m.Hierarchy.Organizations[i].DisplayName == "" {
+						m.Hierarchy.Organizations[i].DisplayName = orgName
+					}
+					found = true
+					break
+				}
+			}
+			// If org not in hierarchy, add it
+			if !found && orgName != "" {
+				m.Hierarchy.Organizations = append(m.Hierarchy.Organizations, gcpinternal.OrgScope{
+					ID:          orgID,
+					DisplayName: orgName,
+					Accessible:  true,
+				})
+			}
+		}
+	}
+
 	// Organize project paths by project ID
 	for _, path := range result.ProjectPaths {
 		if path.ScopeType == "project" && path.ScopeID != "" {
