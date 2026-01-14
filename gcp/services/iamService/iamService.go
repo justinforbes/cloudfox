@@ -846,6 +846,10 @@ var rolePermissionsCache = make(map[string][]string)
 // rolePermissionsFailureCache tracks roles we've already failed to look up (to avoid duplicate error logs)
 var rolePermissionsFailureCache = make(map[string]bool)
 
+// orgRoleAccessChecked tracks if we've already tried to access org-level custom roles
+var orgRoleAccessChecked bool
+var orgRoleAccessAvailable bool
+
 // GetRolePermissions retrieves the permissions for a given role
 func (s *IAMService) GetRolePermissions(ctx context.Context, roleName string) ([]string, error) {
 	// Check cache first
@@ -888,11 +892,32 @@ func (s *IAMService) GetRolePermissions(ctx context.Context, roleName string) ([
 		permissions = role.IncludedPermissions
 	} else if strings.HasPrefix(roleName, "organizations/") {
 		// Organization-level custom role
+		// Check if we already know org roles are inaccessible
+		if orgRoleAccessChecked && !orgRoleAccessAvailable {
+			rolePermissionsFailureCache[roleName] = true
+			return nil, gcpinternal.ErrPermissionDenied
+		}
+
 		role, err := iamService.Organizations.Roles.Get(roleName).Context(ctx).Do()
 		if err != nil {
 			// Cache the failure to avoid repeated error logs
 			rolePermissionsFailureCache[roleName] = true
-			return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
+
+			// Check if this is a permission error - if so, mark org roles as inaccessible
+			parsedErr := gcpinternal.ParseGCPError(err, "iam.googleapis.com")
+			if gcpinternal.IsPermissionDenied(parsedErr) && !orgRoleAccessChecked {
+				orgRoleAccessChecked = true
+				orgRoleAccessAvailable = false
+				// Log once that org-level custom roles are not accessible
+				logger.InfoM("Organization-level custom roles not accessible - role permissions will not be expanded", globals.GCP_IAM_MODULE_NAME)
+			}
+			return nil, parsedErr
+		}
+
+		// Mark org role access as available on first success
+		if !orgRoleAccessChecked {
+			orgRoleAccessChecked = true
+			orgRoleAccessAvailable = true
 		}
 		permissions = role.IncludedPermissions
 	}
@@ -958,6 +983,13 @@ func (s *IAMService) GetEntityPermissions(ctx context.Context, projectID string,
 		// Get permissions for this role
 		permissions, err := s.GetRolePermissions(ctx, binding.Role)
 		if err != nil {
+			// Only log if this role wasn't already in the failure cache (to avoid duplicate messages)
+			// and if we haven't already determined org roles are inaccessible
+			isOrgRole := strings.HasPrefix(binding.Role, "organizations/")
+			if isOrgRole && orgRoleAccessChecked && !orgRoleAccessAvailable {
+				// Skip logging for org roles we know we can't access
+				continue
+			}
 			gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
 				fmt.Sprintf("Could not get permissions for role %s", binding.Role))
 			continue
@@ -1096,14 +1128,46 @@ func (s *IAMService) GetGroupMembership(ctx context.Context, groupEmail string) 
 	return groupInfo, nil
 }
 
+// cloudIdentityAPIChecked tracks whether we've already checked Cloud Identity API availability
+var cloudIdentityAPIChecked bool
+var cloudIdentityAPIAvailable bool
+
 // GetGroupMemberships retrieves members for all groups found in IAM bindings
 func (s *IAMService) GetGroupMemberships(ctx context.Context, groups []GroupInfo) []GroupInfo {
 	var enrichedGroups []GroupInfo
 
-	for _, group := range groups {
+	// Skip if we already know Cloud Identity API is not available
+	if cloudIdentityAPIChecked && !cloudIdentityAPIAvailable {
+		// Return groups as-is without attempting enumeration
+		for _, group := range groups {
+			group.MembershipEnumerated = false
+			enrichedGroups = append(enrichedGroups, group)
+		}
+		return enrichedGroups
+	}
+
+	for i, group := range groups {
 		enrichedGroup, err := s.GetGroupMembership(ctx, group.Email)
 		if err != nil {
-			// Log but don't fail - Cloud Identity API access is often restricted
+			// Check if this is an API not enabled error
+			errStr := err.Error()
+			if strings.Contains(errStr, "API not enabled") || strings.Contains(errStr, "has not been used") ||
+				strings.Contains(errStr, "cloudidentity.googleapis.com") {
+				// Mark API as unavailable to skip future attempts
+				if !cloudIdentityAPIChecked {
+					cloudIdentityAPIChecked = true
+					cloudIdentityAPIAvailable = false
+					logger.InfoM("Cloud Identity API not available - skipping group membership enumeration", globals.GCP_IAM_MODULE_NAME)
+				}
+				// Return remaining groups without attempting enumeration
+				for j := i; j < len(groups); j++ {
+					groups[j].MembershipEnumerated = false
+					enrichedGroups = append(enrichedGroups, groups[j])
+				}
+				return enrichedGroups
+			}
+
+			// Log other errors but continue trying other groups
 			gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
 				fmt.Sprintf("Could not enumerate membership for group %s", group.Email))
 			// Keep the original group info without membership
@@ -1111,6 +1175,13 @@ func (s *IAMService) GetGroupMemberships(ctx context.Context, groups []GroupInfo
 			enrichedGroups = append(enrichedGroups, group)
 			continue
 		}
+
+		// Mark API as available on first success
+		if !cloudIdentityAPIChecked {
+			cloudIdentityAPIChecked = true
+			cloudIdentityAPIAvailable = true
+		}
+
 		// Preserve the roles from the original group
 		enrichedGroup.Roles = group.Roles
 		enrichedGroup.ProjectID = group.ProjectID

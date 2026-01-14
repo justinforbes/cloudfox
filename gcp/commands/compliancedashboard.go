@@ -1644,6 +1644,14 @@ func (m *ComplianceDashboardModule) addFailureToLoot(failure ComplianceFailure) 
 // Output Generation
 // ------------------------------
 func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	if m.Hierarchy != nil && !m.FlatOutput {
+		m.writeHierarchicalOutput(ctx, logger)
+	} else {
+		m.writeFlatOutput(ctx, logger)
+	}
+}
+
+func (m *ComplianceDashboardModule) buildTables() []internal.TableFile {
 	// Sort controls by severity, then control ID
 	sort.Slice(m.Controls, func(i, j int) bool {
 		if m.Controls[i].Status == "FAIL" && m.Controls[j].Status != "FAIL" {
@@ -1735,6 +1743,37 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 		}
 	}
 
+	// Build tables
+	tables := []internal.TableFile{
+		{
+			Name:   "compliance-controls",
+			Header: controlsHeader,
+			Body:   controlsBody,
+		},
+	}
+
+	// Add failures table if any
+	if len(failuresBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "compliance-failures",
+			Header: failuresHeader,
+			Body:   failuresBody,
+		})
+	}
+
+	// Add framework summary table
+	if len(frameworkBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "compliance-summary",
+			Header: frameworkHeader,
+			Body:   frameworkBody,
+		})
+	}
+
+	return tables
+}
+
+func (m *ComplianceDashboardModule) collectLootFiles() []internal.LootFile {
 	// Add framework summary to loot
 	for _, fw := range m.Frameworks {
 		if fw.TotalControls > 0 {
@@ -1763,18 +1802,142 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 			lootFiles = append(lootFiles, *loot)
 		}
 	}
+	return lootFiles
+}
 
-	// Build tables
-	tables := []internal.TableFile{
-		{
+func (m *ComplianceDashboardModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	// Determine org ID - prefer project metadata, fall back to hierarchy
+	orgID := ""
+	for _, metadata := range m.projectMetadata {
+		if parent, ok := metadata["parent"]; ok {
+			if parentStr, ok := parent.(string); ok && strings.HasPrefix(parentStr, "organizations/") {
+				orgID = strings.TrimPrefix(parentStr, "organizations/")
+				break
+			}
+		}
+	}
+	if orgID == "" && m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
+		orgID = m.Hierarchy.Organizations[0].ID
+	}
+
+	if orgID != "" {
+		// DUAL OUTPUT: Complete aggregated output at org level
+		tables := m.buildTables()
+		lootFiles := m.collectLootFiles()
+		outputData.OrgLevelData[orgID] = ComplianceDashboardOutput{Table: tables, Loot: lootFiles}
+
+		// DUAL OUTPUT: Filtered per-project output
+		for _, projectID := range m.ProjectIDs {
+			projectTables := m.buildTablesForProject(projectID)
+			if len(projectTables) > 0 {
+				outputData.ProjectLevelData[projectID] = ComplianceDashboardOutput{Table: projectTables, Loot: nil}
+			}
+		}
+	} else if len(m.ProjectIDs) > 0 {
+		// FALLBACK: No org discovered, output complete data to first project
+		tables := m.buildTables()
+		lootFiles := m.collectLootFiles()
+		outputData.ProjectLevelData[m.ProjectIDs[0]] = ComplianceDashboardOutput{Table: tables, Loot: lootFiles}
+	}
+
+	pathBuilder := m.BuildPathBuilder()
+
+	err := internal.HandleHierarchicalOutputSmart("gcp", m.Format, m.Verbosity, m.WrapTable, pathBuilder, outputData)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), GCP_COMPLIANCEDASHBOARD_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}
+
+// buildTablesForProject builds tables filtered to only include data for a specific project
+func (m *ComplianceDashboardModule) buildTablesForProject(projectID string) []internal.TableFile {
+	// Filter controls for this project
+	var projectControls []ComplianceControl
+	for _, c := range m.Controls {
+		if c.ProjectID == projectID || c.ProjectID == "" {
+			projectControls = append(projectControls, c)
+		}
+	}
+
+	// Filter failures for this project
+	var projectFailures []ComplianceFailure
+	for _, f := range m.Failures {
+		if f.ProjectID == projectID {
+			projectFailures = append(projectFailures, f)
+		}
+	}
+
+	// If no project-specific data, return empty
+	if len(projectControls) == 0 && len(projectFailures) == 0 {
+		return nil
+	}
+
+	var tables []internal.TableFile
+
+	// Controls table
+	if len(projectControls) > 0 {
+		controlsHeader := []string{
+			"Control ID",
+			"Control Name",
+			"Framework",
+			"Severity",
+			"Status",
+			"Details",
+		}
+
+		var controlsBody [][]string
+		for _, c := range projectControls {
+			details := c.Details
+			if details == "" {
+				details = "-"
+			}
+			controlsBody = append(controlsBody, []string{
+				c.ControlID,
+				c.ControlName,
+				c.Framework,
+				c.Severity,
+				c.Status,
+				details,
+			})
+		}
+
+		tables = append(tables, internal.TableFile{
 			Name:   "compliance-controls",
 			Header: controlsHeader,
 			Body:   controlsBody,
-		},
+		})
 	}
 
-	// Add failures table if any
-	if len(failuresBody) > 0 {
+	// Failures table
+	if len(projectFailures) > 0 {
+		failuresHeader := []string{
+			"Control ID",
+			"Severity",
+			"Resource",
+			"Type",
+			"Project Name",
+			"Project ID",
+			"Risk Score",
+		}
+
+		var failuresBody [][]string
+		for _, f := range projectFailures {
+			failuresBody = append(failuresBody, []string{
+				f.ControlID,
+				f.Severity,
+				f.ResourceName,
+				f.ResourceType,
+				m.GetProjectName(f.ProjectID),
+				f.ProjectID,
+				fmt.Sprintf("%d", f.RiskScore),
+			})
+		}
+
 		tables = append(tables, internal.TableFile{
 			Name:   "compliance-failures",
 			Header: failuresHeader,
@@ -1782,14 +1945,12 @@ func (m *ComplianceDashboardModule) writeOutput(ctx context.Context, logger inte
 		})
 	}
 
-	// Add framework summary table
-	if len(frameworkBody) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "compliance-summary",
-			Header: frameworkHeader,
-			Body:   frameworkBody,
-		})
-	}
+	return tables
+}
+
+func (m *ComplianceDashboardModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
+	tables := m.buildTables()
+	lootFiles := m.collectLootFiles()
 
 	output := ComplianceDashboardOutput{
 		Table: tables,

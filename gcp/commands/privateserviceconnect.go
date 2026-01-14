@@ -44,11 +44,11 @@ Output includes nmap commands for scanning internal endpoints.`,
 type PrivateServiceConnectModule struct {
 	gcpinternal.BaseGCPModule
 
-	PSCEndpoints       []networkendpointsservice.PrivateServiceConnectEndpoint
-	PrivateConnections []networkendpointsservice.PrivateConnection
-	ServiceAttachments []networkendpointsservice.ServiceAttachment
-	LootMap            map[string]*internal.LootFile
-	mu                 sync.Mutex
+	ProjectPSCEndpoints       map[string][]networkendpointsservice.PrivateServiceConnectEndpoint // projectID -> endpoints
+	ProjectPrivateConnections map[string][]networkendpointsservice.PrivateConnection             // projectID -> connections
+	ProjectServiceAttachments map[string][]networkendpointsservice.ServiceAttachment             // projectID -> attachments
+	LootMap                   map[string]map[string]*internal.LootFile                           // projectID -> loot files
+	mu                        sync.Mutex
 }
 
 // ------------------------------
@@ -72,14 +72,13 @@ func runGCPPrivateServiceConnectCommand(cmd *cobra.Command, args []string) {
 	}
 
 	module := &PrivateServiceConnectModule{
-		BaseGCPModule:      gcpinternal.NewBaseGCPModule(cmdCtx),
-		PSCEndpoints:       []networkendpointsservice.PrivateServiceConnectEndpoint{},
-		PrivateConnections: []networkendpointsservice.PrivateConnection{},
-		ServiceAttachments: []networkendpointsservice.ServiceAttachment{},
-		LootMap:            make(map[string]*internal.LootFile),
+		BaseGCPModule:             gcpinternal.NewBaseGCPModule(cmdCtx),
+		ProjectPSCEndpoints:       make(map[string][]networkendpointsservice.PrivateServiceConnectEndpoint),
+		ProjectPrivateConnections: make(map[string][]networkendpointsservice.PrivateConnection),
+		ProjectServiceAttachments: make(map[string][]networkendpointsservice.ServiceAttachment),
+		LootMap:                   make(map[string]map[string]*internal.LootFile),
 	}
 
-	module.initializeLootFiles()
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 }
 
@@ -89,7 +88,11 @@ func runGCPPrivateServiceConnectCommand(cmd *cobra.Command, args []string) {
 func (m *PrivateServiceConnectModule) Execute(ctx context.Context, logger internal.Logger) {
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, "private-service-connect", m.processProject)
 
-	totalFindings := len(m.PSCEndpoints) + len(m.PrivateConnections) + len(m.ServiceAttachments)
+	allEndpoints := m.getAllPSCEndpoints()
+	allConnections := m.getAllPrivateConnections()
+	allAttachments := m.getAllServiceAttachments()
+
+	totalFindings := len(allEndpoints) + len(allConnections) + len(allAttachments)
 
 	if totalFindings == 0 {
 		logger.InfoM("No private service connect endpoints found", "private-service-connect")
@@ -97,11 +100,11 @@ func (m *PrivateServiceConnectModule) Execute(ctx context.Context, logger intern
 	}
 
 	logger.SuccessM(fmt.Sprintf("Found %d PSC endpoint(s), %d private connection(s), %d service attachment(s)",
-		len(m.PSCEndpoints), len(m.PrivateConnections), len(m.ServiceAttachments)), "private-service-connect")
+		len(allEndpoints), len(allConnections), len(allAttachments)), "private-service-connect")
 
 	// Count high-risk findings
 	autoAcceptCount := 0
-	for _, sa := range m.ServiceAttachments {
+	for _, sa := range allAttachments {
 		if sa.ConnectionPreference == "ACCEPT_AUTOMATIC" {
 			autoAcceptCount++
 		}
@@ -113,6 +116,30 @@ func (m *PrivateServiceConnectModule) Execute(ctx context.Context, logger intern
 	m.writeOutput(ctx, logger)
 }
 
+func (m *PrivateServiceConnectModule) getAllPSCEndpoints() []networkendpointsservice.PrivateServiceConnectEndpoint {
+	var all []networkendpointsservice.PrivateServiceConnectEndpoint
+	for _, endpoints := range m.ProjectPSCEndpoints {
+		all = append(all, endpoints...)
+	}
+	return all
+}
+
+func (m *PrivateServiceConnectModule) getAllPrivateConnections() []networkendpointsservice.PrivateConnection {
+	var all []networkendpointsservice.PrivateConnection
+	for _, conns := range m.ProjectPrivateConnections {
+		all = append(all, conns...)
+	}
+	return all
+}
+
+func (m *PrivateServiceConnectModule) getAllServiceAttachments() []networkendpointsservice.ServiceAttachment {
+	var all []networkendpointsservice.ServiceAttachment
+	for _, attachments := range m.ProjectServiceAttachments {
+		all = append(all, attachments...)
+	}
+	return all
+}
+
 // ------------------------------
 // Project Processor
 // ------------------------------
@@ -120,6 +147,20 @@ func (m *PrivateServiceConnectModule) processProject(ctx context.Context, projec
 	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
 		logger.InfoM(fmt.Sprintf("Checking private service connect in project: %s", projectID), "private-service-connect")
 	}
+
+	m.mu.Lock()
+	// Initialize loot for this project
+	if m.LootMap[projectID] == nil {
+		m.LootMap[projectID] = make(map[string]*internal.LootFile)
+		m.LootMap[projectID]["private-service-connect-commands"] = &internal.LootFile{
+			Name: "private-service-connect-commands",
+			Contents: "# Private Service Connect Commands\n" +
+				"# Generated by CloudFox\n" +
+				"# WARNING: Only use with proper authorization\n" +
+				"# NOTE: These are internal IPs - you must be on the VPC network to reach them\n\n",
+		}
+	}
+	m.mu.Unlock()
 
 	svc := networkendpointsservice.New()
 
@@ -148,18 +189,18 @@ func (m *PrivateServiceConnectModule) processProject(ctx context.Context, projec
 	}
 
 	m.mu.Lock()
-	m.PSCEndpoints = append(m.PSCEndpoints, pscEndpoints...)
-	m.PrivateConnections = append(m.PrivateConnections, privateConns...)
-	m.ServiceAttachments = append(m.ServiceAttachments, attachments...)
+	m.ProjectPSCEndpoints[projectID] = append(m.ProjectPSCEndpoints[projectID], pscEndpoints...)
+	m.ProjectPrivateConnections[projectID] = append(m.ProjectPrivateConnections[projectID], privateConns...)
+	m.ProjectServiceAttachments[projectID] = append(m.ProjectServiceAttachments[projectID], attachments...)
 
 	for _, endpoint := range pscEndpoints {
-		m.addPSCEndpointToLoot(endpoint)
+		m.addPSCEndpointToLoot(projectID, endpoint)
 	}
 	for _, conn := range privateConns {
-		m.addPrivateConnectionToLoot(conn)
+		m.addPrivateConnectionToLoot(projectID, conn)
 	}
 	for _, attachment := range attachments {
-		m.addServiceAttachmentToLoot(attachment)
+		m.addServiceAttachmentToLoot(projectID, attachment)
 	}
 	m.mu.Unlock()
 }
@@ -167,18 +208,12 @@ func (m *PrivateServiceConnectModule) processProject(ctx context.Context, projec
 // ------------------------------
 // Loot File Management
 // ------------------------------
-func (m *PrivateServiceConnectModule) initializeLootFiles() {
-	m.LootMap["private-service-connect-commands"] = &internal.LootFile{
-		Name: "private-service-connect-commands",
-		Contents: "# Private Service Connect Commands\n" +
-			"# Generated by CloudFox\n" +
-			"# WARNING: Only use with proper authorization\n" +
-			"# NOTE: These are internal IPs - you must be on the VPC network to reach them\n\n",
+func (m *PrivateServiceConnectModule) addPSCEndpointToLoot(projectID string, endpoint networkendpointsservice.PrivateServiceConnectEndpoint) {
+	lootFile := m.LootMap[projectID]["private-service-connect-commands"]
+	if lootFile == nil {
+		return
 	}
-}
-
-func (m *PrivateServiceConnectModule) addPSCEndpointToLoot(endpoint networkendpointsservice.PrivateServiceConnectEndpoint) {
-	m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"## PSC Endpoint: %s (Project: %s, Region: %s)\n"+
 			"# Network: %s, Subnet: %s\n"+
 			"# Target Type: %s, Target: %s\n"+
@@ -193,7 +228,7 @@ func (m *PrivateServiceConnectModule) addPSCEndpointToLoot(endpoint networkendpo
 	)
 
 	if endpoint.IPAddress != "" {
-		m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# Scan internal endpoint (from within VPC):\n"+
 				"nmap -sV -Pn %s\n\n",
 			endpoint.IPAddress,
@@ -201,7 +236,11 @@ func (m *PrivateServiceConnectModule) addPSCEndpointToLoot(endpoint networkendpo
 	}
 }
 
-func (m *PrivateServiceConnectModule) addPrivateConnectionToLoot(conn networkendpointsservice.PrivateConnection) {
+func (m *PrivateServiceConnectModule) addPrivateConnectionToLoot(projectID string, conn networkendpointsservice.PrivateConnection) {
+	lootFile := m.LootMap[projectID]["private-service-connect-commands"]
+	if lootFile == nil {
+		return
+	}
 	reservedRanges := "-"
 	if len(conn.ReservedRanges) > 0 {
 		reservedRanges = strings.Join(conn.ReservedRanges, ", ")
@@ -211,7 +250,7 @@ func (m *PrivateServiceConnectModule) addPrivateConnectionToLoot(conn networkend
 		accessibleServices = strings.Join(conn.AccessibleServices, ", ")
 	}
 
-	m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"## Private Connection: %s (Project: %s)\n"+
 			"# Network: %s, Service: %s\n"+
 			"# Peering: %s\n"+
@@ -229,7 +268,7 @@ func (m *PrivateServiceConnectModule) addPrivateConnectionToLoot(conn networkend
 
 	// Add nmap commands for each reserved range
 	for _, ipRange := range conn.ReservedRanges {
-		m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# Scan private connection range (from within VPC):\n"+
 				"nmap -sV -Pn %s\n\n",
 			ipRange,
@@ -237,13 +276,17 @@ func (m *PrivateServiceConnectModule) addPrivateConnectionToLoot(conn networkend
 	}
 }
 
-func (m *PrivateServiceConnectModule) addServiceAttachmentToLoot(attachment networkendpointsservice.ServiceAttachment) {
+func (m *PrivateServiceConnectModule) addServiceAttachmentToLoot(projectID string, attachment networkendpointsservice.ServiceAttachment) {
+	lootFile := m.LootMap[projectID]["private-service-connect-commands"]
+	if lootFile == nil {
+		return
+	}
 	natSubnets := "-"
 	if len(attachment.NatSubnets) > 0 {
 		natSubnets = strings.Join(attachment.NatSubnets, ", ")
 	}
 
-	m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"## Service Attachment: %s (Project: %s, Region: %s)\n"+
 			"# Target Service: %s\n"+
 			"# Connection Preference: %s\n"+
@@ -257,21 +300,21 @@ func (m *PrivateServiceConnectModule) addServiceAttachmentToLoot(attachment netw
 	)
 
 	if len(attachment.ConsumerAcceptLists) > 0 {
-		m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf("# Accept List: %s\n", strings.Join(attachment.ConsumerAcceptLists, ", "))
+		lootFile.Contents += fmt.Sprintf("# Accept List: %s\n", strings.Join(attachment.ConsumerAcceptLists, ", "))
 	}
 	if len(attachment.ConsumerRejectLists) > 0 {
-		m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf("# Reject List: %s\n", strings.Join(attachment.ConsumerRejectLists, ", "))
+		lootFile.Contents += fmt.Sprintf("# Reject List: %s\n", strings.Join(attachment.ConsumerRejectLists, ", "))
 	}
 
 	// Add IAM bindings info
 	if len(attachment.IAMBindings) > 0 {
-		m.LootMap["private-service-connect-commands"].Contents += "# IAM Bindings:\n"
+		lootFile.Contents += "# IAM Bindings:\n"
 		for _, binding := range attachment.IAMBindings {
-			m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf("#   %s -> %s\n", binding.Role, binding.Member)
+			lootFile.Contents += fmt.Sprintf("#   %s -> %s\n", binding.Role, binding.Member)
 		}
 	}
 
-	m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"\n# Describe service attachment:\n"+
 			"gcloud compute service-attachments describe %s --region=%s --project=%s\n\n"+
 			"# Get IAM policy:\n"+
@@ -282,7 +325,7 @@ func (m *PrivateServiceConnectModule) addServiceAttachmentToLoot(attachment netw
 
 	// If auto-accept, add exploitation command
 	if attachment.ConnectionPreference == "ACCEPT_AUTOMATIC" {
-		m.LootMap["private-service-connect-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# [HIGH RISK] This service attachment accepts connections from ANY project!\n"+
 				"# To connect from another project:\n"+
 				"gcloud compute forwarding-rules create attacker-psc-endpoint \\\n"+
@@ -300,181 +343,190 @@ func (m *PrivateServiceConnectModule) addServiceAttachmentToLoot(attachment netw
 // Output Generation
 // ------------------------------
 func (m *PrivateServiceConnectModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	var tables []internal.TableFile
+	if m.Hierarchy != nil && !m.FlatOutput {
+		m.writeHierarchicalOutput(ctx, logger)
+	} else {
+		m.writeFlatOutput(ctx, logger)
+	}
+}
 
-	// PSC Endpoints table
-	if len(m.PSCEndpoints) > 0 {
-		header := []string{
-			"Project Name",
-			"Project ID",
-			"Name",
-			"Region",
-			"Network",
-			"Subnet",
-			"IP Address",
-			"Target Type",
-			"Target",
-			"State",
-		}
-		var body [][]string
+func (m *PrivateServiceConnectModule) getPSCEndpointsHeader() []string {
+	return []string{
+		"Project Name", "Project ID", "Name", "Region", "Network",
+		"Subnet", "IP Address", "Target Type", "Target", "State",
+	}
+}
 
-		for _, endpoint := range m.PSCEndpoints {
-			body = append(body, []string{
-				m.GetProjectName(endpoint.ProjectID),
-				endpoint.ProjectID,
-				endpoint.Name,
-				endpoint.Region,
-				endpoint.Network,
-				endpoint.Subnetwork,
-				endpoint.IPAddress,
-				endpoint.TargetType,
-				endpoint.Target,
-				endpoint.ConnectionState,
-			})
-		}
+func (m *PrivateServiceConnectModule) getPrivateConnectionsHeader() []string {
+	return []string{
+		"Project Name", "Project ID", "Name", "Network", "Service",
+		"Peering Name", "Reserved Ranges", "Accessible Services",
+	}
+}
 
-		tables = append(tables, internal.TableFile{
-			Name:   "psc-endpoints",
-			Header: header,
-			Body:   body,
+func (m *PrivateServiceConnectModule) getServiceAttachmentsHeader() []string {
+	return []string{
+		"Project Name", "Project ID", "Name", "Region", "Target Service",
+		"Accept Policy", "Connected", "NAT Subnets", "Resource Role", "Resource Principal",
+	}
+}
+
+func (m *PrivateServiceConnectModule) pscEndpointsToTableBody(endpoints []networkendpointsservice.PrivateServiceConnectEndpoint) [][]string {
+	var body [][]string
+	for _, ep := range endpoints {
+		body = append(body, []string{
+			m.GetProjectName(ep.ProjectID), ep.ProjectID, ep.Name, ep.Region,
+			ep.Network, ep.Subnetwork, ep.IPAddress, ep.TargetType, ep.Target, ep.ConnectionState,
 		})
 	}
+	return body
+}
 
-	// Private Connections table
-	if len(m.PrivateConnections) > 0 {
-		header := []string{
-			"Project Name",
-			"Project ID",
-			"Name",
-			"Network",
-			"Service",
-			"Peering Name",
-			"Reserved Ranges",
-			"Accessible Services",
+func (m *PrivateServiceConnectModule) privateConnectionsToTableBody(conns []networkendpointsservice.PrivateConnection) [][]string {
+	var body [][]string
+	for _, conn := range conns {
+		reservedRanges := "-"
+		if len(conn.ReservedRanges) > 0 {
+			reservedRanges = strings.Join(conn.ReservedRanges, ", ")
 		}
-		var body [][]string
-
-		for _, conn := range m.PrivateConnections {
-			reservedRanges := "-"
-			if len(conn.ReservedRanges) > 0 {
-				reservedRanges = strings.Join(conn.ReservedRanges, ", ")
-			}
-			accessibleServices := "-"
-			if len(conn.AccessibleServices) > 0 {
-				accessibleServices = strings.Join(conn.AccessibleServices, ", ")
-			}
-
-			body = append(body, []string{
-				m.GetProjectName(conn.ProjectID),
-				conn.ProjectID,
-				conn.Name,
-				conn.Network,
-				conn.Service,
-				conn.PeeringName,
-				reservedRanges,
-				accessibleServices,
-			})
+		accessibleServices := "-"
+		if len(conn.AccessibleServices) > 0 {
+			accessibleServices = strings.Join(conn.AccessibleServices, ", ")
 		}
-
-		tables = append(tables, internal.TableFile{
-			Name:   "private-connections",
-			Header: header,
-			Body:   body,
+		body = append(body, []string{
+			m.GetProjectName(conn.ProjectID), conn.ProjectID, conn.Name, conn.Network,
+			conn.Service, conn.PeeringName, reservedRanges, accessibleServices,
 		})
 	}
+	return body
+}
 
-	// Service Attachments table - one row per IAM binding
-	if len(m.ServiceAttachments) > 0 {
-		header := []string{
-			"Project Name",
-			"Project ID",
-			"Name",
-			"Region",
-			"Target Service",
-			"Accept Policy",
-			"Connected",
-			"NAT Subnets",
-			"IAM Role",
-			"IAM Member",
+func (m *PrivateServiceConnectModule) serviceAttachmentsToTableBody(attachments []networkendpointsservice.ServiceAttachment) [][]string {
+	var body [][]string
+	for _, att := range attachments {
+		natSubnets := "-"
+		if len(att.NatSubnets) > 0 {
+			natSubnets = strings.Join(att.NatSubnets, ", ")
 		}
-		var body [][]string
-
-		for _, attachment := range m.ServiceAttachments {
-			natSubnets := "-"
-			if len(attachment.NatSubnets) > 0 {
-				natSubnets = strings.Join(attachment.NatSubnets, ", ")
-			}
-
-			if len(attachment.IAMBindings) > 0 {
-				// One row per IAM binding
-				for _, binding := range attachment.IAMBindings {
-					body = append(body, []string{
-						m.GetProjectName(attachment.ProjectID),
-						attachment.ProjectID,
-						attachment.Name,
-						attachment.Region,
-						attachment.TargetService,
-						attachment.ConnectionPreference,
-						fmt.Sprintf("%d", attachment.ConnectedEndpoints),
-						natSubnets,
-						binding.Role,
-						binding.Member,
-					})
-				}
-			} else {
-				// No IAM bindings - single row with empty IAM columns
+		if len(att.IAMBindings) > 0 {
+			for _, binding := range att.IAMBindings {
 				body = append(body, []string{
-					m.GetProjectName(attachment.ProjectID),
-					attachment.ProjectID,
-					attachment.Name,
-					attachment.Region,
-					attachment.TargetService,
-					attachment.ConnectionPreference,
-					fmt.Sprintf("%d", attachment.ConnectedEndpoints),
-					natSubnets,
-					"-",
-					"-",
+					m.GetProjectName(att.ProjectID), att.ProjectID, att.Name, att.Region,
+					att.TargetService, att.ConnectionPreference, fmt.Sprintf("%d", att.ConnectedEndpoints),
+					natSubnets, binding.Role, binding.Member,
 				})
 			}
+		} else {
+			body = append(body, []string{
+				m.GetProjectName(att.ProjectID), att.ProjectID, att.Name, att.Region,
+				att.TargetService, att.ConnectionPreference, fmt.Sprintf("%d", att.ConnectedEndpoints),
+				natSubnets, "-", "-",
+			})
 		}
+	}
+	return body
+}
 
+func (m *PrivateServiceConnectModule) buildTablesForProject(projectID string) []internal.TableFile {
+	var tableFiles []internal.TableFile
+
+	if eps, ok := m.ProjectPSCEndpoints[projectID]; ok && len(eps) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name: "psc-endpoints", Header: m.getPSCEndpointsHeader(), Body: m.pscEndpointsToTableBody(eps),
+		})
+	}
+	if conns, ok := m.ProjectPrivateConnections[projectID]; ok && len(conns) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name: "private-connections", Header: m.getPrivateConnectionsHeader(), Body: m.privateConnectionsToTableBody(conns),
+		})
+	}
+	if atts, ok := m.ProjectServiceAttachments[projectID]; ok && len(atts) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name: "service-attachments", Header: m.getServiceAttachmentsHeader(), Body: m.serviceAttachmentsToTableBody(atts),
+		})
+	}
+	return tableFiles
+}
+
+func (m *PrivateServiceConnectModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	projectsWithData := make(map[string]bool)
+	for projectID := range m.ProjectPSCEndpoints {
+		projectsWithData[projectID] = true
+	}
+	for projectID := range m.ProjectPrivateConnections {
+		projectsWithData[projectID] = true
+	}
+	for projectID := range m.ProjectServiceAttachments {
+		projectsWithData[projectID] = true
+	}
+
+	for projectID := range projectsWithData {
+		tableFiles := m.buildTablesForProject(projectID)
+		var lootFiles []internal.LootFile
+		if projectLoot, ok := m.LootMap[projectID]; ok {
+			for _, loot := range projectLoot {
+				if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# NOTE: These are internal IPs - you must be on the VPC network to reach them\n\n") {
+					lootFiles = append(lootFiles, *loot)
+				}
+			}
+		}
+		outputData.ProjectLevelData[projectID] = PrivateServiceConnectOutput{Table: tableFiles, Loot: lootFiles}
+	}
+
+	pathBuilder := m.BuildPathBuilder()
+	err := internal.HandleHierarchicalOutputSmart("gcp", m.Format, m.Verbosity, m.WrapTable, pathBuilder, outputData)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), "private-service-connect")
+	}
+}
+
+func (m *PrivateServiceConnectModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
+	var tables []internal.TableFile
+
+	allEndpoints := m.getAllPSCEndpoints()
+	if len(allEndpoints) > 0 {
 		tables = append(tables, internal.TableFile{
-			Name:   "service-attachments",
-			Header: header,
-			Body:   body,
+			Name: "psc-endpoints", Header: m.getPSCEndpointsHeader(), Body: m.pscEndpointsToTableBody(allEndpoints),
 		})
 	}
 
-	// Collect loot files - only include if they have content beyond the header
+	allConns := m.getAllPrivateConnections()
+	if len(allConns) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name: "private-connections", Header: m.getPrivateConnectionsHeader(), Body: m.privateConnectionsToTableBody(allConns),
+		})
+	}
+
+	allAtts := m.getAllServiceAttachments()
+	if len(allAtts) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name: "service-attachments", Header: m.getServiceAttachmentsHeader(), Body: m.serviceAttachmentsToTableBody(allAtts),
+		})
+	}
+
 	var lootFiles []internal.LootFile
-	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# NOTE: These are internal IPs - you must be on the VPC network to reach them\n\n") {
-			lootFiles = append(lootFiles, *loot)
+	for _, projectLoot := range m.LootMap {
+		for _, loot := range projectLoot {
+			if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# NOTE: These are internal IPs - you must be on the VPC network to reach them\n\n") {
+				lootFiles = append(lootFiles, *loot)
+			}
 		}
 	}
 
-	output := PrivateServiceConnectOutput{
-		Table: tables,
-		Loot:  lootFiles,
-	}
+	output := PrivateServiceConnectOutput{Table: tables, Loot: lootFiles}
 
 	scopeNames := make([]string, len(m.ProjectIDs))
 	for i, projectID := range m.ProjectIDs {
 		scopeNames[i] = m.GetProjectName(projectID)
 	}
 
-	err := internal.HandleOutputSmart(
-		"gcp",
-		m.Format,
-		m.OutputDirectory,
-		m.Verbosity,
-		m.WrapTable,
-		"project",
-		m.ProjectIDs,
-		scopeNames,
-		m.Account,
-		output,
-	)
+	err := internal.HandleOutputSmart("gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
+		"project", m.ProjectIDs, scopeNames, m.Account, output)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), "private-service-connect")
 		m.CommandCounter.Error++

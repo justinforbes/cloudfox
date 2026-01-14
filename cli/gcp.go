@@ -3,11 +3,15 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/BishopFox/cloudfox/gcp/commands"
 	oauthservice "github.com/BishopFox/cloudfox/gcp/services/oauthService"
 	orgsservice "github.com/BishopFox/cloudfox/gcp/services/organizationsService"
+	privescservice "github.com/BishopFox/cloudfox/gcp/services/privescService"
 	"github.com/BishopFox/cloudfox/internal"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/spf13/cobra"
 )
 
@@ -27,6 +31,10 @@ var (
 	GCPOutputDirectory string
 	GCPVerbosity       int
 	GCPWrapTable       bool
+	GCPFlatOutput      bool
+
+	// Privesc analysis flag
+	GCPWithPrivesc bool
 
 	// misc options
 	// GCPIgnoreCache		bool
@@ -68,7 +76,8 @@ var (
 				// Resolve project name for single project
 				resolveProjectNames(GCPProjectIDs)
 			} else if GCPProjectIDsFilePath != "" {
-				GCPProjectIDs = internal.LoadFileLinesIntoArray(GCPProjectIDsFilePath)
+				rawProjectIDs := internal.LoadFileLinesIntoArray(GCPProjectIDsFilePath)
+				GCPProjectIDs = deduplicateProjectIDs(rawProjectIDs)
 				// Resolve project names for all projects in list
 				resolveProjectNames(GCPProjectIDs)
 			} else {
@@ -86,10 +95,73 @@ var (
 				GCPLogger.FatalM(fmt.Sprintf("could not determine default user credential with error %s.\n\nPlease use default application default credentials: https://cloud.google.com/docs/authentication/application-default-credentials\n\nTry: gcloud auth application-default login", err.Error()), "gcp")
 			}
 			ctx = context.WithValue(ctx, "account", principal.Email)
+
+			// Build scope hierarchy for hierarchical output (unless --flat-output is set)
+			if !GCPFlatOutput && len(GCPProjectIDs) > 0 {
+				GCPLogger.InfoM("Building scope hierarchy for hierarchical output...", "gcp")
+				orgsSvc := orgsservice.New()
+				provider := orgsservice.NewHierarchyProvider(orgsSvc)
+				hierarchy, err := gcpinternal.BuildScopeHierarchy(GCPProjectIDs, provider)
+				if err != nil {
+					GCPLogger.InfoM(fmt.Sprintf("Could not build hierarchy, using flat output: %v", err), "gcp")
+				} else {
+					ctx = context.WithValue(ctx, "hierarchy", hierarchy)
+					// Log hierarchy summary
+					if len(hierarchy.Organizations) > 0 {
+						GCPLogger.InfoM(fmt.Sprintf("Detected %d organization(s), %d project(s)", len(hierarchy.Organizations), len(hierarchy.Projects)), "gcp")
+					} else {
+						GCPLogger.InfoM(fmt.Sprintf("Detected %d standalone project(s)", len(hierarchy.StandaloneProjs)), "gcp")
+					}
+				}
+			}
+
+			// If --with-privesc flag is set, run privesc analysis and populate cache
+			// This allows individual modules to show the Priv Esc column
+			if GCPWithPrivesc && len(GCPProjectIDs) > 0 {
+				GCPLogger.InfoM("Running privilege escalation analysis (--with-privesc)...", "gcp")
+				privescCache := runPrivescAndPopulateCache(ctx)
+				if privescCache != nil && privescCache.IsPopulated() {
+					ctx = gcpinternal.SetPrivescCacheInContext(ctx, privescCache)
+					GCPLogger.SuccessM("Privesc cache populated - modules will show Priv Esc column", "gcp")
+				}
+			}
+
 			cmd.SetContext(ctx)
 		},
 	}
 )
+
+// deduplicateProjectIDs removes duplicates, trims whitespace, and filters empty entries
+func deduplicateProjectIDs(projectIDs []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	duplicateCount := 0
+
+	for _, id := range projectIDs {
+		// Trim whitespace
+		id = strings.TrimSpace(id)
+
+		// Skip empty lines
+		if id == "" {
+			continue
+		}
+
+		// Skip duplicates
+		if seen[id] {
+			duplicateCount++
+			continue
+		}
+
+		seen[id] = true
+		result = append(result, id)
+	}
+
+	if duplicateCount > 0 {
+		GCPLogger.InfoM(fmt.Sprintf("Removed %d duplicate project ID(s) from list", duplicateCount), "gcp")
+	}
+
+	return result
+}
 
 // resolveProjectNames fetches display names for given project IDs
 func resolveProjectNames(projectIDs []string) {
@@ -131,18 +203,140 @@ var GCPAllChecksCommand = &cobra.Command{
 	Short: "Runs all available GCP commands",
 	Long:  `Executes all available GCP commands to collect and display information from all supported GCP services.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		var executedModules []string
+		startTime := time.Now()
+		ctx := cmd.Context()
+
+		// Run privesc analysis first and populate cache for other modules
+		GCPLogger.InfoM("Running privilege escalation analysis first to populate cache...", "all-checks")
+		privescCache := runPrivescAndPopulateCache(ctx)
+		if privescCache != nil && privescCache.IsPopulated() {
+			// Store cache in context for other modules to use
+			ctx = gcpinternal.SetPrivescCacheInContext(ctx, privescCache)
+			cmd.SetContext(ctx)
+			GCPLogger.SuccessM("Privesc cache populated - other modules will show Priv Esc column", "all-checks")
+		} else {
+			GCPLogger.InfoM("Privesc analysis not available - Priv Esc column will show '-'", "all-checks")
+		}
+		GCPLogger.InfoM("", "all-checks")
+
+		// Count total modules to execute (excluding self, hidden, and privesc which we already ran)
+		var modulesToRun []*cobra.Command
 		for _, childCmd := range GCPCommands.Commands() {
-			if childCmd == cmd { // Skip the run-all command itself to avoid infinite recursion
+			if childCmd == cmd { // Skip the run-all command itself
 				continue
 			}
 			if childCmd.Hidden { // Skip hidden commands
 				continue
 			}
-
-			GCPLogger.InfoM(fmt.Sprintf("Running command: %s", childCmd.Use), "all-checks")
-			childCmd.Run(cmd, args)
+			if childCmd.Use == "privesc" { // Skip privesc since we already ran it
+				continue
+			}
+			modulesToRun = append(modulesToRun, childCmd)
 		}
+		totalModules := len(modulesToRun)
+
+		GCPLogger.InfoM(fmt.Sprintf("Starting execution of %d modules...", totalModules), "all-checks")
+		GCPLogger.InfoM("", "all-checks")
+
+		// Add privesc to executed list since we ran it first
+		executedModules = append(executedModules, "privesc")
+
+		for i, childCmd := range modulesToRun {
+			GCPLogger.InfoM(fmt.Sprintf("[%d/%d] Running: %s", i+1, totalModules, childCmd.Use), "all-checks")
+			childCmd.Run(cmd, args)
+			executedModules = append(executedModules, childCmd.Use)
+		}
+
+		// Print summary
+		duration := time.Since(startTime)
+		printExecutionSummary(executedModules, duration)
 	},
+}
+
+// runPrivescAndPopulateCache runs the privesc analysis and returns a populated cache
+func runPrivescAndPopulateCache(ctx context.Context) *gcpinternal.PrivescCache {
+	cache := gcpinternal.NewPrivescCache()
+
+	// Get project IDs from context
+	projectIDs, ok := ctx.Value("projectIDs").([]string)
+	if !ok || len(projectIDs) == 0 {
+		return cache
+	}
+
+	// Get project names from context
+	projectNames, _ := ctx.Value("projectNames").(map[string]string)
+	if projectNames == nil {
+		projectNames = make(map[string]string)
+	}
+
+	// Run privesc analysis
+	svc := privescservice.New()
+	result, err := svc.CombinedPrivescAnalysis(ctx, projectIDs, projectNames)
+	if err != nil {
+		GCPLogger.ErrorM(fmt.Sprintf("Failed to run privesc analysis: %v", err), "all-checks")
+		return cache
+	}
+
+	// Convert privesc paths to cache format
+	var pathInfos []gcpinternal.PrivescPathInfo
+	for _, path := range result.AllPaths {
+		pathInfos = append(pathInfos, gcpinternal.PrivescPathInfo{
+			Principal:     path.Principal,
+			PrincipalType: path.PrincipalType,
+			Method:        path.Method,
+			RiskLevel:     path.RiskLevel,
+			Target:        path.TargetResource,
+			Permissions:   path.Permissions,
+		})
+	}
+
+	// Populate cache
+	cache.PopulateFromPaths(pathInfos)
+
+	GCPLogger.InfoM(fmt.Sprintf("Found %d privilege escalation path(s)", len(result.AllPaths)), "all-checks")
+
+	return cache
+}
+
+// printExecutionSummary prints a summary of all executed modules
+func printExecutionSummary(modules []string, duration time.Duration) {
+	GCPLogger.InfoM("", "all-checks") // blank line
+	GCPLogger.InfoM("════════════════════════════════════════════════════════════", "all-checks")
+	GCPLogger.InfoM("                    EXECUTION SUMMARY                        ", "all-checks")
+	GCPLogger.InfoM("════════════════════════════════════════════════════════════", "all-checks")
+	GCPLogger.InfoM(fmt.Sprintf("Total modules executed: %d", len(modules)), "all-checks")
+	GCPLogger.InfoM(fmt.Sprintf("Total execution time:   %s", formatDuration(duration)), "all-checks")
+	GCPLogger.InfoM("", "all-checks")
+	GCPLogger.InfoM("Modules executed:", "all-checks")
+
+	// Print modules in columns for better readability
+	const columnsPerRow = 4
+	for i := 0; i < len(modules); i += columnsPerRow {
+		row := "  "
+		for j := i; j < i+columnsPerRow && j < len(modules); j++ {
+			row += fmt.Sprintf("%-20s", modules[j])
+		}
+		GCPLogger.InfoM(row, "all-checks")
+	}
+
+	GCPLogger.InfoM("", "all-checks")
+	GCPLogger.InfoM(fmt.Sprintf("Output directory: %s", GCPOutputDirectory), "all-checks")
+	GCPLogger.InfoM("════════════════════════════════════════════════════════════", "all-checks")
+}
+
+// formatDuration formats a duration in a human-readable way
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.1f seconds", d.Seconds())
+	} else if d < time.Hour {
+		minutes := int(d.Minutes())
+		seconds := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	}
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+	return fmt.Sprintf("%dh %dm", hours, minutes)
 }
 
 func init() {
@@ -163,6 +357,8 @@ func init() {
 	GCPCommands.PersistentFlags().StringVar(&GCPOutputDirectory, "outdir", defaultOutputDir, "Output Directory ")
 	// GCPCommands.PersistentFlags().IntVarP(&Goroutines, "max-goroutines", "g", 30, "Maximum number of concurrent goroutines")
 	GCPCommands.PersistentFlags().BoolVarP(&GCPWrapTable, "wrap", "w", false, "Wrap table to fit in terminal (complicates grepping)")
+	GCPCommands.PersistentFlags().BoolVar(&GCPFlatOutput, "flat-output", false, "Use legacy flat output structure instead of hierarchical per-project directories")
+	GCPCommands.PersistentFlags().BoolVar(&GCPWithPrivesc, "with-privesc", false, "Run privilege escalation analysis and add Priv Esc column to output (runs privesc first)")
 
 	// Available commands
 	GCPCommands.AddCommand(

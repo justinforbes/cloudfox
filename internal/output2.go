@@ -1102,6 +1102,10 @@ func HandleOutputSmart(
 //   - Organization-level: [O]-{OrgName} or [O]-{OrgID}
 //   - Account-level: [A]-{AccountName} or [A]-{AccountID}
 //   - Project-level: [P]-{ProjectName} or [P]-{ProjectID}
+//
+// Multi-scope handling:
+//   - Single scope: [P]{ProjectName}
+//   - Multiple scopes: [P]{FirstName}_and_{N-1}_more
 func buildResultsIdentifier(scopeType string, identifiers, names []string) string {
 	var rawName string
 
@@ -1114,6 +1118,12 @@ func buildResultsIdentifier(scopeType string, identifiers, names []string) strin
 	} else {
 		// Ultimate fallback
 		rawName = "unknown-scope"
+	}
+
+	// Handle multiple scopes - indicate how many additional scopes are included
+	// This helps users understand that the folder contains data from multiple projects/accounts
+	if len(identifiers) > 1 {
+		rawName = fmt.Sprintf("%s_and_%d_more", rawName, len(identifiers)-1)
 	}
 
 	// Sanitize the name for Windows/Linux compatibility
@@ -1194,4 +1204,287 @@ func formatNumberWithCommas(n int) string {
 		return "-" + string(result)
 	}
 	return string(result)
+}
+
+// ============================================================================
+// HIERARCHICAL OUTPUT FUNCTIONS - GCP multi-project support
+// ============================================================================
+
+// HierarchicalOutputData represents output data organized by scope for hierarchical output
+type HierarchicalOutputData struct {
+	OrgLevelData     map[string]CloudfoxOutput // orgID -> org-level data
+	ProjectLevelData map[string]CloudfoxOutput // projectID -> project data
+}
+
+// PathBuilder is a function type that builds output paths for hierarchical output
+// This allows the caller to inject their path-building logic without importing internal/gcp
+type PathBuilder func(scopeType string, scopeID string) string
+
+// HandleHierarchicalOutput writes data to hierarchical directory structure.
+// This function outputs data per-scope (organization and/or project) rather than aggregating all data.
+//
+// Directory structure:
+//   - Org level: baseDir/gcp/principal/[O]org-name/module.csv
+//   - Project under org: baseDir/gcp/principal/[O]org-name/[P]project-name/module.csv
+//   - Standalone project: baseDir/gcp/principal/[P]project-name/module.csv
+//
+// Parameters:
+//   - cloudProvider: "gcp" (or other cloud providers in future)
+//   - format: Output format ("all", "csv", "json", "table")
+//   - verbosity: Verbosity level for console output
+//   - wrap: Whether to wrap table output
+//   - pathBuilder: Function that returns the output path for a given scope
+//   - outputData: Data organized by scope (org-level and project-level maps)
+func HandleHierarchicalOutput(
+	cloudProvider string,
+	format string,
+	verbosity int,
+	wrap bool,
+	pathBuilder PathBuilder,
+	outputData HierarchicalOutputData,
+) error {
+	logger := NewLogger()
+
+	// Write org-level data (if any)
+	for orgID, orgData := range outputData.OrgLevelData {
+		outPath := pathBuilder("organization", orgID)
+		if err := writeOutputToPath(outPath, format, verbosity, wrap, orgData, logger); err != nil {
+			return fmt.Errorf("failed to write org-level output for %s: %w", orgID, err)
+		}
+	}
+
+	// Write project-level data
+	for projectID, projectData := range outputData.ProjectLevelData {
+		outPath := pathBuilder("project", projectID)
+		if err := writeOutputToPath(outPath, format, verbosity, wrap, projectData, logger); err != nil {
+			return fmt.Errorf("failed to write project-level output for %s: %w", projectID, err)
+		}
+	}
+
+	return nil
+}
+
+// writeOutputToPath writes CloudfoxOutput data to a specific path
+func writeOutputToPath(outPath string, format string, verbosity int, wrap bool, data CloudfoxOutput, logger Logger) error {
+	tables := data.TableFiles()
+	lootFiles := data.LootFiles()
+
+	// Determine base module name from first table file (for logging)
+	baseCloudfoxModule := ""
+	if len(tables) > 0 {
+		baseCloudfoxModule = tables[0].Name
+	}
+
+	outputClient := OutputClient{
+		Verbosity:     verbosity,
+		CallingModule: baseCloudfoxModule,
+		Table: TableClient{
+			Wrap:          wrap,
+			DirectoryName: outPath,
+			TableFiles:    tables,
+		},
+		Loot: LootClient{
+			DirectoryName: outPath,
+			LootFiles:     lootFiles,
+		},
+	}
+
+	// Handle output based on the verbosity level
+	outputClient.WriteFullOutput(tables, lootFiles)
+	return nil
+}
+
+// HandleHierarchicalOutputStreaming writes data to hierarchical directory structure using streaming.
+// This is the memory-efficient version for large datasets.
+//
+// Parameters are the same as HandleHierarchicalOutput but uses streaming internally.
+func HandleHierarchicalOutputStreaming(
+	cloudProvider string,
+	format string,
+	verbosity int,
+	wrap bool,
+	pathBuilder PathBuilder,
+	outputData HierarchicalOutputData,
+) error {
+	logger := NewLogger()
+
+	// Stream org-level data (if any)
+	for orgID, orgData := range outputData.OrgLevelData {
+		outPath := pathBuilder("organization", orgID)
+		if err := streamOutputToPath(outPath, format, verbosity, wrap, orgData, logger); err != nil {
+			return fmt.Errorf("failed to stream org-level output for %s: %w", orgID, err)
+		}
+	}
+
+	// Stream project-level data
+	for projectID, projectData := range outputData.ProjectLevelData {
+		outPath := pathBuilder("project", projectID)
+		if err := streamOutputToPath(outPath, format, verbosity, wrap, projectData, logger); err != nil {
+			return fmt.Errorf("failed to stream project-level output for %s: %w", projectID, err)
+		}
+	}
+
+	return nil
+}
+
+// streamOutputToPath streams CloudfoxOutput data to a specific path
+func streamOutputToPath(outPath string, format string, verbosity int, wrap bool, data CloudfoxOutput, logger Logger) error {
+	if err := os.MkdirAll(outPath, 0o755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Determine base module name from first table file (for logging)
+	baseCloudfoxModule := ""
+	if len(data.TableFiles()) > 0 {
+		baseCloudfoxModule = data.TableFiles()[0].Name
+	}
+
+	// Stream table files
+	for _, t := range data.TableFiles() {
+		if verbosity > 0 {
+			tmpClient := TableClient{Wrap: wrap}
+			tmpClient.printTablesToScreen([]TableFile{t})
+		}
+
+		safeName := sanitizeFileName(t.Name)
+
+		// Stream CSV rows
+		if format == "all" || format == "csv" {
+			csvPath := filepath.Join(outPath, "csv", safeName+".csv")
+			if err := os.MkdirAll(filepath.Dir(csvPath), 0o755); err != nil {
+				return fmt.Errorf("failed to create csv directory: %w", err)
+			}
+			csvFile, err := os.OpenFile(csvPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to open csv file: %w", err)
+			}
+
+			info, _ := csvFile.Stat()
+			if info.Size() == 0 {
+				_, _ = csvFile.WriteString(strings.Join(t.Header, ",") + "\n")
+			}
+			for _, row := range t.Body {
+				cleanRow := removeColorCodesFromSlice(row)
+				_, _ = csvFile.WriteString(strings.Join(cleanRow, ",") + "\n")
+			}
+			csvFile.Close()
+
+			logger.InfoM(fmt.Sprintf("Output written to %s", csvPath), baseCloudfoxModule)
+		}
+
+		// Stream JSONL rows
+		if format == "all" || format == "json" {
+			if err := AppendJSONL(outPath, t); err != nil {
+				return fmt.Errorf("failed to append JSONL: %w", err)
+			}
+			logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(outPath, "json", safeName+".jsonl")), baseCloudfoxModule)
+		}
+
+		// Stream table rows
+		if format == "all" || format == "table" {
+			tableDir := filepath.Join(outPath, "table")
+			if err := os.MkdirAll(tableDir, 0o755); err != nil {
+				return fmt.Errorf("failed to create table directory: %w", err)
+			}
+			tablePath := filepath.Join(tableDir, safeName+".txt")
+
+			tableFile, err := os.OpenFile(tablePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to open table file: %w", err)
+			}
+
+			// Write tab-delimited data
+			_, _ = fmt.Fprintln(tableFile, strings.Join(t.Header, "\t"))
+			for _, row := range t.Body {
+				cleanRow := removeColorCodesFromSlice(row)
+				_, _ = fmt.Fprintln(tableFile, strings.Join(cleanRow, "\t"))
+			}
+			tableFile.Close()
+
+			logger.InfoM(fmt.Sprintf("Output written to %s", tablePath), baseCloudfoxModule)
+		}
+	}
+
+	// Stream loot files
+	for _, l := range data.LootFiles() {
+		lootDir := filepath.Join(outPath, "loot")
+		if err := os.MkdirAll(lootDir, 0o755); err != nil {
+			return fmt.Errorf("failed to create loot directory: %w", err)
+		}
+
+		lootPath := filepath.Join(lootDir, l.Name+".txt")
+		lootFile, err := os.OpenFile(lootPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open loot file: %w", err)
+		}
+
+		scanner := bufio.NewScanner(strings.NewReader(l.Contents))
+		for scanner.Scan() {
+			if _, err := lootFile.WriteString(scanner.Text() + "\n"); err != nil {
+				lootFile.Close()
+				return fmt.Errorf("failed to append loot line: %w", err)
+			}
+		}
+		lootFile.Close()
+
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("error reading loot lines: %w", err)
+		}
+
+		logger.InfoM(fmt.Sprintf("Output written to %s", lootPath), baseCloudfoxModule)
+	}
+
+	return nil
+}
+
+// HandleHierarchicalOutputSmart automatically selects the best output method based on dataset size.
+// This is the RECOMMENDED function for hierarchical output.
+func HandleHierarchicalOutputSmart(
+	cloudProvider string,
+	format string,
+	verbosity int,
+	wrap bool,
+	pathBuilder PathBuilder,
+	outputData HierarchicalOutputData,
+) error {
+	logger := NewLogger()
+
+	// Count total rows across all data
+	totalRows := 0
+	for _, orgData := range outputData.OrgLevelData {
+		for _, tableFile := range orgData.TableFiles() {
+			totalRows += len(tableFile.Body)
+		}
+	}
+	for _, projectData := range outputData.ProjectLevelData {
+		for _, tableFile := range projectData.TableFiles() {
+			totalRows += len(tableFile.Body)
+		}
+	}
+
+	// Log dataset size if verbose
+	if verbosity >= 2 {
+		logger.InfoM(fmt.Sprintf("Hierarchical output - Total dataset size: %s rows", formatNumberWithCommas(totalRows)), "output")
+	}
+
+	// Decision tree based on row count
+	if totalRows >= 1000000 {
+		logger.InfoM(fmt.Sprintf("WARNING: Very large dataset detected (%s rows). Using streaming output.",
+			formatNumberWithCommas(totalRows)), "output")
+	} else if totalRows >= 500000 {
+		logger.InfoM(fmt.Sprintf("Large dataset detected (%s rows). Using streaming output.",
+			formatNumberWithCommas(totalRows)), "output")
+	}
+
+	// Auto-select output method based on dataset size
+	if totalRows >= 50000 {
+		if verbosity >= 1 {
+			logger.InfoM(fmt.Sprintf("Using streaming hierarchical output for memory efficiency (%s rows)",
+				formatNumberWithCommas(totalRows)), "output")
+		}
+		return HandleHierarchicalOutputStreaming(cloudProvider, format, verbosity, wrap, pathBuilder, outputData)
+	}
+
+	// Use normal in-memory output for smaller datasets
+	return HandleHierarchicalOutput(cloudProvider, format, verbosity, wrap, pathBuilder, outputData)
 }

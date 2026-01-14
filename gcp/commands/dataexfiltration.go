@@ -125,13 +125,13 @@ type MissingHardening struct {
 type DataExfiltrationModule struct {
 	gcpinternal.BaseGCPModule
 
-	ExfiltrationPaths   []ExfiltrationPath
-	PotentialVectors    []PotentialVector
-	PublicExports       []PublicExport
-	LootMap             map[string]*internal.LootFile
-	mu                  sync.Mutex
-	vpcscProtectedProj  map[string]bool                 // Projects protected by VPC-SC
-	orgPolicyProtection map[string]*OrgPolicyProtection // Org policy protections per project
+	ProjectExfiltrationPaths map[string][]ExfiltrationPath               // projectID -> paths
+	ProjectPotentialVectors  map[string][]PotentialVector                // projectID -> vectors
+	ProjectPublicExports     map[string][]PublicExport                   // projectID -> exports
+	LootMap                  map[string]map[string]*internal.LootFile    // projectID -> loot files
+	mu                       sync.Mutex
+	vpcscProtectedProj       map[string]bool                 // Projects protected by VPC-SC
+	orgPolicyProtection      map[string]*OrgPolicyProtection // Org policy protections per project
 }
 
 // ------------------------------
@@ -155,22 +155,45 @@ func runGCPDataExfiltrationCommand(cmd *cobra.Command, args []string) {
 	}
 
 	module := &DataExfiltrationModule{
-		BaseGCPModule:       gcpinternal.NewBaseGCPModule(cmdCtx),
-		ExfiltrationPaths:   []ExfiltrationPath{},
-		PotentialVectors:    []PotentialVector{},
-		PublicExports:       []PublicExport{},
-		LootMap:             make(map[string]*internal.LootFile),
-		vpcscProtectedProj:  make(map[string]bool),
-		orgPolicyProtection: make(map[string]*OrgPolicyProtection),
+		BaseGCPModule:            gcpinternal.NewBaseGCPModule(cmdCtx),
+		ProjectExfiltrationPaths: make(map[string][]ExfiltrationPath),
+		ProjectPotentialVectors:  make(map[string][]PotentialVector),
+		ProjectPublicExports:     make(map[string][]PublicExport),
+		LootMap:                  make(map[string]map[string]*internal.LootFile),
+		vpcscProtectedProj:       make(map[string]bool),
+		orgPolicyProtection:      make(map[string]*OrgPolicyProtection),
 	}
 
-	module.initializeLootFiles()
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 }
 
 // ------------------------------
 // Module Execution
 // ------------------------------
+func (m *DataExfiltrationModule) getAllExfiltrationPaths() []ExfiltrationPath {
+	var all []ExfiltrationPath
+	for _, paths := range m.ProjectExfiltrationPaths {
+		all = append(all, paths...)
+	}
+	return all
+}
+
+func (m *DataExfiltrationModule) getAllPotentialVectors() []PotentialVector {
+	var all []PotentialVector
+	for _, vectors := range m.ProjectPotentialVectors {
+		all = append(all, vectors...)
+	}
+	return all
+}
+
+func (m *DataExfiltrationModule) getAllPublicExports() []PublicExport {
+	var all []PublicExport
+	for _, exports := range m.ProjectPublicExports {
+		all = append(all, exports...)
+	}
+	return all
+}
+
 func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Identifying data exfiltration paths and potential vectors...", GCP_DATAEXFILTRATION_MODULE_NAME)
 
@@ -186,19 +209,22 @@ func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Lo
 	// Generate hardening recommendations
 	hardeningRecs := m.generateMissingHardeningRecommendations()
 
+	allPaths := m.getAllExfiltrationPaths()
+	allVectors := m.getAllPotentialVectors()
+
 	// Check results
-	hasResults := len(m.ExfiltrationPaths) > 0 || len(m.PotentialVectors) > 0 || len(hardeningRecs) > 0
+	hasResults := len(allPaths) > 0 || len(allVectors) > 0 || len(hardeningRecs) > 0
 
 	if !hasResults {
 		logger.InfoM("No data exfiltration paths, vectors, or hardening gaps found", GCP_DATAEXFILTRATION_MODULE_NAME)
 		return
 	}
 
-	if len(m.ExfiltrationPaths) > 0 {
-		logger.SuccessM(fmt.Sprintf("Found %d actual misconfiguration(s)", len(m.ExfiltrationPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
+	if len(allPaths) > 0 {
+		logger.SuccessM(fmt.Sprintf("Found %d actual misconfiguration(s)", len(allPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
 	}
-	if len(m.PotentialVectors) > 0 {
-		logger.SuccessM(fmt.Sprintf("Found %d potential exfiltration vector(s)", len(m.PotentialVectors)), GCP_DATAEXFILTRATION_MODULE_NAME)
+	if len(allVectors) > 0 {
+		logger.SuccessM(fmt.Sprintf("Found %d potential exfiltration vector(s)", len(allVectors)), GCP_DATAEXFILTRATION_MODULE_NAME)
 	}
 	if len(hardeningRecs) > 0 {
 		logger.InfoM(fmt.Sprintf("Found %d hardening recommendation(s)", len(hardeningRecs)), GCP_DATAEXFILTRATION_MODULE_NAME)
@@ -543,10 +569,24 @@ gcloud access-context-manager perimeters create NAME \
 // ------------------------------
 // Project Processor
 // ------------------------------
+func (m *DataExfiltrationModule) initializeLootForProject(projectID string) {
+	if m.LootMap[projectID] == nil {
+		m.LootMap[projectID] = make(map[string]*internal.LootFile)
+		m.LootMap[projectID]["data-exfiltration-commands"] = &internal.LootFile{
+			Name:     "data-exfiltration-commands",
+			Contents: "# Data Exfiltration Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization!\n\n",
+		}
+	}
+}
+
 func (m *DataExfiltrationModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
 	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
 		logger.InfoM(fmt.Sprintf("Analyzing exfiltration paths in project: %s", projectID), GCP_DATAEXFILTRATION_MODULE_NAME)
 	}
+
+	m.mu.Lock()
+	m.initializeLootForProject(projectID)
+	m.mu.Unlock()
 
 	// === ACTUAL MISCONFIGURATIONS ===
 
@@ -654,9 +694,9 @@ func (m *DataExfiltrationModule) findPublicSnapshots(ctx context.Context, projec
 				}
 
 				m.mu.Lock()
-				m.PublicExports = append(m.PublicExports, export)
-				m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-				m.addExfiltrationPathToLoot(path)
+				m.ProjectPublicExports[projectID] = append(m.ProjectPublicExports[projectID], export)
+				m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+				m.addExfiltrationPathToLoot(projectID, path)
 				m.mu.Unlock()
 			}
 		}
@@ -725,9 +765,9 @@ func (m *DataExfiltrationModule) findPublicImages(ctx context.Context, projectID
 				}
 
 				m.mu.Lock()
-				m.PublicExports = append(m.PublicExports, export)
-				m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-				m.addExfiltrationPathToLoot(path)
+				m.ProjectPublicExports[projectID] = append(m.ProjectPublicExports[projectID], export)
+				m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+				m.addExfiltrationPathToLoot(projectID, path)
 				m.mu.Unlock()
 			}
 		}
@@ -805,9 +845,9 @@ func (m *DataExfiltrationModule) findPublicBuckets(ctx context.Context, projectI
 			}
 
 			m.mu.Lock()
-			m.PublicExports = append(m.PublicExports, export)
-			m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-			m.addExfiltrationPathToLoot(path)
+			m.ProjectPublicExports[projectID] = append(m.ProjectPublicExports[projectID], export)
+			m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+			m.addExfiltrationPathToLoot(projectID, path)
 			m.mu.Unlock()
 		}
 	}
@@ -854,8 +894,8 @@ func (m *DataExfiltrationModule) findCrossProjectLoggingSinks(ctx context.Contex
 			}
 
 			m.mu.Lock()
-			m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-			m.addExfiltrationPathToLoot(path)
+			m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+			m.addExfiltrationPathToLoot(projectID, path)
 			m.mu.Unlock()
 		}
 	}
@@ -906,8 +946,8 @@ func (m *DataExfiltrationModule) findPubSubPushEndpoints(ctx context.Context, pr
 			}
 
 			m.mu.Lock()
-			m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-			m.addExfiltrationPathToLoot(path)
+			m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+			m.addExfiltrationPathToLoot(projectID, path)
 			m.mu.Unlock()
 		}
 	}
@@ -943,8 +983,8 @@ func (m *DataExfiltrationModule) findPubSubExportSubscriptions(ctx context.Conte
 					}
 
 					m.mu.Lock()
-					m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-					m.addExfiltrationPathToLoot(path)
+					m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+					m.addExfiltrationPathToLoot(projectID, path)
 					m.mu.Unlock()
 				}
 			}
@@ -967,8 +1007,8 @@ func (m *DataExfiltrationModule) findPubSubExportSubscriptions(ctx context.Conte
 			}
 
 			m.mu.Lock()
-			m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-			m.addExfiltrationPathToLoot(path)
+			m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+			m.addExfiltrationPathToLoot(projectID, path)
 			m.mu.Unlock()
 		}
 	}
@@ -1013,9 +1053,9 @@ func (m *DataExfiltrationModule) findPublicBigQueryDatasets(ctx context.Context,
 			}
 
 			m.mu.Lock()
-			m.PublicExports = append(m.PublicExports, export)
-			m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-			m.addExfiltrationPathToLoot(path)
+			m.ProjectPublicExports[projectID] = append(m.ProjectPublicExports[projectID], export)
+			m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+			m.addExfiltrationPathToLoot(projectID, path)
 			m.mu.Unlock()
 		}
 	}
@@ -1058,8 +1098,8 @@ func (m *DataExfiltrationModule) findCloudSQLExportConfig(ctx context.Context, p
 				}
 
 				m.mu.Lock()
-				m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-				m.addExfiltrationPathToLoot(path)
+				m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+				m.addExfiltrationPathToLoot(projectID, path)
 				m.mu.Unlock()
 			}
 		}
@@ -1123,8 +1163,8 @@ func (m *DataExfiltrationModule) findStorageTransferJobs(ctx context.Context, pr
 				}
 
 				m.mu.Lock()
-				m.ExfiltrationPaths = append(m.ExfiltrationPaths, path)
-				m.addExfiltrationPathToLoot(path)
+				m.ProjectExfiltrationPaths[projectID] = append(m.ProjectExfiltrationPaths[projectID], path)
+				m.addExfiltrationPathToLoot(projectID, path)
 				m.mu.Unlock()
 			}
 		}
@@ -1173,8 +1213,8 @@ bq mk --external_table_definition=gs://bucket/file.csv@CSV DATASET.external_tabl
 		}
 
 		m.mu.Lock()
-		m.PotentialVectors = append(m.PotentialVectors, vector)
-		m.addPotentialVectorToLoot(vector)
+		m.ProjectPotentialVectors[projectID] = append(m.ProjectPotentialVectors[projectID], vector)
+		m.addPotentialVectorToLoot(projectID, vector)
 		m.mu.Unlock()
 	}
 }
@@ -1213,8 +1253,8 @@ gcloud pubsub subscriptions modify-push-config SUB_NAME \
 		}
 
 		m.mu.Lock()
-		m.PotentialVectors = append(m.PotentialVectors, vector)
-		m.addPotentialVectorToLoot(vector)
+		m.ProjectPotentialVectors[projectID] = append(m.ProjectPotentialVectors[projectID], vector)
+		m.addPotentialVectorToLoot(projectID, vector)
 		m.mu.Unlock()
 	}
 }
@@ -1264,8 +1304,8 @@ gcloud functions describe FUNCTION_NAME --project=%s`, projectID, projectID, pro
 		}
 
 		m.mu.Lock()
-		m.PotentialVectors = append(m.PotentialVectors, vector)
-		m.addPotentialVectorToLoot(vector)
+		m.ProjectPotentialVectors[projectID] = append(m.ProjectPotentialVectors[projectID], vector)
+		m.addPotentialVectorToLoot(projectID, vector)
 		m.mu.Unlock()
 	}
 }
@@ -1317,8 +1357,8 @@ curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" SERVICE_URL`
 		}
 
 		m.mu.Lock()
-		m.PotentialVectors = append(m.PotentialVectors, vector)
-		m.addPotentialVectorToLoot(vector)
+		m.ProjectPotentialVectors[projectID] = append(m.ProjectPotentialVectors[projectID], vector)
+		m.addPotentialVectorToLoot(projectID, vector)
 		m.mu.Unlock()
 	}
 }
@@ -1381,8 +1421,8 @@ gcloud logging sinks update SINK_NAME \
 	// Only add if there's evidence logging is actively used or we found sinks
 	if len(sinks) > 0 || hasCrossProjectSink {
 		m.mu.Lock()
-		m.PotentialVectors = append(m.PotentialVectors, vector)
-		m.addPotentialVectorToLoot(vector)
+		m.ProjectPotentialVectors[projectID] = append(m.ProjectPotentialVectors[projectID], vector)
+		m.addPotentialVectorToLoot(projectID, vector)
 		m.mu.Unlock()
 	}
 }
@@ -1390,19 +1430,17 @@ gcloud logging sinks update SINK_NAME \
 // ------------------------------
 // Loot File Management
 // ------------------------------
-func (m *DataExfiltrationModule) initializeLootFiles() {
-	m.LootMap["data-exfiltration-commands"] = &internal.LootFile{
-		Name:     "data-exfiltration-commands",
-		Contents: "# Data Exfiltration Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization!\n\n",
-	}
-}
-
-func (m *DataExfiltrationModule) addExfiltrationPathToLoot(path ExfiltrationPath) {
+func (m *DataExfiltrationModule) addExfiltrationPathToLoot(projectID string, path ExfiltrationPath) {
 	if path.ExploitCommand == "" {
 		return
 	}
 
-	m.LootMap["data-exfiltration-commands"].Contents += fmt.Sprintf(
+	lootFile := m.LootMap[projectID]["data-exfiltration-commands"]
+	if lootFile == nil {
+		return
+	}
+
+	lootFile.Contents += fmt.Sprintf(
 		"#############################################\n"+
 			"## [ACTUAL] %s: %s\n"+
 			"## Project: %s\n"+
@@ -1416,15 +1454,20 @@ func (m *DataExfiltrationModule) addExfiltrationPathToLoot(path ExfiltrationPath
 		path.Destination,
 	)
 
-	m.LootMap["data-exfiltration-commands"].Contents += fmt.Sprintf("%s\n\n", path.ExploitCommand)
+	lootFile.Contents += fmt.Sprintf("%s\n\n", path.ExploitCommand)
 }
 
-func (m *DataExfiltrationModule) addPotentialVectorToLoot(vector PotentialVector) {
+func (m *DataExfiltrationModule) addPotentialVectorToLoot(projectID string, vector PotentialVector) {
 	if vector.ExploitCommand == "" {
 		return
 	}
 
-	m.LootMap["data-exfiltration-commands"].Contents += fmt.Sprintf(
+	lootFile := m.LootMap[projectID]["data-exfiltration-commands"]
+	if lootFile == nil {
+		return
+	}
+
+	lootFile.Contents += fmt.Sprintf(
 		"#############################################\n"+
 			"## [POTENTIAL] %s\n"+
 			"## Project: %s\n"+
@@ -1437,50 +1480,44 @@ func (m *DataExfiltrationModule) addPotentialVectorToLoot(vector PotentialVector
 		vector.Destination,
 	)
 
-	m.LootMap["data-exfiltration-commands"].Contents += fmt.Sprintf("%s\n\n", vector.ExploitCommand)
+	lootFile.Contents += fmt.Sprintf("%s\n\n", vector.ExploitCommand)
 }
 
-func (m *DataExfiltrationModule) addHardeningRecommendationsToLoot(recommendations []MissingHardening) {
+func (m *DataExfiltrationModule) addHardeningRecommendationsToLoot(projectID string, recommendations []MissingHardening) {
 	if len(recommendations) == 0 {
 		return
 	}
 
 	// Initialize hardening loot file if not exists
-	if _, ok := m.LootMap["data-exfiltration-hardening"]; !ok {
-		m.LootMap["data-exfiltration-hardening"] = &internal.LootFile{
+	if m.LootMap[projectID]["data-exfiltration-hardening"] == nil {
+		m.LootMap[projectID]["data-exfiltration-hardening"] = &internal.LootFile{
 			Name:     "data-exfiltration-hardening",
 			Contents: "# Data Exfiltration Prevention - Hardening Recommendations\n# Generated by CloudFox\n# These controls help prevent data exfiltration from GCP projects\n\n",
 		}
 	}
 
-	// Group recommendations by project
-	projectRecs := make(map[string][]MissingHardening)
+	lootFile := m.LootMap[projectID]["data-exfiltration-hardening"]
+
+	lootFile.Contents += fmt.Sprintf(
+		"#############################################\n"+
+			"## PROJECT: %s (%s)\n"+
+			"## Missing %d security control(s)\n"+
+			"#############################################\n\n",
+		projectID,
+		m.GetProjectName(projectID),
+		len(recommendations),
+	)
+
 	for _, rec := range recommendations {
-		projectRecs[rec.ProjectID] = append(projectRecs[rec.ProjectID], rec)
-	}
-
-	for projectID, recs := range projectRecs {
-		m.LootMap["data-exfiltration-hardening"].Contents += fmt.Sprintf(
-			"#############################################\n"+
-				"## PROJECT: %s (%s)\n"+
-				"## Missing %d security control(s)\n"+
-				"#############################################\n\n",
-			projectID,
-			m.GetProjectName(projectID),
-			len(recs),
+		lootFile.Contents += fmt.Sprintf(
+			"## [%s] %s\n"+
+				"## Description: %s\n"+
+				"#############################################\n",
+			rec.Category,
+			rec.Control,
+			rec.Description,
 		)
-
-		for _, rec := range recs {
-			m.LootMap["data-exfiltration-hardening"].Contents += fmt.Sprintf(
-				"## [%s] %s\n"+
-					"## Description: %s\n"+
-					"#############################################\n",
-				rec.Category,
-				rec.Control,
-				rec.Description,
-			)
-			m.LootMap["data-exfiltration-hardening"].Contents += fmt.Sprintf("%s\n\n", rec.Recommendation)
-		}
+		lootFile.Contents += fmt.Sprintf("%s\n\n", rec.Recommendation)
 	}
 }
 
@@ -1489,8 +1526,15 @@ func (m *DataExfiltrationModule) addHardeningRecommendationsToLoot(recommendatio
 // ------------------------------
 
 func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	// Table 1: Actual Misconfigurations
-	misconfigHeader := []string{
+	if m.Hierarchy != nil && !m.FlatOutput {
+		m.writeHierarchicalOutput(ctx, logger)
+	} else {
+		m.writeFlatOutput(ctx, logger)
+	}
+}
+
+func (m *DataExfiltrationModule) getMisconfigHeader() []string {
+	return []string{
 		"Project ID",
 		"Project Name",
 		"Resource",
@@ -1499,18 +1543,42 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 		"Public",
 		"Size",
 	}
+}
 
-	var misconfigBody [][]string
+func (m *DataExfiltrationModule) getVectorHeader() []string {
+	return []string{
+		"Project ID",
+		"Project Name",
+		"Resource",
+		"Type",
+		"Destination",
+		"Public",
+		"Size",
+	}
+}
+
+func (m *DataExfiltrationModule) getHardeningHeader() []string {
+	return []string{
+		"Project ID",
+		"Project Name",
+		"Category",
+		"Control",
+		"Description",
+	}
+}
+
+func (m *DataExfiltrationModule) pathsToTableBody(paths []ExfiltrationPath, exports []PublicExport) [][]string {
+	var body [][]string
 
 	// Track which resources we've added from PublicExports
 	publicResources := make(map[string]PublicExport)
-	for _, e := range m.PublicExports {
+	for _, e := range exports {
 		key := fmt.Sprintf("%s:%s:%s", e.ProjectID, e.ResourceType, e.ResourceName)
 		publicResources[key] = e
 	}
 
 	// Add exfiltration paths (actual misconfigurations)
-	for _, p := range m.ExfiltrationPaths {
+	for _, p := range paths {
 		key := fmt.Sprintf("%s:%s:%s", p.ProjectID, p.PathType, p.ResourceName)
 		export, isPublic := publicResources[key]
 
@@ -1522,7 +1590,7 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 			delete(publicResources, key)
 		}
 
-		misconfigBody = append(misconfigBody, []string{
+		body = append(body, []string{
 			p.ProjectID,
 			m.GetProjectName(p.ProjectID),
 			p.ResourceName,
@@ -1535,7 +1603,7 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 
 	// Add any remaining public exports not already covered
 	for _, e := range publicResources {
-		misconfigBody = append(misconfigBody, []string{
+		body = append(body, []string{
 			e.ProjectID,
 			m.GetProjectName(e.ProjectID),
 			e.ResourceName,
@@ -1546,20 +1614,13 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 		})
 	}
 
-	// Table 2: Potential Exfiltration Vectors
-	vectorHeader := []string{
-		"Project ID",
-		"Project Name",
-		"Resource",
-		"Type",
-		"Destination",
-		"Public",
-		"Size",
-	}
+	return body
+}
 
-	var vectorBody [][]string
-	for _, v := range m.PotentialVectors {
-		vectorBody = append(vectorBody, []string{
+func (m *DataExfiltrationModule) vectorsToTableBody(vectors []PotentialVector) [][]string {
+	var body [][]string
+	for _, v := range vectors {
+		body = append(body, []string{
 			v.ProjectID,
 			m.GetProjectName(v.ProjectID),
 			v.ResourceName,
@@ -1569,20 +1630,13 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 			"-",
 		})
 	}
+	return body
+}
 
-	// Table 3: Missing Hardening Recommendations
-	hardeningHeader := []string{
-		"Project ID",
-		"Project Name",
-		"Category",
-		"Control",
-		"Description",
-	}
-
-	var hardeningBody [][]string
-	hardeningRecs := m.generateMissingHardeningRecommendations()
-	for _, h := range hardeningRecs {
-		hardeningBody = append(hardeningBody, []string{
+func (m *DataExfiltrationModule) hardeningToTableBody(recs []MissingHardening) [][]string {
+	var body [][]string
+	for _, h := range recs {
+		body = append(body, []string{
 			h.ProjectID,
 			m.GetProjectName(h.ProjectID),
 			h.Category,
@@ -1590,43 +1644,166 @@ func (m *DataExfiltrationModule) writeOutput(ctx context.Context, logger interna
 			h.Description,
 		})
 	}
+	return body
+}
 
-	// Add hardening recommendations to loot file
-	m.addHardeningRecommendationsToLoot(hardeningRecs)
+func (m *DataExfiltrationModule) buildTablesForProject(projectID string, hardeningRecs []MissingHardening) []internal.TableFile {
+	var tableFiles []internal.TableFile
 
-	// Collect loot files
-	var lootFiles []internal.LootFile
-	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization!\n\n") {
-			lootFiles = append(lootFiles, *loot)
+	paths := m.ProjectExfiltrationPaths[projectID]
+	exports := m.ProjectPublicExports[projectID]
+	vectors := m.ProjectPotentialVectors[projectID]
+
+	if len(paths) > 0 || len(exports) > 0 {
+		body := m.pathsToTableBody(paths, exports)
+		if len(body) > 0 {
+			tableFiles = append(tableFiles, internal.TableFile{
+				Name:   "data-exfiltration-misconfigurations",
+				Header: m.getMisconfigHeader(),
+				Body:   body,
+			})
 		}
+	}
+
+	if len(vectors) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   "data-exfiltration-vectors",
+			Header: m.getVectorHeader(),
+			Body:   m.vectorsToTableBody(vectors),
+		})
+	}
+
+	// Filter hardening for this project
+	var projectHardening []MissingHardening
+	for _, h := range hardeningRecs {
+		if h.ProjectID == projectID {
+			projectHardening = append(projectHardening, h)
+		}
+	}
+
+	if len(projectHardening) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   "data-exfiltration-hardening",
+			Header: m.getHardeningHeader(),
+			Body:   m.hardeningToTableBody(projectHardening),
+		})
+	}
+
+	return tableFiles
+}
+
+func (m *DataExfiltrationModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	hardeningRecs := m.generateMissingHardeningRecommendations()
+
+	// Collect all project IDs that have data
+	projectIDs := make(map[string]bool)
+	for projectID := range m.ProjectExfiltrationPaths {
+		projectIDs[projectID] = true
+	}
+	for projectID := range m.ProjectPotentialVectors {
+		projectIDs[projectID] = true
+	}
+	for projectID := range m.ProjectPublicExports {
+		projectIDs[projectID] = true
+	}
+	for _, h := range hardeningRecs {
+		projectIDs[h.ProjectID] = true
+	}
+
+	for projectID := range projectIDs {
+		// Ensure loot is initialized
+		m.initializeLootForProject(projectID)
+
+		// Filter hardening recommendations for this project and add to loot
+		var projectHardening []MissingHardening
+		for _, h := range hardeningRecs {
+			if h.ProjectID == projectID {
+				projectHardening = append(projectHardening, h)
+			}
+		}
+		m.addHardeningRecommendationsToLoot(projectID, projectHardening)
+
+		tableFiles := m.buildTablesForProject(projectID, hardeningRecs)
+
+		var lootFiles []internal.LootFile
+		if projectLoot, ok := m.LootMap[projectID]; ok {
+			for _, loot := range projectLoot {
+				if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization!\n\n") {
+					lootFiles = append(lootFiles, *loot)
+				}
+			}
+		}
+
+		outputData.ProjectLevelData[projectID] = DataExfiltrationOutput{Table: tableFiles, Loot: lootFiles}
+	}
+
+	pathBuilder := m.BuildPathBuilder()
+
+	err := internal.HandleHierarchicalOutputSmart("gcp", m.Format, m.Verbosity, m.WrapTable, pathBuilder, outputData)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), GCP_DATAEXFILTRATION_MODULE_NAME)
+	}
+}
+
+func (m *DataExfiltrationModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
+	allPaths := m.getAllExfiltrationPaths()
+	allVectors := m.getAllPotentialVectors()
+	allExports := m.getAllPublicExports()
+	hardeningRecs := m.generateMissingHardeningRecommendations()
+
+	// Add hardening recommendations to loot files
+	for _, projectID := range m.ProjectIDs {
+		m.initializeLootForProject(projectID)
+		var projectHardening []MissingHardening
+		for _, h := range hardeningRecs {
+			if h.ProjectID == projectID {
+				projectHardening = append(projectHardening, h)
+			}
+		}
+		m.addHardeningRecommendationsToLoot(projectID, projectHardening)
 	}
 
 	// Build tables
 	tables := []internal.TableFile{}
 
+	misconfigBody := m.pathsToTableBody(allPaths, allExports)
 	if len(misconfigBody) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "data-exfiltration-misconfigurations",
-			Header: misconfigHeader,
+			Header: m.getMisconfigHeader(),
 			Body:   misconfigBody,
 		})
 	}
 
-	if len(vectorBody) > 0 {
+	if len(allVectors) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "data-exfiltration-vectors",
-			Header: vectorHeader,
-			Body:   vectorBody,
+			Header: m.getVectorHeader(),
+			Body:   m.vectorsToTableBody(allVectors),
 		})
 	}
 
-	if len(hardeningBody) > 0 {
+	if len(hardeningRecs) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "data-exfiltration-hardening",
-			Header: hardeningHeader,
-			Body:   hardeningBody,
+			Header: m.getHardeningHeader(),
+			Body:   m.hardeningToTableBody(hardeningRecs),
 		})
+	}
+
+	// Collect loot files
+	var lootFiles []internal.LootFile
+	for _, projectLoot := range m.LootMap {
+		for _, loot := range projectLoot {
+			if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization!\n\n") {
+				lootFiles = append(lootFiles, *loot)
+			}
+		}
 	}
 
 	output := DataExfiltrationOutput{

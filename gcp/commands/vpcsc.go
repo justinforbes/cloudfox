@@ -232,6 +232,14 @@ func (m *VPCSCModule) addAllToLoot() {
 }
 
 func (m *VPCSCModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	if m.Hierarchy != nil && !m.FlatOutput {
+		m.writeHierarchicalOutput(ctx, logger)
+	} else {
+		m.writeFlatOutput(ctx, logger)
+	}
+}
+
+func (m *VPCSCModule) buildTables() []internal.TableFile {
 	var tables []internal.TableFile
 
 	// Access Policies table
@@ -325,12 +333,61 @@ func (m *VPCSCModule) writeOutput(ctx context.Context, logger internal.Logger) {
 		})
 	}
 
+	return tables
+}
+
+func (m *VPCSCModule) collectLootFiles() []internal.LootFile {
 	var lootFiles []internal.LootFile
 	for _, loot := range m.LootMap {
 		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
 			lootFiles = append(lootFiles, *loot)
 		}
 	}
+	return lootFiles
+}
+
+func (m *VPCSCModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	tables := m.buildTables()
+	lootFiles := m.collectLootFiles()
+
+	output := VPCSCOutput{
+		Table: tables,
+		Loot:  lootFiles,
+	}
+
+	// Determine output location - prefer org-level, fall back to project-level
+	orgID := ""
+	if m.OrgID != "" {
+		orgID = m.OrgID
+	} else if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
+		orgID = m.Hierarchy.Organizations[0].ID
+	}
+
+	if orgID != "" {
+		// Place at org level
+		outputData.OrgLevelData[orgID] = output
+	} else if len(m.ProjectIDs) > 0 {
+		// Fall back to first project level if no org discovered
+		outputData.ProjectLevelData[m.ProjectIDs[0]] = output
+	}
+
+	pathBuilder := m.BuildPathBuilder()
+
+	err := internal.HandleHierarchicalOutputSmart("gcp", m.Format, m.Verbosity, m.WrapTable, pathBuilder, outputData)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), globals.GCP_VPCSC_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}
+
+func (m *VPCSCModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
+	tables := m.buildTables()
+	lootFiles := m.collectLootFiles()
 
 	output := VPCSCOutput{Table: tables, Loot: lootFiles}
 

@@ -68,17 +68,14 @@ type ClusterWorkloadIdentity struct {
 type WorkloadIdentityModule struct {
 	gcpinternal.BaseGCPModule
 
-	// Module-specific fields (GKE Workload Identity)
-	Clusters []ClusterWorkloadIdentity
-	Bindings []WorkloadIdentityBinding
-
-	// Workload Identity Federation fields
-	Pools              []workloadidentityservice.WorkloadIdentityPool
-	Providers          []workloadidentityservice.WorkloadIdentityProvider
-	FederatedBindings  []workloadidentityservice.FederatedIdentityBinding
-
-	LootMap  map[string]*internal.LootFile
-	mu       sync.Mutex
+	// Module-specific fields (GKE Workload Identity) - per-project for hierarchical output
+	ProjectClusters         map[string][]ClusterWorkloadIdentity                              // projectID -> clusters
+	ProjectBindings         map[string][]WorkloadIdentityBinding                              // projectID -> bindings
+	ProjectPools            map[string][]workloadidentityservice.WorkloadIdentityPool         // projectID -> pools
+	ProjectProviders        map[string][]workloadidentityservice.WorkloadIdentityProvider     // projectID -> providers
+	ProjectFederatedBindings map[string][]workloadidentityservice.FederatedIdentityBinding   // projectID -> federated bindings
+	LootMap                 map[string]map[string]*internal.LootFile                          // projectID -> loot files
+	mu                      sync.Mutex
 }
 
 // ------------------------------
@@ -104,17 +101,14 @@ func runGCPWorkloadIdentityCommand(cmd *cobra.Command, args []string) {
 
 	// Create module instance
 	module := &WorkloadIdentityModule{
-		BaseGCPModule:     gcpinternal.NewBaseGCPModule(cmdCtx),
-		Clusters:          []ClusterWorkloadIdentity{},
-		Bindings:          []WorkloadIdentityBinding{},
-		Pools:             []workloadidentityservice.WorkloadIdentityPool{},
-		Providers:         []workloadidentityservice.WorkloadIdentityProvider{},
-		FederatedBindings: []workloadidentityservice.FederatedIdentityBinding{},
-		LootMap:           make(map[string]*internal.LootFile),
+		BaseGCPModule:            gcpinternal.NewBaseGCPModule(cmdCtx),
+		ProjectClusters:          make(map[string][]ClusterWorkloadIdentity),
+		ProjectBindings:          make(map[string][]WorkloadIdentityBinding),
+		ProjectPools:             make(map[string][]workloadidentityservice.WorkloadIdentityPool),
+		ProjectProviders:         make(map[string][]workloadidentityservice.WorkloadIdentityProvider),
+		ProjectFederatedBindings: make(map[string][]workloadidentityservice.FederatedIdentityBinding),
+		LootMap:                  make(map[string]map[string]*internal.LootFile),
 	}
-
-	// Initialize loot files
-	module.initializeLootFiles()
 
 	// Execute enumeration
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
@@ -127,9 +121,16 @@ func (m *WorkloadIdentityModule) Execute(ctx context.Context, logger internal.Lo
 	// Run enumeration with concurrency
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME, m.processProject)
 
+	// Get all data for stats
+	allClusters := m.getAllClusters()
+	allBindings := m.getAllBindings()
+	allPools := m.getAllPools()
+	allProviders := m.getAllProviders()
+	allFederatedBindings := m.getAllFederatedBindings()
+
 	// Check if we have any findings
-	hasGKE := len(m.Clusters) > 0
-	hasFederation := len(m.Pools) > 0
+	hasGKE := len(allClusters) > 0
+	hasFederation := len(allPools) > 0
 
 	if !hasGKE && !hasFederation {
 		logger.InfoM("No Workload Identity configurations found", globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
@@ -139,23 +140,68 @@ func (m *WorkloadIdentityModule) Execute(ctx context.Context, logger internal.Lo
 	// Count GKE clusters with Workload Identity
 	if hasGKE {
 		wiEnabled := 0
-		for _, c := range m.Clusters {
+		for _, c := range allClusters {
 			if c.WorkloadPoolEnabled {
 				wiEnabled++
 			}
 		}
 		logger.SuccessM(fmt.Sprintf("Found %d GKE cluster(s) (%d with Workload Identity), %d K8s->GCP binding(s)",
-			len(m.Clusters), wiEnabled, len(m.Bindings)), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
+			len(allClusters), wiEnabled, len(allBindings)), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
 	}
 
 	// Count federation findings
 	if hasFederation {
 		logger.SuccessM(fmt.Sprintf("Found %d Workload Identity Pool(s), %d Provider(s), %d federated binding(s)",
-			len(m.Pools), len(m.Providers), len(m.FederatedBindings)), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
+			len(allPools), len(allProviders), len(allFederatedBindings)), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
 	}
 
 	// Write output
 	m.writeOutput(ctx, logger)
+}
+
+// getAllClusters returns all clusters from all projects (for statistics)
+func (m *WorkloadIdentityModule) getAllClusters() []ClusterWorkloadIdentity {
+	var all []ClusterWorkloadIdentity
+	for _, clusters := range m.ProjectClusters {
+		all = append(all, clusters...)
+	}
+	return all
+}
+
+// getAllBindings returns all bindings from all projects (for statistics)
+func (m *WorkloadIdentityModule) getAllBindings() []WorkloadIdentityBinding {
+	var all []WorkloadIdentityBinding
+	for _, bindings := range m.ProjectBindings {
+		all = append(all, bindings...)
+	}
+	return all
+}
+
+// getAllPools returns all pools from all projects (for statistics)
+func (m *WorkloadIdentityModule) getAllPools() []workloadidentityservice.WorkloadIdentityPool {
+	var all []workloadidentityservice.WorkloadIdentityPool
+	for _, pools := range m.ProjectPools {
+		all = append(all, pools...)
+	}
+	return all
+}
+
+// getAllProviders returns all providers from all projects (for statistics)
+func (m *WorkloadIdentityModule) getAllProviders() []workloadidentityservice.WorkloadIdentityProvider {
+	var all []workloadidentityservice.WorkloadIdentityProvider
+	for _, providers := range m.ProjectProviders {
+		all = append(all, providers...)
+	}
+	return all
+}
+
+// getAllFederatedBindings returns all federated bindings from all projects (for statistics)
+func (m *WorkloadIdentityModule) getAllFederatedBindings() []workloadidentityservice.FederatedIdentityBinding {
+	var all []workloadidentityservice.FederatedIdentityBinding
+	for _, bindings := range m.ProjectFederatedBindings {
+		all = append(all, bindings...)
+	}
+	return all
 }
 
 // ------------------------------
@@ -243,27 +289,36 @@ func (m *WorkloadIdentityModule) processProject(ctx context.Context, projectID s
 
 	// Thread-safe append
 	m.mu.Lock()
-	m.Clusters = append(m.Clusters, clusterInfos...)
-	m.Bindings = append(m.Bindings, bindings...)
-	m.Pools = append(m.Pools, pools...)
-	m.Providers = append(m.Providers, providers...)
-	m.FederatedBindings = append(m.FederatedBindings, fedBindings...)
+	m.ProjectClusters[projectID] = clusterInfos
+	m.ProjectBindings[projectID] = bindings
+	m.ProjectPools[projectID] = pools
+	m.ProjectProviders[projectID] = providers
+	m.ProjectFederatedBindings[projectID] = fedBindings
+
+	// Initialize loot for this project
+	if m.LootMap[projectID] == nil {
+		m.LootMap[projectID] = make(map[string]*internal.LootFile)
+		m.LootMap[projectID]["workloadidentity-commands"] = &internal.LootFile{
+			Name:     "workloadidentity-commands",
+			Contents: "# Workload Identity Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+		}
+	}
 
 	// Generate loot
 	for _, cwi := range clusterInfos {
-		m.addClusterToLoot(cwi)
+		m.addClusterToLoot(projectID, cwi)
 	}
 	for _, binding := range bindings {
-		m.addBindingToLoot(binding)
+		m.addBindingToLoot(projectID, binding)
 	}
 	for _, pool := range pools {
-		m.addPoolToLoot(pool)
+		m.addPoolToLoot(projectID, pool)
 	}
 	for _, provider := range providers {
-		m.addProviderToLoot(provider)
+		m.addProviderToLoot(projectID, provider)
 	}
 	for _, fedBinding := range fedBindings {
-		m.addFederatedBindingToLoot(fedBinding)
+		m.addFederatedBindingToLoot(projectID, fedBinding)
 	}
 	m.mu.Unlock()
 
@@ -400,16 +455,13 @@ func isHighPrivilegeServiceAccount(sa IAMService.ServiceAccountInfo) bool {
 // ------------------------------
 // Loot File Management
 // ------------------------------
-func (m *WorkloadIdentityModule) initializeLootFiles() {
-	m.LootMap["workloadidentity-commands"] = &internal.LootFile{
-		Name:     "workloadidentity-commands",
-		Contents: "# Workload Identity Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+func (m *WorkloadIdentityModule) addClusterToLoot(projectID string, cwi ClusterWorkloadIdentity) {
+	lootFile := m.LootMap[projectID]["workloadidentity-commands"]
+	if lootFile == nil {
+		return
 	}
-}
-
-func (m *WorkloadIdentityModule) addClusterToLoot(cwi ClusterWorkloadIdentity) {
 	if cwi.WorkloadPoolEnabled {
-		m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# ==========================================\n"+
 				"# GKE CLUSTER: %s\n"+
 				"# ==========================================\n"+
@@ -432,13 +484,17 @@ func (m *WorkloadIdentityModule) addClusterToLoot(cwi ClusterWorkloadIdentity) {
 	}
 }
 
-func (m *WorkloadIdentityModule) addBindingToLoot(binding WorkloadIdentityBinding) {
+func (m *WorkloadIdentityModule) addBindingToLoot(projectID string, binding WorkloadIdentityBinding) {
+	lootFile := m.LootMap[projectID]["workloadidentity-commands"]
+	if lootFile == nil {
+		return
+	}
 	highPriv := ""
 	if binding.IsHighPrivilege {
 		highPriv = " [HIGH PRIVILEGE]"
 	}
 
-	m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"# ------------------------------------------\n"+
 			"# K8s SA BINDING: %s/%s -> %s%s\n"+
 			"# ------------------------------------------\n"+
@@ -454,13 +510,13 @@ func (m *WorkloadIdentityModule) addBindingToLoot(binding WorkloadIdentityBindin
 	)
 
 	if binding.IsHighPrivilege && len(binding.GCPSARoles) > 0 {
-		m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# GCP SA Roles: %s\n",
 			strings.Join(binding.GCPSARoles, ", "),
 		)
 	}
 
-	m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"\n# To exploit, create pod with this service account:\n"+
 			"# kubectl run exploit-pod --image=google/cloud-sdk:slim --serviceaccount=%s -n %s -- sleep infinity\n"+
 			"# kubectl exec -it exploit-pod -n %s -- gcloud auth list\n\n",
@@ -470,12 +526,16 @@ func (m *WorkloadIdentityModule) addBindingToLoot(binding WorkloadIdentityBindin
 	)
 }
 
-func (m *WorkloadIdentityModule) addPoolToLoot(pool workloadidentityservice.WorkloadIdentityPool) {
+func (m *WorkloadIdentityModule) addPoolToLoot(projectID string, pool workloadidentityservice.WorkloadIdentityPool) {
+	lootFile := m.LootMap[projectID]["workloadidentity-commands"]
+	if lootFile == nil {
+		return
+	}
 	status := "Active"
 	if pool.Disabled {
 		status = "Disabled"
 	}
-	m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"# ==========================================\n"+
 			"# FEDERATION POOL: %s\n"+
 			"# ==========================================\n"+
@@ -497,8 +557,12 @@ func (m *WorkloadIdentityModule) addPoolToLoot(pool workloadidentityservice.Work
 	)
 }
 
-func (m *WorkloadIdentityModule) addProviderToLoot(provider workloadidentityservice.WorkloadIdentityProvider) {
-	m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+func (m *WorkloadIdentityModule) addProviderToLoot(projectID string, provider workloadidentityservice.WorkloadIdentityProvider) {
+	lootFile := m.LootMap[projectID]["workloadidentity-commands"]
+	if lootFile == nil {
+		return
+	}
+	lootFile.Contents += fmt.Sprintf(
 		"# ------------------------------------------\n"+
 			"# PROVIDER: %s/%s (%s)\n"+
 			"# ------------------------------------------\n"+
@@ -509,21 +573,21 @@ func (m *WorkloadIdentityModule) addProviderToLoot(provider workloadidentityserv
 	)
 
 	if provider.ProviderType == "AWS" {
-		m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# AWS Account: %s\n", provider.AWSAccountID)
 	} else if provider.ProviderType == "OIDC" {
-		m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# OIDC Issuer: %s\n", provider.OIDCIssuerURI)
 	}
 
 	if provider.AttributeCondition != "" {
-		m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# Attribute Condition: %s\n", provider.AttributeCondition)
 	} else {
-		m.LootMap["workloadidentity-commands"].Contents += "# Attribute Condition: NONE\n"
+		lootFile.Contents += "# Attribute Condition: NONE\n"
 	}
 
-	m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"\n# Describe provider:\n"+
 			"gcloud iam workload-identity-pools providers describe %s --workload-identity-pool=%s --location=global --project=%s\n\n",
 		provider.ProviderID, provider.PoolID, provider.ProjectID,
@@ -532,7 +596,7 @@ func (m *WorkloadIdentityModule) addProviderToLoot(provider workloadidentityserv
 	// Add exploitation guidance based on provider type
 	switch provider.ProviderType {
 	case "AWS":
-		m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# From AWS account %s, exchange credentials:\n"+
 				"# gcloud iam workload-identity-pools create-cred-config \\\n"+
 				"#   projects/%s/locations/global/workloadIdentityPools/%s/providers/%s \\\n"+
@@ -542,7 +606,7 @@ func (m *WorkloadIdentityModule) addProviderToLoot(provider workloadidentityserv
 		)
 	case "OIDC":
 		if strings.Contains(provider.OIDCIssuerURI, "github") {
-			m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+			lootFile.Contents += fmt.Sprintf(
 				"# From GitHub Actions workflow, add:\n"+
 					"# permissions:\n"+
 					"#   id-token: write\n"+
@@ -558,8 +622,12 @@ func (m *WorkloadIdentityModule) addProviderToLoot(provider workloadidentityserv
 	}
 }
 
-func (m *WorkloadIdentityModule) addFederatedBindingToLoot(binding workloadidentityservice.FederatedIdentityBinding) {
-	m.LootMap["workloadidentity-commands"].Contents += fmt.Sprintf(
+func (m *WorkloadIdentityModule) addFederatedBindingToLoot(projectID string, binding workloadidentityservice.FederatedIdentityBinding) {
+	lootFile := m.LootMap[projectID]["workloadidentity-commands"]
+	if lootFile == nil {
+		return
+	}
+	lootFile.Contents += fmt.Sprintf(
 		"# ------------------------------------------\n"+
 			"# FEDERATED BINDING\n"+
 			"# ------------------------------------------\n"+
@@ -578,6 +646,127 @@ func (m *WorkloadIdentityModule) addFederatedBindingToLoot(binding workloadident
 // Output Generation
 // ------------------------------
 func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	// Decide between hierarchical and flat output
+	if m.Hierarchy != nil && !m.FlatOutput {
+		m.writeHierarchicalOutput(ctx, logger)
+	} else {
+		m.writeFlatOutput(ctx, logger)
+	}
+}
+
+// writeHierarchicalOutput writes output to per-project directories
+func (m *WorkloadIdentityModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
+	// Build hierarchical output data
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	// Build project-level outputs
+	for projectID := range m.ProjectClusters {
+		tables := m.buildTablesForProject(projectID)
+
+		// Collect loot for this project
+		var lootFiles []internal.LootFile
+		if projectLoot, ok := m.LootMap[projectID]; ok {
+			for _, loot := range projectLoot {
+				if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
+					lootFiles = append(lootFiles, *loot)
+				}
+			}
+		}
+
+		outputData.ProjectLevelData[projectID] = WorkloadIdentityOutput{Table: tables, Loot: lootFiles}
+	}
+
+	// Create path builder using the module's hierarchy
+	pathBuilder := m.BuildPathBuilder()
+
+	// Write using hierarchical output
+	err := internal.HandleHierarchicalOutputSmart(
+		"gcp",
+		m.Format,
+		m.Verbosity,
+		m.WrapTable,
+		pathBuilder,
+		outputData,
+	)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}
+
+// writeFlatOutput writes all output to a single directory (legacy mode)
+func (m *WorkloadIdentityModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
+	allClusters := m.getAllClusters()
+	allBindings := m.getAllBindings()
+	allPools := m.getAllPools()
+	allProviders := m.getAllProviders()
+	allFederatedBindings := m.getAllFederatedBindings()
+
+	tables := m.buildTables(allClusters, allBindings, allPools, allProviders, allFederatedBindings)
+
+	// Collect all loot files
+	var lootFiles []internal.LootFile
+	for _, projectLoot := range m.LootMap {
+		for _, loot := range projectLoot {
+			if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
+				lootFiles = append(lootFiles, *loot)
+			}
+		}
+	}
+
+	output := WorkloadIdentityOutput{
+		Table: tables,
+		Loot:  lootFiles,
+	}
+
+	// Write output using HandleOutputSmart with scope support
+	scopeNames := make([]string, len(m.ProjectIDs))
+	for i, id := range m.ProjectIDs {
+		scopeNames[i] = m.GetProjectName(id)
+	}
+	err := internal.HandleOutputSmart(
+		"gcp",
+		m.Format,
+		m.OutputDirectory,
+		m.Verbosity,
+		m.WrapTable,
+		"project",
+		m.ProjectIDs,
+		scopeNames,
+		m.Account,
+		output,
+	)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME,
+			"Could not write output")
+	}
+}
+
+// buildTablesForProject builds tables for a specific project
+func (m *WorkloadIdentityModule) buildTablesForProject(projectID string) []internal.TableFile {
+	clusters := m.ProjectClusters[projectID]
+	bindings := m.ProjectBindings[projectID]
+	pools := m.ProjectPools[projectID]
+	providers := m.ProjectProviders[projectID]
+	federatedBindings := m.ProjectFederatedBindings[projectID]
+
+	return m.buildTables(clusters, bindings, pools, providers, federatedBindings)
+}
+
+// buildTables builds all tables from the given data
+func (m *WorkloadIdentityModule) buildTables(
+	clusters []ClusterWorkloadIdentity,
+	bindings []WorkloadIdentityBinding,
+	pools []workloadidentityservice.WorkloadIdentityPool,
+	providers []workloadidentityservice.WorkloadIdentityProvider,
+	federatedBindings []workloadidentityservice.FederatedIdentityBinding,
+) []internal.TableFile {
+	var tables []internal.TableFile
+
 	// Clusters table
 	clustersHeader := []string{
 		"Project Name",
@@ -590,7 +779,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 	}
 
 	var clustersBody [][]string
-	for _, cwi := range m.Clusters {
+	for _, cwi := range clusters {
 		wiEnabled := "No"
 		if cwi.WorkloadPoolEnabled {
 			wiEnabled = "Yes"
@@ -611,6 +800,15 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		})
 	}
 
+	// Only add clusters table if there are clusters
+	if len(clustersBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "workload-identity-clusters",
+			Header: clustersHeader,
+			Body:   clustersBody,
+		})
+	}
+
 	// Bindings table
 	bindingsHeader := []string{
 		"Project Name",
@@ -623,7 +821,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 	}
 
 	var bindingsBody [][]string
-	for _, binding := range m.Bindings {
+	for _, binding := range bindings {
 		highPriv := "No"
 		if binding.IsHighPrivilege {
 			highPriv = "Yes"
@@ -640,23 +838,6 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		})
 	}
 
-	// Collect loot files
-	var lootFiles []internal.LootFile
-	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
-			lootFiles = append(lootFiles, *loot)
-		}
-	}
-
-	// Build tables
-	tables := []internal.TableFile{
-		{
-			Name:   "workload-identity-clusters",
-			Header: clustersHeader,
-			Body:   clustersBody,
-		},
-	}
-
 	// Add bindings table if there are any
 	if len(bindingsBody) > 0 {
 		tables = append(tables, internal.TableFile{
@@ -671,7 +852,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 	// ============================
 
 	// Federation Pools table
-	if len(m.Pools) > 0 {
+	if len(pools) > 0 {
 		poolsHeader := []string{
 			"Project Name",
 			"Project ID",
@@ -682,7 +863,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		}
 
 		var poolsBody [][]string
-		for _, pool := range m.Pools {
+		for _, pool := range pools {
 			disabled := "No"
 			if pool.Disabled {
 				disabled = "Yes"
@@ -705,7 +886,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 	}
 
 	// Federation Providers table
-	if len(m.Providers) > 0 {
+	if len(providers) > 0 {
 		providersHeader := []string{
 			"Project Name",
 			"Project ID",
@@ -717,7 +898,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		}
 
 		var providersBody [][]string
-		for _, p := range m.Providers {
+		for _, p := range providers {
 			issuerOrAccount := "-"
 			if p.ProviderType == "AWS" {
 				issuerOrAccount = p.AWSAccountID
@@ -749,7 +930,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 	}
 
 	// Federated bindings table
-	if len(m.FederatedBindings) > 0 {
+	if len(federatedBindings) > 0 {
 		fedBindingsHeader := []string{
 			"Project Name",
 			"Project ID",
@@ -759,7 +940,7 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		}
 
 		var fedBindingsBody [][]string
-		for _, fb := range m.FederatedBindings {
+		for _, fb := range federatedBindings {
 			fedBindingsBody = append(fedBindingsBody, []string{
 				m.GetProjectName(fb.ProjectID),
 				fb.ProjectID,
@@ -776,31 +957,5 @@ func (m *WorkloadIdentityModule) writeOutput(ctx context.Context, logger interna
 		})
 	}
 
-	output := WorkloadIdentityOutput{
-		Table: tables,
-		Loot:  lootFiles,
-	}
-
-	// Write output using HandleOutputSmart with scope support
-	scopeNames := make([]string, len(m.ProjectIDs))
-	for i, id := range m.ProjectIDs {
-		scopeNames[i] = m.GetProjectName(id)
-	}
-	err := internal.HandleOutputSmart(
-		"gcp",
-		m.Format,
-		m.OutputDirectory,
-		m.Verbosity,
-		m.WrapTable,
-		"project",
-		m.ProjectIDs,
-		scopeNames,
-		m.Account,
-		output,
-	)
-	if err != nil {
-		m.CommandCounter.Error++
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME,
-			"Could not write output")
-	}
+	return tables
 }

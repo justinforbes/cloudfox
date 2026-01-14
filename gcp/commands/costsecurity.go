@@ -821,6 +821,14 @@ func (m *CostSecurityModule) initializeLootFiles() {
 // Output Generation
 // ------------------------------
 func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	if m.Hierarchy != nil && !m.FlatOutput {
+		m.writeHierarchicalOutput(ctx, logger)
+	} else {
+		m.writeFlatOutput(ctx, logger)
+	}
+}
+
+func (m *CostSecurityModule) buildTables() []internal.TableFile {
 	// Main cost-security table (combines cryptomining, orphaned, and anomalies)
 	mainHeader := []string{
 		"Project ID",
@@ -916,16 +924,8 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 		})
 	}
 
-	// Collect loot files
-	var lootFiles []internal.LootFile
-	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Review before executing!\n\n") {
-			lootFiles = append(lootFiles, *loot)
-		}
-	}
-
 	// Build tables
-	tables := []internal.TableFile{}
+	var tables []internal.TableFile
 
 	if len(mainBody) > 0 {
 		tables = append(tables, internal.TableFile{
@@ -942,6 +942,185 @@ func (m *CostSecurityModule) writeOutput(ctx context.Context, logger internal.Lo
 			Body:   expensiveBody,
 		})
 	}
+
+	return tables
+}
+
+func (m *CostSecurityModule) collectLootFiles() []internal.LootFile {
+	var lootFiles []internal.LootFile
+	for _, loot := range m.LootMap {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Review before executing!\n\n") {
+			lootFiles = append(lootFiles, *loot)
+		}
+	}
+	return lootFiles
+}
+
+func (m *CostSecurityModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	// Determine org ID from hierarchy
+	orgID := ""
+	if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
+		orgID = m.Hierarchy.Organizations[0].ID
+	}
+
+	if orgID != "" {
+		// DUAL OUTPUT: Complete aggregated output at org level
+		tables := m.buildTables()
+		lootFiles := m.collectLootFiles()
+		outputData.OrgLevelData[orgID] = CostSecurityOutput{Table: tables, Loot: lootFiles}
+
+		// DUAL OUTPUT: Filtered per-project output
+		for _, projectID := range m.ProjectIDs {
+			projectTables := m.buildTablesForProject(projectID)
+			if len(projectTables) > 0 {
+				outputData.ProjectLevelData[projectID] = CostSecurityOutput{Table: projectTables, Loot: nil}
+			}
+		}
+	} else if len(m.ProjectIDs) > 0 {
+		// FALLBACK: No org discovered, output complete data to first project
+		tables := m.buildTables()
+		lootFiles := m.collectLootFiles()
+		outputData.ProjectLevelData[m.ProjectIDs[0]] = CostSecurityOutput{Table: tables, Loot: lootFiles}
+	}
+
+	pathBuilder := m.BuildPathBuilder()
+
+	err := internal.HandleHierarchicalOutputSmart("gcp", m.Format, m.Verbosity, m.WrapTable, pathBuilder, outputData)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), GCP_COSTSECURITY_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}
+
+// buildTablesForProject builds tables filtered to only include data for a specific project
+func (m *CostSecurityModule) buildTablesForProject(projectID string) []internal.TableFile {
+	mainHeader := []string{
+		"Project ID",
+		"Project Name",
+		"Resource",
+		"Type",
+		"Location",
+		"Issue",
+		"Est. Cost/Mo",
+	}
+
+	var mainBody [][]string
+
+	// Add cryptomining indicators for this project
+	for _, c := range m.Cryptomining {
+		if c.ProjectID != projectID {
+			continue
+		}
+		mainBody = append(mainBody, []string{
+			c.ProjectID,
+			m.GetProjectName(c.ProjectID),
+			c.Name,
+			c.ResourceType,
+			c.Location,
+			fmt.Sprintf("cryptomining: %s", c.Indicator),
+			"-",
+		})
+	}
+
+	// Add orphaned resources for this project
+	for _, o := range m.Orphaned {
+		if o.ProjectID != projectID {
+			continue
+		}
+		mainBody = append(mainBody, []string{
+			o.ProjectID,
+			m.GetProjectName(o.ProjectID),
+			o.Name,
+			o.ResourceType,
+			o.Location,
+			"orphaned",
+			fmt.Sprintf("$%.2f", o.EstCostMonth),
+		})
+	}
+
+	// Add cost anomalies for this project
+	for _, a := range m.CostAnomalies {
+		if a.ProjectID != projectID {
+			continue
+		}
+		mainBody = append(mainBody, []string{
+			a.ProjectID,
+			m.GetProjectName(a.ProjectID),
+			a.Name,
+			a.ResourceType,
+			a.Location,
+			a.AnomalyType,
+			fmt.Sprintf("$%.2f", a.EstCostMonth),
+		})
+	}
+
+	// Expensive Resources for this project
+	expensiveHeader := []string{
+		"Project ID",
+		"Project Name",
+		"Resource",
+		"Location",
+		"Machine Type",
+		"vCPUs",
+		"Memory GB",
+		"GPUs",
+		"Labeled",
+		"Est. Cost/Mo",
+	}
+
+	var expensiveBody [][]string
+	for _, e := range m.Expensive {
+		if e.ProjectID != projectID {
+			continue
+		}
+		labeled := "No"
+		if len(e.Labels) > 0 {
+			labeled = "Yes"
+		}
+		expensiveBody = append(expensiveBody, []string{
+			e.ProjectID,
+			m.GetProjectName(e.ProjectID),
+			e.Name,
+			e.Location,
+			e.MachineType,
+			fmt.Sprintf("%d", e.VCPUs),
+			fmt.Sprintf("%.1f", e.MemoryGB),
+			fmt.Sprintf("%d", e.GPUs),
+			labeled,
+			fmt.Sprintf("$%.2f", e.EstCostMonth),
+		})
+	}
+
+	// Build tables
+	var tables []internal.TableFile
+
+	if len(mainBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "cost-security",
+			Header: mainHeader,
+			Body:   mainBody,
+		})
+	}
+
+	if len(expensiveBody) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "expensive-resources",
+			Header: expensiveHeader,
+			Body:   expensiveBody,
+		})
+	}
+
+	return tables
+}
+
+func (m *CostSecurityModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
+	tables := m.buildTables()
+	lootFiles := m.collectLootFiles()
 
 	output := CostSecurityOutput{
 		Table: tables,

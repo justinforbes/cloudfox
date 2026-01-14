@@ -291,6 +291,7 @@ func (s *OrganizationsService) GetProjectAncestry(projectID string) ([]Hierarchy
 
 	var projectsClient *resourcemanager.ProjectsClient
 	var foldersClient *resourcemanager.FoldersClient
+	var orgsClient *resourcemanager.OrganizationsClient
 	var err error
 
 	if s.session != nil {
@@ -313,16 +314,34 @@ func (s *OrganizationsService) GetProjectAncestry(projectID string) ([]Hierarchy
 	}
 	defer foldersClient.Close()
 
+	if s.session != nil {
+		orgsClient, err = resourcemanager.NewOrganizationsClient(ctx, s.session.GetClientOption())
+	} else {
+		orgsClient, err = resourcemanager.NewOrganizationsClient(ctx)
+	}
+	if err != nil {
+		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
+	}
+	defer orgsClient.Close()
+
 	var ancestry []HierarchyNode
 	resourceID := "projects/" + projectID
 
 	for {
 		if strings.HasPrefix(resourceID, "organizations/") {
 			orgID := strings.TrimPrefix(resourceID, "organizations/")
+			displayName := orgID // Default to numeric ID if we can't get display name
+
+			// Try to get the org's display name
+			org, err := orgsClient.GetOrganization(ctx, &resourcemanagerpb.GetOrganizationRequest{Name: resourceID})
+			if err == nil && org.DisplayName != "" {
+				displayName = org.DisplayName
+			}
+
 			ancestry = append(ancestry, HierarchyNode{
 				Type:        "organization",
 				ID:          orgID,
-				DisplayName: resourceID,
+				DisplayName: displayName,
 			})
 			break
 		} else if strings.HasPrefix(resourceID, "folders/") {
@@ -383,6 +402,67 @@ func (s *OrganizationsService) GetOrganizationIDFromProject(projectID string) (s
 	}
 
 	return "", fmt.Errorf("no organization found in ancestry for project %s", projectID)
+}
+
+// ------------------------------
+// HierarchyDataProvider Implementation
+// ------------------------------
+
+// GetProjectAncestryForHierarchy returns ancestry in the format needed by BuildScopeHierarchy
+func (s *OrganizationsService) GetProjectAncestryForHierarchy(projectID string) ([]gcpinternal.AncestryNode, error) {
+	ancestry, err := s.GetProjectAncestry(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]gcpinternal.AncestryNode, len(ancestry))
+	for i, node := range ancestry {
+		result[i] = gcpinternal.AncestryNode{
+			Type:        node.Type,
+			ID:          node.ID,
+			DisplayName: node.DisplayName,
+			Parent:      node.Parent,
+			Depth:       node.Depth,
+		}
+	}
+	return result, nil
+}
+
+// SearchOrganizationsForHierarchy returns orgs in the format needed by BuildScopeHierarchy
+func (s *OrganizationsService) SearchOrganizationsForHierarchy() ([]gcpinternal.OrganizationData, error) {
+	orgs, err := s.SearchOrganizations()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]gcpinternal.OrganizationData, len(orgs))
+	for i, org := range orgs {
+		result[i] = gcpinternal.OrganizationData{
+			Name:        org.Name,
+			DisplayName: org.DisplayName,
+		}
+	}
+	return result, nil
+}
+
+// HierarchyProvider wraps OrganizationsService to implement HierarchyDataProvider
+type HierarchyProvider struct {
+	svc *OrganizationsService
+}
+
+// NewHierarchyProvider creates a HierarchyProvider from an OrganizationsService
+func NewHierarchyProvider(svc *OrganizationsService) *HierarchyProvider {
+	return &HierarchyProvider{svc: svc}
+}
+
+// GetProjectAncestry implements HierarchyDataProvider
+func (p *HierarchyProvider) GetProjectAncestry(projectID string) ([]gcpinternal.AncestryNode, error) {
+	return p.svc.GetProjectAncestryForHierarchy(projectID)
+}
+
+// SearchOrganizations implements HierarchyDataProvider
+func (p *HierarchyProvider) SearchOrganizations() ([]gcpinternal.OrganizationData, error) {
+	return p.svc.SearchOrganizationsForHierarchy()
 }
 
 // BuildHierarchy builds a complete hierarchy tree

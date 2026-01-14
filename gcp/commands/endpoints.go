@@ -84,9 +84,9 @@ type Endpoint struct {
 type EndpointsModule struct {
 	gcpinternal.BaseGCPModule
 
-	Endpoints []Endpoint
-	LootMap   map[string]*internal.LootFile
-	mu        sync.Mutex
+	ProjectEndpoints map[string][]Endpoint                    // projectID -> endpoints
+	LootMap          map[string]map[string]*internal.LootFile // projectID -> loot files
+	mu               sync.Mutex
 
 	// Firewall rule mapping: "network:tag1,tag2" -> allowed ports
 	firewallPortMap map[string][]string
@@ -113,23 +113,31 @@ func runGCPEndpointsCommand(cmd *cobra.Command, args []string) {
 	}
 
 	module := &EndpointsModule{
-		BaseGCPModule:   gcpinternal.NewBaseGCPModule(cmdCtx),
-		Endpoints:       []Endpoint{},
-		LootMap:         make(map[string]*internal.LootFile),
-		firewallPortMap: make(map[string][]string),
+		BaseGCPModule:    gcpinternal.NewBaseGCPModule(cmdCtx),
+		ProjectEndpoints: make(map[string][]Endpoint),
+		LootMap:          make(map[string]map[string]*internal.LootFile),
+		firewallPortMap:  make(map[string][]string),
 	}
 
-	module.initializeLootFiles()
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 }
 
 // ------------------------------
 // Module Execution
 // ------------------------------
+func (m *EndpointsModule) getAllEndpoints() []Endpoint {
+	var all []Endpoint
+	for _, endpoints := range m.ProjectEndpoints {
+		all = append(all, endpoints...)
+	}
+	return all
+}
+
 func (m *EndpointsModule) Execute(ctx context.Context, logger internal.Logger) {
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, "endpoints", m.processProject)
 
-	if len(m.Endpoints) == 0 {
+	allEndpoints := m.getAllEndpoints()
+	if len(allEndpoints) == 0 {
 		logger.InfoM("No endpoints found", "endpoints")
 		return
 	}
@@ -137,7 +145,7 @@ func (m *EndpointsModule) Execute(ctx context.Context, logger internal.Logger) {
 	// Count external vs internal
 	externalCount := 0
 	internalCount := 0
-	for _, ep := range m.Endpoints {
+	for _, ep := range allEndpoints {
 		if ep.IsExternal {
 			externalCount++
 		} else {
@@ -146,7 +154,7 @@ func (m *EndpointsModule) Execute(ctx context.Context, logger internal.Logger) {
 	}
 
 	logger.SuccessM(fmt.Sprintf("Found %d endpoint(s) [%d external, %d internal]",
-		len(m.Endpoints), externalCount, internalCount), "endpoints")
+		len(allEndpoints), externalCount, internalCount), "endpoints")
 
 	m.writeOutput(ctx, logger)
 }
@@ -228,7 +236,7 @@ func (m *EndpointsModule) getStaticExternalIPs(ctx context.Context, svc *compute
 					IsExternal:   true,
 					Security:     security,
 				}
-				m.addEndpoint(ep)
+				m.addEndpoint(projectID, ep)
 			}
 		}
 		return nil
@@ -264,7 +272,7 @@ func (m *EndpointsModule) getStaticExternalIPs(ctx context.Context, svc *compute
 							IsExternal:   true,
 							Security:     security,
 						}
-						m.addEndpoint(ep)
+						m.addEndpoint(projectID, ep)
 					}
 				}
 				return nil
@@ -312,7 +320,7 @@ func (m *EndpointsModule) getInstanceIPs(ctx context.Context, svc *compute.Servi
 								IsExternal:     true,
 								Network:        networkName,
 							}
-							m.addEndpoint(ep)
+							m.addEndpoint(projectID, ep)
 						}
 					}
 
@@ -340,7 +348,7 @@ func (m *EndpointsModule) getInstanceIPs(ctx context.Context, svc *compute.Servi
 							IsExternal:     false,
 							Network:        networkName,
 						}
-						m.addEndpoint(ep)
+						m.addEndpoint(projectID, ep)
 					}
 				}
 			}
@@ -438,7 +446,7 @@ func (m *EndpointsModule) getLoadBalancers(ctx context.Context, svc *compute.Ser
 					} else {
 						ep.InternalIP = rule.IPAddress
 					}
-					m.addEndpoint(ep)
+					m.addEndpoint(projectID, ep)
 				}
 			}
 		}
@@ -475,7 +483,7 @@ func (m *EndpointsModule) getLoadBalancers(ctx context.Context, svc *compute.Ser
 					IsExternal:   true,
 					Security:     security,
 				}
-				m.addEndpoint(ep)
+				m.addEndpoint(projectID, ep)
 			}
 		}
 		return nil
@@ -506,7 +514,7 @@ func (m *EndpointsModule) getVPNGateways(ctx context.Context, svc *compute.Servi
 						IsExternal:   true,
 						Network:      extractResourceName(gw.Network),
 					}
-					m.addEndpoint(ep)
+					m.addEndpoint(projectID, ep)
 				}
 			}
 		}
@@ -535,7 +543,7 @@ func (m *EndpointsModule) getVPNGateways(ctx context.Context, svc *compute.Servi
 							IsExternal:   true,
 							Network:      extractResourceName(gw.Network),
 						}
-						m.addEndpoint(ep)
+						m.addEndpoint(projectID, ep)
 					}
 				}
 			}
@@ -567,7 +575,7 @@ func (m *EndpointsModule) getCloudNAT(ctx context.Context, svc *compute.Service,
 							IsExternal:   true,
 							Network:      extractResourceName(router.Network),
 						}
-						m.addEndpoint(ep)
+						m.addEndpoint(projectID, ep)
 					}
 				}
 			}
@@ -597,7 +605,7 @@ func (m *EndpointsModule) getPrivateServiceConnect(ctx context.Context, svc *com
 					Region:       extractRegionFromScope(region),
 					IsExternal:   false,
 				}
-				m.addEndpoint(ep)
+				m.addEndpoint(projectID, ep)
 			}
 		}
 		return nil
@@ -645,7 +653,7 @@ func (m *EndpointsModule) getCloudRunServices(ctx context.Context, projectID str
 				ep.ServiceAccount = service.Spec.Template.Spec.ServiceAccountName
 			}
 
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		}
 	}
 }
@@ -683,7 +691,7 @@ func (m *EndpointsModule) getCloudFunctions(ctx context.Context, projectID strin
 				IsExternal:     true,
 				Security:       security,
 			}
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		}
 	}
 }
@@ -727,7 +735,7 @@ func (m *EndpointsModule) getAppEngineServices(ctx context.Context, projectID st
 			TLSEnabled:   true,
 			IsExternal:   true,
 		}
-		m.addEndpoint(ep)
+		m.addEndpoint(projectID, ep)
 	}
 }
 
@@ -770,7 +778,7 @@ func (m *EndpointsModule) getGKEClusters(ctx context.Context, projectID string, 
 			} else {
 				ep.InternalIP = cluster.Endpoint
 			}
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		}
 	}
 }
@@ -821,7 +829,7 @@ func (m *EndpointsModule) getCloudSQLInstances(ctx context.Context, projectID st
 				IsExternal:   true,
 				Security:     security,
 			}
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		} else if instance.PrivateIP != "" {
 			// Private IP only
 			ep := Endpoint{
@@ -837,7 +845,7 @@ func (m *EndpointsModule) getCloudSQLInstances(ctx context.Context, projectID st
 				TLSEnabled:   instance.RequireSSL,
 				IsExternal:   false,
 			}
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		}
 	}
 }
@@ -880,7 +888,7 @@ func (m *EndpointsModule) getMemorystoreRedis(ctx context.Context, projectID str
 				Network:      extractResourceName(instance.AuthorizedNetwork),
 				Security:     security,
 			}
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		}
 	}
 }
@@ -921,7 +929,7 @@ func (m *EndpointsModule) getFilestoreInstances(ctx context.Context, projectID s
 				Network:      instance.Network,
 				Security:     security,
 			}
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		}
 	}
 }
@@ -966,7 +974,7 @@ func (m *EndpointsModule) getComposerEnvironments(ctx context.Context, projectID
 				Network:        extractResourceName(env.Network),
 				Security:       security,
 			}
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		}
 	}
 }
@@ -1002,7 +1010,7 @@ func (m *EndpointsModule) getDataprocClusters(ctx context.Context, projectID str
 			Network:        cluster.Network,
 			Security:       security,
 		}
-		m.addEndpoint(ep)
+		m.addEndpoint(projectID, ep)
 	}
 }
 
@@ -1043,7 +1051,7 @@ func (m *EndpointsModule) getNotebookInstances(ctx context.Context, projectID st
 				Network:        instance.Network,
 				Security:       security,
 			}
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		}
 	}
 }
@@ -1080,7 +1088,7 @@ func (m *EndpointsModule) getPubSubPushEndpoints(ctx context.Context, projectID 
 				TLSEnabled:     strings.HasPrefix(sub.PushEndpoint, "https://"),
 				IsExternal:     true,
 			}
-			m.addEndpoint(ep)
+			m.addEndpoint(projectID, ep)
 		}
 	}
 }
@@ -1121,10 +1129,20 @@ func (m *EndpointsModule) analyzeFirewallRules(ctx context.Context, svc *compute
 }
 
 // addEndpoint adds an endpoint thread-safely
-func (m *EndpointsModule) addEndpoint(ep Endpoint) {
+func (m *EndpointsModule) addEndpoint(projectID string, ep Endpoint) {
 	m.mu.Lock()
-	m.Endpoints = append(m.Endpoints, ep)
-	m.addEndpointToLoot(ep)
+	// Initialize loot for this project if needed
+	if m.LootMap[projectID] == nil {
+		m.LootMap[projectID] = make(map[string]*internal.LootFile)
+		m.LootMap[projectID]["endpoints-commands"] = &internal.LootFile{
+			Name: "endpoints-commands",
+			Contents: "# Endpoint Scan Commands\n" +
+				"# Generated by CloudFox\n" +
+				"# Use these commands for authorized penetration testing\n\n",
+		}
+	}
+	m.ProjectEndpoints[projectID] = append(m.ProjectEndpoints[projectID], ep)
+	m.addEndpointToLoot(projectID, ep)
 	m.mu.Unlock()
 }
 
@@ -1161,16 +1179,11 @@ func extractZoneFromScope(scope string) string {
 // ------------------------------
 // Loot File Management
 // ------------------------------
-func (m *EndpointsModule) initializeLootFiles() {
-	m.LootMap["endpoints-commands"] = &internal.LootFile{
-		Name: "endpoints-commands",
-		Contents: "# Endpoint Scan Commands\n" +
-			"# Generated by CloudFox\n" +
-			"# Use these commands for authorized penetration testing\n\n",
+func (m *EndpointsModule) addEndpointToLoot(projectID string, ep Endpoint) {
+	lootFile := m.LootMap[projectID]["endpoints-commands"]
+	if lootFile == nil {
+		return
 	}
-}
-
-func (m *EndpointsModule) addEndpointToLoot(ep Endpoint) {
 	// Determine best target for scanning
 	target := ep.ExternalIP
 	if target == "" {
@@ -1188,7 +1201,7 @@ func (m *EndpointsModule) addEndpointToLoot(ep Endpoint) {
 		exposure = "EXTERNAL"
 	}
 
-	m.LootMap["endpoints-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"# [%s] %s: %s (%s)\n"+
 			"# Project: %s | Region: %s | Network: %s\n",
 		exposure, ep.Type, ep.Name, ep.ResourceType,
@@ -1196,17 +1209,17 @@ func (m *EndpointsModule) addEndpointToLoot(ep Endpoint) {
 	)
 
 	if ep.Security != "" {
-		m.LootMap["endpoints-commands"].Contents += fmt.Sprintf("# Security: %s\n", ep.Security)
+		lootFile.Contents += fmt.Sprintf("# Security: %s\n", ep.Security)
 	}
 
 	// Generate appropriate commands based on type
 	switch ep.Type {
 	case "Cloud Run", "Cloud Function", "Composer Airflow", "App Engine", "Vertex AI Notebook":
 		if ep.Hostname != "" {
-			m.LootMap["endpoints-commands"].Contents += fmt.Sprintf("curl -v https://%s\n\n", ep.Hostname)
+			lootFile.Contents += fmt.Sprintf("curl -v https://%s\n\n", ep.Hostname)
 		}
 	case "GKE API":
-		m.LootMap["endpoints-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# Get cluster credentials:\n"+
 				"gcloud container clusters get-credentials %s --region=%s --project=%s\n"+
 				"kubectl cluster-info\n\n",
@@ -1218,35 +1231,35 @@ func (m *EndpointsModule) addEndpointToLoot(ep Endpoint) {
 		} else if strings.Contains(ep.Port, "1433") {
 			protocol = "sqlcmd"
 		}
-		m.LootMap["endpoints-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# Connect to database:\n"+
 				"# %s -h %s -P %s -u USERNAME\n"+
 				"nmap -sV -Pn -p %s %s\n\n",
 			protocol, target, ep.Port, ep.Port, target)
 	case "Redis":
-		m.LootMap["endpoints-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"redis-cli -h %s -p %s\n"+
 				"nmap -sV -Pn -p %s %s\n\n",
 			target, ep.Port, ep.Port, target)
 	case "Filestore NFS":
-		m.LootMap["endpoints-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"showmount -e %s\n"+
 				"sudo mount -t nfs %s:/<share> /mnt/<mountpoint>\n\n",
 			target, target)
 	case "Dataproc Master":
-		m.LootMap["endpoints-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# SSH to master node:\n"+
 				"gcloud compute ssh %s --project=%s --zone=<ZONE>\n"+
 				"# Web UIs: YARN (8088), HDFS (9870), Spark (8080)\n\n",
 			strings.TrimSuffix(ep.Name, "-master"), ep.ProjectID)
 	case "VPN Gateway", "HA VPN Gateway":
-		m.LootMap["endpoints-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# VPN Gateway IP: %s\n"+
 				"# Ports: 500/UDP (IKE), 4500/UDP (NAT-T), ESP\n"+
 				"nmap -sU -Pn -p 500,4500 %s\n\n",
 			target, target)
 	case "Pub/Sub Push":
-		m.LootMap["endpoints-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# Push endpoint (receives messages from Pub/Sub):\n"+
 				"curl -v https://%s\n\n",
 			ep.Hostname)
@@ -1258,10 +1271,10 @@ func (m *EndpointsModule) addEndpointToLoot(ep Endpoint) {
 		default:
 			nmapCmd = fmt.Sprintf("nmap -sV -Pn -p %s %s", ep.Port, target)
 		}
-		m.LootMap["endpoints-commands"].Contents += nmapCmd + "\n\n"
+		lootFile.Contents += nmapCmd + "\n\n"
 
 		if ep.TLSEnabled || ep.Port == "443" {
-			m.LootMap["endpoints-commands"].Contents += fmt.Sprintf("curl -vk https://%s/\n\n", target)
+			lootFile.Contents += fmt.Sprintf("curl -vk https://%s/\n\n", target)
 		}
 	}
 }
@@ -1270,7 +1283,15 @@ func (m *EndpointsModule) addEndpointToLoot(ep Endpoint) {
 // Output Generation
 // ------------------------------
 func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	header := []string{
+	if m.Hierarchy != nil && !m.FlatOutput {
+		m.writeHierarchicalOutput(ctx, logger)
+	} else {
+		m.writeFlatOutput(ctx, logger)
+	}
+}
+
+func (m *EndpointsModule) getHeader() []string {
+	return []string{
 		"Project ID",
 		"Project Name",
 		"Name",
@@ -1286,9 +1307,11 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 		"Security",
 		"Status",
 	}
+}
 
+func (m *EndpointsModule) endpointsToTableBody(endpoints []Endpoint) [][]string {
 	var body [][]string
-	for _, ep := range m.Endpoints {
+	for _, ep := range endpoints {
 		exposure := "Internal"
 		if ep.IsExternal {
 			exposure = "External"
@@ -1341,22 +1364,78 @@ func (m *EndpointsModule) writeOutput(ctx context.Context, logger internal.Logge
 			status,
 		})
 	}
+	return body
+}
+
+func (m *EndpointsModule) buildTablesForProject(projectID string) []internal.TableFile {
+	var tableFiles []internal.TableFile
+
+	if endpoints, ok := m.ProjectEndpoints[projectID]; ok && len(endpoints) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name:   "endpoints",
+			Header: m.getHeader(),
+			Body:   m.endpointsToTableBody(endpoints),
+		})
+	}
+
+	return tableFiles
+}
+
+func (m *EndpointsModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	for projectID := range m.ProjectEndpoints {
+		tableFiles := m.buildTablesForProject(projectID)
+
+		var lootFiles []internal.LootFile
+		if projectLoot, ok := m.LootMap[projectID]; ok {
+			for _, loot := range projectLoot {
+				if loot != nil && loot.Contents != "" {
+					lootFiles = append(lootFiles, *loot)
+				}
+			}
+		}
+
+		outputData.ProjectLevelData[projectID] = EndpointsOutput{Table: tableFiles, Loot: lootFiles}
+	}
+
+	pathBuilder := m.BuildPathBuilder()
+
+	err := internal.HandleHierarchicalOutputSmart("gcp", m.Format, m.Verbosity, m.WrapTable, pathBuilder, outputData)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), "endpoints")
+	}
+}
+
+func (m *EndpointsModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
+	allEndpoints := m.getAllEndpoints()
+
+	var tables []internal.TableFile
+
+	if len(allEndpoints) > 0 {
+		tables = append(tables, internal.TableFile{
+			Name:   "endpoints",
+			Header: m.getHeader(),
+			Body:   m.endpointsToTableBody(allEndpoints),
+		})
+	}
 
 	// Collect loot files
 	var lootFiles []internal.LootFile
-	for _, loot := range m.LootMap {
-		if loot.Contents != "" {
-			lootFiles = append(lootFiles, *loot)
+	for _, projectLoot := range m.LootMap {
+		for _, loot := range projectLoot {
+			if loot != nil && loot.Contents != "" {
+				lootFiles = append(lootFiles, *loot)
+			}
 		}
 	}
 
 	output := EndpointsOutput{
-		Table: []internal.TableFile{{
-			Name:   "endpoints",
-			Header: header,
-			Body:   body,
-		}},
-		Loot: lootFiles,
+		Table: tables,
+		Loot:  lootFiles,
 	}
 
 	scopeNames := make([]string, len(m.ProjectIDs))

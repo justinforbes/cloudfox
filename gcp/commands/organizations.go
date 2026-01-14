@@ -235,6 +235,14 @@ func (m *OrganizationsModule) addFolderToHierarchy(folder orgsservice.FolderInfo
 // Output Generation
 // ------------------------------
 func (m *OrganizationsModule) writeOutput(ctx context.Context, logger internal.Logger) {
+	if m.Hierarchy != nil && !m.FlatOutput {
+		m.writeHierarchicalOutput(ctx, logger)
+	} else {
+		m.writeFlatOutput(ctx, logger)
+	}
+}
+
+func (m *OrganizationsModule) buildTables() []internal.TableFile {
 	// Organizations table
 	orgsHeader := []string{
 		"Organization ID",
@@ -320,14 +328,6 @@ func (m *OrganizationsModule) writeOutput(ctx context.Context, logger internal.L
 		}
 	}
 
-	// Collect loot files
-	var lootFiles []internal.LootFile
-	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
-			lootFiles = append(lootFiles, *loot)
-		}
-	}
-
 	// Build tables
 	var tables []internal.TableFile
 
@@ -362,6 +362,83 @@ func (m *OrganizationsModule) writeOutput(ctx context.Context, logger internal.L
 			Body:   ancestryBody,
 		})
 	}
+
+	return tables
+}
+
+func (m *OrganizationsModule) collectLootFiles() []internal.LootFile {
+	var lootFiles []internal.LootFile
+	for _, loot := range m.LootMap {
+		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
+			lootFiles = append(lootFiles, *loot)
+		}
+	}
+	return lootFiles
+}
+
+func (m *OrganizationsModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
+	// For organizations module, output at org level since it enumerates the whole hierarchy
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	tables := m.buildTables()
+	lootFiles := m.collectLootFiles()
+
+	output := OrganizationsOutput{
+		Table: tables,
+		Loot:  lootFiles,
+	}
+
+	// Determine output location - prefer org-level, fall back to project-level
+	orgID := ""
+
+	// First, try to get org ID from the hierarchy
+	if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
+		orgID = m.Hierarchy.Organizations[0].ID
+	} else if len(m.Organizations) > 0 {
+		// Fall back to enumerated organizations if hierarchy not available
+		orgID = strings.TrimPrefix(m.Organizations[0].Name, "organizations/")
+	}
+
+	// Ensure hierarchy has display names from our enumeration
+	// This handles the case where the hierarchy was built before we enumerated orgs
+	if m.Hierarchy != nil && len(m.Organizations) > 0 {
+		for _, org := range m.Organizations {
+			numericID := strings.TrimPrefix(org.Name, "organizations/")
+			// Update display name in hierarchy if we have a better one
+			for i := range m.Hierarchy.Organizations {
+				if m.Hierarchy.Organizations[i].ID == numericID {
+					if m.Hierarchy.Organizations[i].DisplayName == "" && org.DisplayName != "" {
+						m.Hierarchy.Organizations[i].DisplayName = org.DisplayName
+					}
+					break
+				}
+			}
+		}
+	}
+
+	if orgID != "" {
+		// Place at org level
+		outputData.OrgLevelData[orgID] = output
+	} else if len(m.ProjectIDs) > 0 {
+		// Fall back to first project level if no org discovered
+		outputData.ProjectLevelData[m.ProjectIDs[0]] = output
+	}
+
+	pathBuilder := m.BuildPathBuilder()
+
+	err := internal.HandleHierarchicalOutputSmart("gcp", m.Format, m.Verbosity, m.WrapTable, pathBuilder, outputData)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), globals.GCP_ORGANIZATIONS_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}
+
+func (m *OrganizationsModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
+	tables := m.buildTables()
+	lootFiles := m.collectLootFiles()
 
 	output := OrganizationsOutput{
 		Table: tables,

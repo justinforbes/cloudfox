@@ -128,6 +128,16 @@ func ParseGCPError(err error, apiName string) error {
 	return err
 }
 
+// IsPermissionDenied checks if an error is a permission denied error
+func IsPermissionDenied(err error) bool {
+	return errors.Is(err, ErrPermissionDenied)
+}
+
+// IsAPINotEnabled checks if an error is an API not enabled error
+func IsAPINotEnabled(err error) bool {
+	return errors.Is(err, ErrAPINotEnabled)
+}
+
 // HandleGCPError logs an appropriate message for a GCP API error and returns true if execution should continue
 // Returns false if the error is fatal and the caller should stop processing
 func HandleGCPError(err error, logger internal.Logger, moduleName string, resourceDesc string) bool {
@@ -181,6 +191,10 @@ type CommandContext struct {
 	OutputDirectory string
 	Format          string
 	Goroutines      int
+	FlatOutput      bool // When true, use legacy flat output structure
+
+	// Hierarchy support for per-project output
+	Hierarchy *ScopeHierarchy // Populated by DetectScopeHierarchy
 }
 
 // ------------------------------
@@ -210,6 +224,10 @@ type BaseGCPModule struct {
 	OutputDirectory string
 	Format          string
 	Goroutines      int
+	FlatOutput      bool // When true, use legacy flat output structure
+
+	// Hierarchy support for per-project output
+	Hierarchy *ScopeHierarchy // Populated by DetectScopeHierarchy
 
 	// Progress tracking (AWS/Azure style)
 	CommandCounter internal.CommandCounter
@@ -238,6 +256,20 @@ func NewBaseGCPModule(cmdCtx *CommandContext) BaseGCPModule {
 		OutputDirectory: cmdCtx.OutputDirectory,
 		Format:          cmdCtx.Format,
 		Goroutines:      cmdCtx.Goroutines,
+		FlatOutput:      cmdCtx.FlatOutput,
+		Hierarchy:       cmdCtx.Hierarchy,
+	}
+}
+
+// BuildPathBuilder creates a PathBuilder function for hierarchical output
+// This function returns a closure that builds paths based on the module's configuration
+func (b *BaseGCPModule) BuildPathBuilder() internal.PathBuilder {
+	return func(scopeType string, scopeID string) string {
+		if b.Hierarchy == nil {
+			// Fallback to flat output if no hierarchy is available
+			return BuildFlatPath(b.OutputDirectory, b.Account, &ScopeHierarchy{})
+		}
+		return BuildHierarchicalPath(b.OutputDirectory, b.Account, b.Hierarchy, scopeType, scopeID)
 	}
 }
 
@@ -354,6 +386,7 @@ func InitializeCommandContext(cmd *cobra.Command, moduleName string) (*CommandCo
 	wrap, _ := parentCmd.PersistentFlags().GetBool("wrap")
 	outputDirectory, _ := parentCmd.PersistentFlags().GetString("outdir")
 	format, _ := parentCmd.PersistentFlags().GetString("output")
+	flatOutput, _ := parentCmd.PersistentFlags().GetBool("flat-output")
 
 	// Default to "all" format if not set (GCP doesn't expose this flag yet)
 	if format == "" {
@@ -394,6 +427,12 @@ func InitializeCommandContext(cmd *cobra.Command, moduleName string) (*CommandCo
 		logger.InfoM(fmt.Sprintf("Resolved %d project(s), account: %s", len(projectIDs), account), moduleName)
 	}
 
+	// -------------------- Get hierarchy from context (if populated) --------------------
+	var hierarchy *ScopeHierarchy
+	if value, ok := ctx.Value("hierarchy").(*ScopeHierarchy); ok {
+		hierarchy = value
+	}
+
 	// -------------------- Build and return context --------------------
 	return &CommandContext{
 		Ctx:             ctx,
@@ -406,5 +445,7 @@ func InitializeCommandContext(cmd *cobra.Command, moduleName string) (*CommandCo
 		OutputDirectory: outputDirectory,
 		Format:          format,
 		Goroutines:      5, // Default concurrency
+		FlatOutput:      flatOutput,
+		Hierarchy:       hierarchy,
 	}, nil
 }

@@ -48,10 +48,10 @@ Attack Surface:
 type PubSubModule struct {
 	gcpinternal.BaseGCPModule
 
-	Topics        []PubSubService.TopicInfo
-	Subscriptions []PubSubService.SubscriptionInfo
-	LootMap       map[string]*internal.LootFile
-	mu            sync.Mutex
+	ProjectTopics        map[string][]PubSubService.TopicInfo        // projectID -> topics
+	ProjectSubscriptions map[string][]PubSubService.SubscriptionInfo // projectID -> subscriptions
+	LootMap              map[string]map[string]*internal.LootFile    // projectID -> loot files
+	mu                   sync.Mutex
 }
 
 // ------------------------------
@@ -75,13 +75,12 @@ func runGCPPubSubCommand(cmd *cobra.Command, args []string) {
 	}
 
 	module := &PubSubModule{
-		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
-		Topics:        []PubSubService.TopicInfo{},
-		Subscriptions: []PubSubService.SubscriptionInfo{},
-		LootMap:       make(map[string]*internal.LootFile),
+		BaseGCPModule:        gcpinternal.NewBaseGCPModule(cmdCtx),
+		ProjectTopics:        make(map[string][]PubSubService.TopicInfo),
+		ProjectSubscriptions: make(map[string][]PubSubService.SubscriptionInfo),
+		LootMap:              make(map[string]map[string]*internal.LootFile),
 	}
 
-	module.initializeLootFiles()
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 }
 
@@ -91,7 +90,10 @@ func runGCPPubSubCommand(cmd *cobra.Command, args []string) {
 func (m *PubSubModule) Execute(ctx context.Context, logger internal.Logger) {
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_PUBSUB_MODULE_NAME, m.processProject)
 
-	totalResources := len(m.Topics) + len(m.Subscriptions)
+	allTopics := m.getAllTopics()
+	allSubs := m.getAllSubscriptions()
+
+	totalResources := len(allTopics) + len(allSubs)
 	if totalResources == 0 {
 		logger.InfoM("No Pub/Sub topics or subscriptions found", globals.GCP_PUBSUB_MODULE_NAME)
 		return
@@ -101,7 +103,7 @@ func (m *PubSubModule) Execute(ctx context.Context, logger internal.Logger) {
 	publicTopics := 0
 	publicSubs := 0
 	pushSubs := 0
-	for _, topic := range m.Topics {
+	for _, topic := range allTopics {
 		for _, binding := range topic.IAMBindings {
 			if binding.Member == "allUsers" || binding.Member == "allAuthenticatedUsers" {
 				publicTopics++
@@ -109,7 +111,7 @@ func (m *PubSubModule) Execute(ctx context.Context, logger internal.Logger) {
 			}
 		}
 	}
-	for _, sub := range m.Subscriptions {
+	for _, sub := range allSubs {
 		for _, binding := range sub.IAMBindings {
 			if binding.Member == "allUsers" || binding.Member == "allAuthenticatedUsers" {
 				publicSubs++
@@ -121,7 +123,7 @@ func (m *PubSubModule) Execute(ctx context.Context, logger internal.Logger) {
 		}
 	}
 
-	msg := fmt.Sprintf("Found %d topic(s), %d subscription(s)", len(m.Topics), len(m.Subscriptions))
+	msg := fmt.Sprintf("Found %d topic(s), %d subscription(s)", len(allTopics), len(allSubs))
 	if publicTopics > 0 || publicSubs > 0 {
 		msg += fmt.Sprintf(" (%d public topics, %d public subs)", publicTopics, publicSubs)
 	}
@@ -131,6 +133,24 @@ func (m *PubSubModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.SuccessM(msg, globals.GCP_PUBSUB_MODULE_NAME)
 
 	m.writeOutput(ctx, logger)
+}
+
+// getAllTopics returns all topics from all projects
+func (m *PubSubModule) getAllTopics() []PubSubService.TopicInfo {
+	var all []PubSubService.TopicInfo
+	for _, topics := range m.ProjectTopics {
+		all = append(all, topics...)
+	}
+	return all
+}
+
+// getAllSubscriptions returns all subscriptions from all projects
+func (m *PubSubModule) getAllSubscriptions() []PubSubService.SubscriptionInfo {
+	var all []PubSubService.SubscriptionInfo
+	for _, subs := range m.ProjectSubscriptions {
+		all = append(all, subs...)
+	}
+	return all
 }
 
 // ------------------------------
@@ -143,35 +163,50 @@ func (m *PubSubModule) processProject(ctx context.Context, projectID string, log
 
 	ps := PubSubService.New()
 
+	var topics []PubSubService.TopicInfo
+	var subs []PubSubService.SubscriptionInfo
+
 	// Get topics
-	topics, err := ps.Topics(projectID)
+	topicsResult, err := ps.Topics(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
 		gcpinternal.HandleGCPError(err, logger, globals.GCP_PUBSUB_MODULE_NAME,
 			fmt.Sprintf("Could not enumerate Pub/Sub topics in project %s", projectID))
 	} else {
-		m.mu.Lock()
-		m.Topics = append(m.Topics, topics...)
-		for _, topic := range topics {
-			m.addTopicToLoot(topic)
-		}
-		m.mu.Unlock()
+		topics = topicsResult
 	}
 
 	// Get subscriptions
-	subs, err := ps.Subscriptions(projectID)
+	subsResult, err := ps.Subscriptions(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
 		gcpinternal.HandleGCPError(err, logger, globals.GCP_PUBSUB_MODULE_NAME,
 			fmt.Sprintf("Could not enumerate Pub/Sub subscriptions in project %s", projectID))
 	} else {
-		m.mu.Lock()
-		m.Subscriptions = append(m.Subscriptions, subs...)
-		for _, sub := range subs {
-			m.addSubscriptionToLoot(sub)
-		}
-		m.mu.Unlock()
+		subs = subsResult
 	}
+
+	// Thread-safe store per-project
+	m.mu.Lock()
+	m.ProjectTopics[projectID] = topics
+	m.ProjectSubscriptions[projectID] = subs
+
+	// Initialize loot for this project
+	if m.LootMap[projectID] == nil {
+		m.LootMap[projectID] = make(map[string]*internal.LootFile)
+		m.LootMap[projectID]["pubsub-commands"] = &internal.LootFile{
+			Name:     "pubsub-commands",
+			Contents: "# Pub/Sub Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+		}
+	}
+
+	for _, topic := range topics {
+		m.addTopicToLoot(projectID, topic)
+	}
+	for _, sub := range subs {
+		m.addSubscriptionToLoot(projectID, sub)
+	}
+	m.mu.Unlock()
 
 	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
 		logger.InfoM(fmt.Sprintf("Found %d topic(s), %d subscription(s) in project %s", len(topics), len(subs), projectID), globals.GCP_PUBSUB_MODULE_NAME)
@@ -181,15 +216,13 @@ func (m *PubSubModule) processProject(ctx context.Context, projectID string, log
 // ------------------------------
 // Loot File Management
 // ------------------------------
-func (m *PubSubModule) initializeLootFiles() {
-	m.LootMap["pubsub-commands"] = &internal.LootFile{
-		Name:     "pubsub-commands",
-		Contents: "# Pub/Sub Commands\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+func (m *PubSubModule) addTopicToLoot(projectID string, topic PubSubService.TopicInfo) {
+	lootFile := m.LootMap[projectID]["pubsub-commands"]
+	if lootFile == nil {
+		return
 	}
-}
 
-func (m *PubSubModule) addTopicToLoot(topic PubSubService.TopicInfo) {
-	m.LootMap["pubsub-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"## Topic: %s (Project: %s)\n"+
 			"# Subscriptions: %d\n",
 		topic.Name, topic.ProjectID,
@@ -197,17 +230,17 @@ func (m *PubSubModule) addTopicToLoot(topic PubSubService.TopicInfo) {
 	)
 
 	if topic.KmsKeyName != "" {
-		m.LootMap["pubsub-commands"].Contents += fmt.Sprintf("# KMS Key: %s\n", topic.KmsKeyName)
+		lootFile.Contents += fmt.Sprintf("# KMS Key: %s\n", topic.KmsKeyName)
 	}
 
 	if len(topic.IAMBindings) > 0 {
-		m.LootMap["pubsub-commands"].Contents += "# IAM Bindings:\n"
+		lootFile.Contents += "# IAM Bindings:\n"
 		for _, binding := range topic.IAMBindings {
-			m.LootMap["pubsub-commands"].Contents += fmt.Sprintf("#   %s -> %s\n", binding.Role, binding.Member)
+			lootFile.Contents += fmt.Sprintf("#   %s -> %s\n", binding.Role, binding.Member)
 		}
 	}
 
-	m.LootMap["pubsub-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"\n# Describe topic:\n"+
 			"gcloud pubsub topics describe %s --project=%s\n\n"+
 			"# Get IAM policy:\n"+
@@ -223,8 +256,13 @@ func (m *PubSubModule) addTopicToLoot(topic PubSubService.TopicInfo) {
 	)
 }
 
-func (m *PubSubModule) addSubscriptionToLoot(sub PubSubService.SubscriptionInfo) {
-	m.LootMap["pubsub-commands"].Contents += fmt.Sprintf(
+func (m *PubSubModule) addSubscriptionToLoot(projectID string, sub PubSubService.SubscriptionInfo) {
+	lootFile := m.LootMap[projectID]["pubsub-commands"]
+	if lootFile == nil {
+		return
+	}
+
+	lootFile.Contents += fmt.Sprintf(
 		"## Subscription: %s (Project: %s)\n"+
 			"# Topic: %s\n",
 		sub.Name, sub.ProjectID,
@@ -233,12 +271,12 @@ func (m *PubSubModule) addSubscriptionToLoot(sub PubSubService.SubscriptionInfo)
 
 	// Cross-project info
 	if sub.TopicProject != "" && sub.TopicProject != sub.ProjectID {
-		m.LootMap["pubsub-commands"].Contents += fmt.Sprintf("# Cross-Project: Yes (topic in %s)\n", sub.TopicProject)
+		lootFile.Contents += fmt.Sprintf("# Cross-Project: Yes (topic in %s)\n", sub.TopicProject)
 	}
 
 	// Push endpoint info
 	if sub.PushEndpoint != "" {
-		m.LootMap["pubsub-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# Push Endpoint: %s\n"+
 				"# Push Service Account: %s\n",
 			sub.PushEndpoint,
@@ -248,15 +286,15 @@ func (m *PubSubModule) addSubscriptionToLoot(sub PubSubService.SubscriptionInfo)
 
 	// Export destinations
 	if sub.BigQueryTable != "" {
-		m.LootMap["pubsub-commands"].Contents += fmt.Sprintf("# BigQuery Export: %s\n", sub.BigQueryTable)
+		lootFile.Contents += fmt.Sprintf("# BigQuery Export: %s\n", sub.BigQueryTable)
 	}
 	if sub.CloudStorageBucket != "" {
-		m.LootMap["pubsub-commands"].Contents += fmt.Sprintf("# GCS Export: %s\n", sub.CloudStorageBucket)
+		lootFile.Contents += fmt.Sprintf("# GCS Export: %s\n", sub.CloudStorageBucket)
 	}
 
 	// Dead letter config
 	if sub.DeadLetterTopic != "" {
-		m.LootMap["pubsub-commands"].Contents += fmt.Sprintf(
+		lootFile.Contents += fmt.Sprintf(
 			"# Dead Letter Topic: %s (Max Attempts: %d)\n",
 			sub.DeadLetterTopic,
 			sub.MaxDeliveryAttempts,
@@ -265,13 +303,13 @@ func (m *PubSubModule) addSubscriptionToLoot(sub PubSubService.SubscriptionInfo)
 
 	// IAM bindings
 	if len(sub.IAMBindings) > 0 {
-		m.LootMap["pubsub-commands"].Contents += "# IAM Bindings:\n"
+		lootFile.Contents += "# IAM Bindings:\n"
 		for _, binding := range sub.IAMBindings {
-			m.LootMap["pubsub-commands"].Contents += fmt.Sprintf("#   %s -> %s\n", binding.Role, binding.Member)
+			lootFile.Contents += fmt.Sprintf("#   %s -> %s\n", binding.Role, binding.Member)
 		}
 	}
 
-	m.LootMap["pubsub-commands"].Contents += fmt.Sprintf(
+	lootFile.Contents += fmt.Sprintf(
 		"\n# Describe subscription:\n"+
 			"gcloud pubsub subscriptions describe %s --project=%s\n\n"+
 			"# Get IAM policy:\n"+
@@ -285,12 +323,12 @@ func (m *PubSubModule) addSubscriptionToLoot(sub PubSubService.SubscriptionInfo)
 
 	// BigQuery command
 	if sub.BigQueryTable != "" {
-		m.LootMap["pubsub-commands"].Contents += fmt.Sprintf("# Query BigQuery export:\nbq show %s\n\n", sub.BigQueryTable)
+		lootFile.Contents += fmt.Sprintf("# Query BigQuery export:\nbq show %s\n\n", sub.BigQueryTable)
 	}
 
 	// GCS command
 	if sub.CloudStorageBucket != "" {
-		m.LootMap["pubsub-commands"].Contents += fmt.Sprintf("# List GCS export:\ngsutil ls gs://%s/\n\n", sub.CloudStorageBucket)
+		lootFile.Contents += fmt.Sprintf("# List GCS export:\ngsutil ls gs://%s/\n\n", sub.CloudStorageBucket)
 	}
 }
 
@@ -298,78 +336,59 @@ func (m *PubSubModule) addSubscriptionToLoot(sub PubSubService.SubscriptionInfo)
 // Output Generation
 // ------------------------------
 func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) {
-	// Topics table - one row per IAM binding
-	topicsHeader := []string{
-		"Project Name",
-		"Project ID",
-		"Topic Name",
-		"Subscriptions",
-		"KMS Key",
-		"Retention",
-		"IAM Role",
-		"IAM Member",
+	if m.Hierarchy != nil && !m.FlatOutput {
+		m.writeHierarchicalOutput(ctx, logger)
+	} else {
+		m.writeFlatOutput(ctx, logger)
 	}
+}
 
-	var topicsBody [][]string
-	for _, topic := range m.Topics {
-		// Format KMS key
+func (m *PubSubModule) getTopicsHeader() []string {
+	return []string{
+		"Project Name", "Project ID", "Topic Name", "Subscriptions",
+		"KMS Key", "Retention", "Resource Role", "Resource Principal",
+	}
+}
+
+func (m *PubSubModule) getSubsHeader() []string {
+	return []string{
+		"Project Name", "Project ID", "Subscription", "Topic", "Type",
+		"Push Endpoint / Export", "Cross-Project", "Dead Letter", "Resource Role", "Resource Principal",
+	}
+}
+
+func (m *PubSubModule) topicsToTableBody(topics []PubSubService.TopicInfo) [][]string {
+	var body [][]string
+	for _, topic := range topics {
 		kmsKey := "-"
 		if topic.KmsKeyName != "" {
 			kmsKey = topic.KmsKeyName
 		}
-
-		// Format retention
 		retention := "-"
 		if topic.MessageRetentionDuration != "" {
 			retention = topic.MessageRetentionDuration
 		}
 
 		if len(topic.IAMBindings) > 0 {
-			// One row per IAM binding
 			for _, binding := range topic.IAMBindings {
-				topicsBody = append(topicsBody, []string{
-					m.GetProjectName(topic.ProjectID),
-					topic.ProjectID,
-					topic.Name,
-					fmt.Sprintf("%d", topic.SubscriptionCount),
-					kmsKey,
-					retention,
-					binding.Role,
-					binding.Member,
+				body = append(body, []string{
+					m.GetProjectName(topic.ProjectID), topic.ProjectID, topic.Name,
+					fmt.Sprintf("%d", topic.SubscriptionCount), kmsKey, retention, binding.Role, binding.Member,
 				})
 			}
 		} else {
-			// No IAM bindings - single row with empty IAM columns
-			topicsBody = append(topicsBody, []string{
-				m.GetProjectName(topic.ProjectID),
-				topic.ProjectID,
-				topic.Name,
-				fmt.Sprintf("%d", topic.SubscriptionCount),
-				kmsKey,
-				retention,
-				"-",
-				"-",
+			body = append(body, []string{
+				m.GetProjectName(topic.ProjectID), topic.ProjectID, topic.Name,
+				fmt.Sprintf("%d", topic.SubscriptionCount), kmsKey, retention, "-", "-",
 			})
 		}
 	}
+	return body
+}
 
-	// Subscriptions table - one row per IAM binding
-	subsHeader := []string{
-		"Project Name",
-		"Project ID",
-		"Subscription",
-		"Topic",
-		"Type",
-		"Push Endpoint / Export",
-		"Cross-Project",
-		"Dead Letter",
-		"IAM Role",
-		"IAM Member",
-	}
-
-	var subsBody [][]string
-	for _, sub := range m.Subscriptions {
-		// Determine type
+func (m *PubSubModule) subsToTableBody(subs []PubSubService.SubscriptionInfo) [][]string {
+	var body [][]string
+	for _, sub := range subs {
 		subType := "Pull"
 		destination := "-"
 		if sub.PushEndpoint != "" {
@@ -383,82 +402,123 @@ func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) 
 			destination = sub.CloudStorageBucket
 		}
 
-		// Format cross-project
 		crossProject := "-"
 		if sub.TopicProject != "" && sub.TopicProject != sub.ProjectID {
 			crossProject = sub.TopicProject
 		}
 
-		// Format dead letter
 		deadLetter := "-"
 		if sub.DeadLetterTopic != "" {
 			deadLetter = sub.DeadLetterTopic
 		}
 
 		if len(sub.IAMBindings) > 0 {
-			// One row per IAM binding
 			for _, binding := range sub.IAMBindings {
-				subsBody = append(subsBody, []string{
-					m.GetProjectName(sub.ProjectID),
-					sub.ProjectID,
-					sub.Name,
-					sub.Topic,
-					subType,
-					destination,
-					crossProject,
-					deadLetter,
-					binding.Role,
-					binding.Member,
+				body = append(body, []string{
+					m.GetProjectName(sub.ProjectID), sub.ProjectID, sub.Name, sub.Topic, subType,
+					destination, crossProject, deadLetter, binding.Role, binding.Member,
 				})
 			}
 		} else {
-			// No IAM bindings - single row with empty IAM columns
-			subsBody = append(subsBody, []string{
-				m.GetProjectName(sub.ProjectID),
-				sub.ProjectID,
-				sub.Name,
-				sub.Topic,
-				subType,
-				destination,
-				crossProject,
-				deadLetter,
-				"-",
-				"-",
+			body = append(body, []string{
+				m.GetProjectName(sub.ProjectID), sub.ProjectID, sub.Name, sub.Topic, subType,
+				destination, crossProject, deadLetter, "-", "-",
 			})
 		}
 	}
+	return body
+}
 
-	// Collect loot files - only include if they have content beyond the header
+func (m *PubSubModule) buildTablesForProject(projectID string) []internal.TableFile {
+	topics := m.ProjectTopics[projectID]
+	subs := m.ProjectSubscriptions[projectID]
+
+	topicsBody := m.topicsToTableBody(topics)
+	subsBody := m.subsToTableBody(subs)
+
+	var tableFiles []internal.TableFile
+	if len(topicsBody) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name: globals.GCP_PUBSUB_MODULE_NAME + "-topics", Header: m.getTopicsHeader(), Body: topicsBody,
+		})
+	}
+	if len(subsBody) > 0 {
+		tableFiles = append(tableFiles, internal.TableFile{
+			Name: globals.GCP_PUBSUB_MODULE_NAME + "-subscriptions", Header: m.getSubsHeader(), Body: subsBody,
+		})
+	}
+	return tableFiles
+}
+
+func (m *PubSubModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
+	}
+
+	projectsWithData := make(map[string]bool)
+	for projectID := range m.ProjectTopics {
+		projectsWithData[projectID] = true
+	}
+	for projectID := range m.ProjectSubscriptions {
+		projectsWithData[projectID] = true
+	}
+
+	for projectID := range projectsWithData {
+		tableFiles := m.buildTablesForProject(projectID)
+
+		var lootFiles []internal.LootFile
+		if projectLoot, ok := m.LootMap[projectID]; ok {
+			for _, loot := range projectLoot {
+				if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
+					lootFiles = append(lootFiles, *loot)
+				}
+			}
+		}
+
+		outputData.ProjectLevelData[projectID] = PubSubOutput{Table: tableFiles, Loot: lootFiles}
+	}
+
+	pathBuilder := m.BuildPathBuilder()
+
+	err := internal.HandleHierarchicalOutputSmart(
+		"gcp", m.Format, m.Verbosity, m.WrapTable, pathBuilder, outputData,
+	)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), globals.GCP_PUBSUB_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}
+
+func (m *PubSubModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
+	allTopics := m.getAllTopics()
+	allSubs := m.getAllSubscriptions()
+
+	topicsBody := m.topicsToTableBody(allTopics)
+	subsBody := m.subsToTableBody(allSubs)
+
 	var lootFiles []internal.LootFile
-	for _, loot := range m.LootMap {
-		if loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
-			lootFiles = append(lootFiles, *loot)
+	for _, projectLoot := range m.LootMap {
+		for _, loot := range projectLoot {
+			if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# WARNING: Only use with proper authorization\n\n") {
+				lootFiles = append(lootFiles, *loot)
+			}
 		}
 	}
 
-	// Build table files
-	tableFiles := []internal.TableFile{}
-
+	var tableFiles []internal.TableFile
 	if len(topicsBody) > 0 {
 		tableFiles = append(tableFiles, internal.TableFile{
-			Name:   globals.GCP_PUBSUB_MODULE_NAME + "-topics",
-			Header: topicsHeader,
-			Body:   topicsBody,
+			Name: globals.GCP_PUBSUB_MODULE_NAME + "-topics", Header: m.getTopicsHeader(), Body: topicsBody,
 		})
 	}
-
 	if len(subsBody) > 0 {
 		tableFiles = append(tableFiles, internal.TableFile{
-			Name:   globals.GCP_PUBSUB_MODULE_NAME + "-subscriptions",
-			Header: subsHeader,
-			Body:   subsBody,
+			Name: globals.GCP_PUBSUB_MODULE_NAME + "-subscriptions", Header: m.getSubsHeader(), Body: subsBody,
 		})
 	}
 
-	output := PubSubOutput{
-		Table: tableFiles,
-		Loot:  lootFiles,
-	}
+	output := PubSubOutput{Table: tableFiles, Loot: lootFiles}
 
 	scopeNames := make([]string, len(m.ProjectIDs))
 	for i, id := range m.ProjectIDs {
@@ -466,16 +526,8 @@ func (m *PubSubModule) writeOutput(ctx context.Context, logger internal.Logger) 
 	}
 
 	err := internal.HandleOutputSmart(
-		"gcp",
-		m.Format,
-		m.OutputDirectory,
-		m.Verbosity,
-		m.WrapTable,
-		"project",
-		m.ProjectIDs,
-		scopeNames,
-		m.Account,
-		output,
+		"gcp", m.Format, m.OutputDirectory, m.Verbosity, m.WrapTable,
+		"project", m.ProjectIDs, scopeNames, m.Account, output,
 	)
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_PUBSUB_MODULE_NAME)
