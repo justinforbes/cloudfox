@@ -142,11 +142,18 @@ func (m *OrganizationsModule) initializeLootFiles() {
 		Name:     "organizations-map",
 		Contents: "",
 	}
+	m.LootMap["organizations-tree"] = &internal.LootFile{
+		Name:     "organizations-tree",
+		Contents: "",
+	}
 }
 
 func (m *OrganizationsModule) generateLoot() {
-	// Generate beautified tree view (org map)
-	m.generateTreeView()
+	// Generate expandable markdown tree view (org map)
+	m.generateMarkdownTreeView()
+
+	// Generate standard ASCII tree view
+	m.generateTextTreeView()
 
 	// Gcloud commands for organizations
 	m.LootMap["organizations-commands"].Contents += "# ==========================================\n"
@@ -193,9 +200,103 @@ func (m *OrganizationsModule) generateLoot() {
 	}
 }
 
-// generateTreeView creates a beautified ASCII tree of the organization hierarchy
-func (m *OrganizationsModule) generateTreeView() {
+// generateMarkdownTreeView creates a beautified expandable markdown tree of the organization hierarchy
+func (m *OrganizationsModule) generateMarkdownTreeView() {
 	tree := &m.LootMap["organizations-map"].Contents
+
+	*tree += "# GCP Organization Hierarchy\n\n"
+
+	for _, org := range m.Organizations {
+		orgID := strings.TrimPrefix(org.Name, "organizations/")
+		displayName := org.DisplayName
+		if displayName == "" {
+			displayName = orgID
+		}
+
+		// Get direct children (folders and projects) of this org
+		childFolders := m.getChildFolders(org.Name)
+		childProjects := m.getChildProjects(org.Name)
+
+		// Start expandable section for organization
+		*tree += fmt.Sprintf("<details open>\n<summary>🏢 <strong>Organization:</strong> %s (%s)</summary>\n\n", displayName, orgID)
+
+		// Add folders as expandable sections
+		for _, folder := range childFolders {
+			m.addFolderToMarkdownTree(tree, folder, 1)
+		}
+
+		// Add projects directly under org
+		if len(childProjects) > 0 {
+			for _, proj := range childProjects {
+				projDisplayName := proj.DisplayName
+				if projDisplayName == "" {
+					projDisplayName = proj.ProjectID
+				}
+				*tree += fmt.Sprintf("- 📁 **Project:** %s (`%s`)\n", projDisplayName, proj.ProjectID)
+			}
+			*tree += "\n"
+		}
+
+		*tree += "</details>\n\n"
+	}
+
+	// Handle standalone projects (no org parent)
+	standaloneProjects := m.getStandaloneProjects()
+	if len(standaloneProjects) > 0 {
+		*tree += "<details>\n<summary>📦 <strong>Standalone Projects</strong> (no organization)</summary>\n\n"
+		for _, proj := range standaloneProjects {
+			displayName := proj.DisplayName
+			if displayName == "" {
+				displayName = proj.ProjectID
+			}
+			*tree += fmt.Sprintf("- 📁 **Project:** %s (`%s`)\n", displayName, proj.ProjectID)
+		}
+		*tree += "\n</details>\n"
+	}
+}
+
+// addFolderToMarkdownTree recursively adds a folder and its children as expandable markdown
+func (m *OrganizationsModule) addFolderToMarkdownTree(tree *string, folder orgsservice.FolderInfo, depth int) {
+	folderID := strings.TrimPrefix(folder.Name, "folders/")
+	displayName := folder.DisplayName
+	if displayName == "" {
+		displayName = folderID
+	}
+
+	// Get children of this folder
+	childFolders := m.getChildFolders(folder.Name)
+	childProjects := m.getChildProjects(folder.Name)
+
+	hasChildren := len(childFolders) > 0 || len(childProjects) > 0
+
+	if hasChildren {
+		// Folder with children - make it expandable
+		*tree += fmt.Sprintf("<details>\n<summary>📂 <strong>Folder:</strong> %s (%s)</summary>\n\n", displayName, folderID)
+
+		// Add child folders
+		for _, childFolder := range childFolders {
+			m.addFolderToMarkdownTree(tree, childFolder, depth+1)
+		}
+
+		// Add child projects
+		for _, proj := range childProjects {
+			projDisplayName := proj.DisplayName
+			if projDisplayName == "" {
+				projDisplayName = proj.ProjectID
+			}
+			*tree += fmt.Sprintf("- 📁 **Project:** %s (`%s`)\n", projDisplayName, proj.ProjectID)
+		}
+
+		*tree += "\n</details>\n\n"
+	} else {
+		// Empty folder - just a list item
+		*tree += fmt.Sprintf("- 📂 **Folder:** %s (`%s`) *(empty)*\n", displayName, folderID)
+	}
+}
+
+// generateTextTreeView creates a standard ASCII tree of the organization hierarchy
+func (m *OrganizationsModule) generateTextTreeView() {
+	tree := &m.LootMap["organizations-tree"].Contents
 
 	for _, org := range m.Organizations {
 		orgID := strings.TrimPrefix(org.Name, "organizations/")
@@ -216,7 +317,7 @@ func (m *OrganizationsModule) generateTreeView() {
 		for _, folder := range childFolders {
 			childIndex++
 			isLast := childIndex == totalChildren
-			m.addFolderToTree(tree, folder, "", isLast)
+			m.addFolderToTextTree(tree, folder, "", isLast)
 		}
 
 		// Add projects directly under org
@@ -227,11 +328,11 @@ func (m *OrganizationsModule) generateTreeView() {
 			if isLast {
 				prefix = "└── "
 			}
-			displayName := proj.DisplayName
-			if displayName == "" {
-				displayName = proj.ProjectID
+			projDisplayName := proj.DisplayName
+			if projDisplayName == "" {
+				projDisplayName = proj.ProjectID
 			}
-			*tree += fmt.Sprintf("%sProject: %s (%s)\n", prefix, displayName, proj.ProjectID)
+			*tree += fmt.Sprintf("%sProject: %s (%s)\n", prefix, projDisplayName, proj.ProjectID)
 		}
 
 		*tree += "\n"
@@ -256,8 +357,8 @@ func (m *OrganizationsModule) generateTreeView() {
 	}
 }
 
-// addFolderToTree recursively adds a folder and its children to the tree
-func (m *OrganizationsModule) addFolderToTree(tree *string, folder orgsservice.FolderInfo, indent string, isLast bool) {
+// addFolderToTextTree recursively adds a folder and its children to the ASCII tree
+func (m *OrganizationsModule) addFolderToTextTree(tree *string, folder orgsservice.FolderInfo, indent string, isLast bool) {
 	folderID := strings.TrimPrefix(folder.Name, "folders/")
 	displayName := folder.DisplayName
 	if displayName == "" {
@@ -289,7 +390,7 @@ func (m *OrganizationsModule) addFolderToTree(tree *string, folder orgsservice.F
 	for _, childFolder := range childFolders {
 		childIndex++
 		childIsLast := childIndex == totalChildren
-		m.addFolderToTree(tree, childFolder, childIndent, childIsLast)
+		m.addFolderToTextTree(tree, childFolder, childIndent, childIsLast)
 	}
 
 	// Add child projects
@@ -300,11 +401,11 @@ func (m *OrganizationsModule) addFolderToTree(tree *string, folder orgsservice.F
 		if childIsLast {
 			childPrefix = "└── "
 		}
-		displayName := proj.DisplayName
-		if displayName == "" {
-			displayName = proj.ProjectID
+		projDisplayName := proj.DisplayName
+		if projDisplayName == "" {
+			projDisplayName = proj.ProjectID
 		}
-		*tree += fmt.Sprintf("%s%sProject: %s (%s)\n", childIndent, childPrefix, displayName, proj.ProjectID)
+		*tree += fmt.Sprintf("%s%sProject: %s (%s)\n", childIndent, childPrefix, projDisplayName, proj.ProjectID)
 	}
 }
 
@@ -340,6 +441,34 @@ func (m *OrganizationsModule) getStandaloneProjects() []orgsservice.ProjectInfo 
 		}
 	}
 	return standalone
+}
+
+// getFolderName returns the display name for a folder ID
+func (m *OrganizationsModule) getFolderName(folderID string) string {
+	for _, folder := range m.Folders {
+		id := strings.TrimPrefix(folder.Name, "folders/")
+		if id == folderID {
+			if folder.DisplayName != "" {
+				return folder.DisplayName
+			}
+			return folderID
+		}
+	}
+	return folderID
+}
+
+// getOrgName returns the display name for an organization ID
+func (m *OrganizationsModule) getOrgName(orgID string) string {
+	for _, org := range m.Organizations {
+		id := strings.TrimPrefix(org.Name, "organizations/")
+		if id == orgID {
+			if org.DisplayName != "" {
+				return org.DisplayName
+			}
+			return orgID
+		}
+	}
+	return orgID
 }
 
 // ------------------------------
@@ -422,14 +551,35 @@ func (m *OrganizationsModule) buildTables() []internal.TableFile {
 	var ancestryBody [][]string
 	for _, ancestry := range m.Ancestry {
 		if len(ancestry) > 0 {
-			// Build ancestry path string
+			// Build ancestry path string with names
 			var path []string
 			projectID := ""
 			for _, node := range ancestry {
 				if node.Type == "project" {
 					projectID = node.ID
+					projName := m.GetProjectName(node.ID)
+					if projName != "" && projName != node.ID {
+						path = append(path, fmt.Sprintf("project:%s (%s)", projName, node.ID))
+					} else {
+						path = append(path, fmt.Sprintf("project:%s", node.ID))
+					}
+				} else if node.Type == "folder" {
+					folderName := m.getFolderName(node.ID)
+					if folderName != "" && folderName != node.ID {
+						path = append(path, fmt.Sprintf("folder:%s (%s)", folderName, node.ID))
+					} else {
+						path = append(path, fmt.Sprintf("folder:%s", node.ID))
+					}
+				} else if node.Type == "organization" {
+					orgName := m.getOrgName(node.ID)
+					if orgName != "" && orgName != node.ID {
+						path = append(path, fmt.Sprintf("organization:%s (%s)", orgName, node.ID))
+					} else {
+						path = append(path, fmt.Sprintf("organization:%s", node.ID))
+					}
+				} else {
+					path = append(path, fmt.Sprintf("%s:%s", node.Type, node.ID))
 				}
-				path = append(path, fmt.Sprintf("%s:%s", node.Type, node.ID))
 			}
 			ancestryBody = append(ancestryBody, []string{
 				projectID,
