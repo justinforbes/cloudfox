@@ -119,9 +119,13 @@ type ImpersonationTarget struct {
 }
 
 type PrivilegeEscalationPath struct {
-	Name        string
-	Description string
-	Command     string
+	Name           string
+	Description    string
+	Command        string
+	SourceRole     string // The role that grants this potential path
+	SourceScope    string // Where the role is granted (project ID, folder, org)
+	Confidence     string // "confirmed" (verified via API) or "potential" (inferred from role)
+	RequiredPerms  string // Specific permissions needed for this path
 }
 
 // ------------------------------
@@ -678,7 +682,7 @@ func (m *WhoAmIModule) findImpersonationTargets(ctx context.Context, logger inte
 func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal.Logger) {
 	// Check for privilege escalation opportunities based on role bindings
 	for _, rb := range m.RoleBindings {
-		paths := getPrivEscPathsForRole(rb.Role, rb.ScopeID)
+		paths := getPrivEscPathsForRole(rb.Role, rb.Scope, rb.ScopeID)
 		m.PrivEscPaths = append(m.PrivEscPaths, paths...)
 	}
 
@@ -686,18 +690,26 @@ func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal
 	for _, target := range m.ImpersonationTargets {
 		if target.CanImpersonate {
 			path := PrivilegeEscalationPath{
-				Name:        fmt.Sprintf("Impersonate %s", target.ServiceAccount),
-				Description: "Can generate access tokens for this service account",
-				Command:     fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=%s", target.ServiceAccount),
+				Name:          fmt.Sprintf("Impersonate %s", target.ServiceAccount),
+				Description:   "Can generate access tokens for this service account",
+				Command:       fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=%s", target.ServiceAccount),
+				SourceRole:    "(via SA IAM policy)",
+				SourceScope:   fmt.Sprintf("project/%s", target.ProjectID),
+				Confidence:    "confirmed",
+				RequiredPerms: "iam.serviceAccounts.getAccessToken",
 			}
 			m.PrivEscPaths = append(m.PrivEscPaths, path)
 		}
 
 		if target.CanCreateKeys {
 			path := PrivilegeEscalationPath{
-				Name:        fmt.Sprintf("Create key for %s", target.ServiceAccount),
-				Description: "Can create persistent service account keys",
-				Command:     fmt.Sprintf("gcloud iam service-accounts keys create key.json --iam-account=%s", target.ServiceAccount),
+				Name:          fmt.Sprintf("Create key for %s", target.ServiceAccount),
+				Description:   "Can create persistent service account keys",
+				Command:       fmt.Sprintf("gcloud iam service-accounts keys create key.json --iam-account=%s", target.ServiceAccount),
+				SourceRole:    "(via SA IAM policy)",
+				SourceScope:   fmt.Sprintf("project/%s", target.ProjectID),
+				Confidence:    "confirmed",
+				RequiredPerms: "iam.serviceAccountKeys.create",
 			}
 			m.PrivEscPaths = append(m.PrivEscPaths, path)
 		}
@@ -735,45 +747,77 @@ func isDangerousRole(role string) bool {
 }
 
 // getPrivEscPathsForRole returns privilege escalation paths for a given role
-func getPrivEscPathsForRole(role, projectID string) []PrivilegeEscalationPath {
+// Note: These are POTENTIAL paths based on role name inference, not verified permissions.
+// The actual ability to exploit these paths depends on specific GKE/resource configurations.
+func getPrivEscPathsForRole(role, scopeType, scopeID string) []PrivilegeEscalationPath {
 	var paths []PrivilegeEscalationPath
+
+	// Build scope display string
+	scopeDisplay := scopeID
+	if scopeType != "" {
+		scopeDisplay = fmt.Sprintf("%s/%s", scopeType, scopeID)
+	}
 
 	switch role {
 	case "roles/iam.serviceAccountTokenCreator":
 		paths = append(paths, PrivilegeEscalationPath{
-			Name:        "Token Creator - Impersonate any SA",
-			Description: "Can generate access tokens for any service account in the project",
-			Command:     fmt.Sprintf("gcloud iam service-accounts list --project=%s", projectID),
+			Name:          "Token Creator - Impersonate any SA",
+			Description:   "Can generate access tokens for any service account in scope",
+			Command:       fmt.Sprintf("gcloud iam service-accounts list --project=%s", scopeID),
+			SourceRole:    role,
+			SourceScope:   scopeDisplay,
+			Confidence:    "potential",
+			RequiredPerms: "iam.serviceAccounts.getAccessToken",
 		})
 	case "roles/iam.serviceAccountKeyAdmin":
 		paths = append(paths, PrivilegeEscalationPath{
-			Name:        "Key Admin - Create persistent keys",
-			Description: "Can create service account keys for any SA",
-			Command:     fmt.Sprintf("gcloud iam service-accounts list --project=%s", projectID),
+			Name:          "Key Admin - Create persistent keys",
+			Description:   "Can create service account keys for any SA in scope",
+			Command:       fmt.Sprintf("gcloud iam service-accounts list --project=%s", scopeID),
+			SourceRole:    role,
+			SourceScope:   scopeDisplay,
+			Confidence:    "potential",
+			RequiredPerms: "iam.serviceAccountKeys.create",
 		})
 	case "roles/cloudfunctions.admin":
 		paths = append(paths, PrivilegeEscalationPath{
-			Name:        "Cloud Functions Admin - Code Execution",
-			Description: "Can deploy Cloud Functions with SA permissions",
-			Command:     "gcloud functions deploy malicious-function --runtime=python39 --trigger-http --service-account=<target-sa>",
+			Name:          "Cloud Functions Admin - Code Execution",
+			Description:   "Can deploy Cloud Functions with SA permissions",
+			Command:       "gcloud functions deploy malicious-function --runtime=python39 --trigger-http --service-account=<target-sa>",
+			SourceRole:    role,
+			SourceScope:   scopeDisplay,
+			Confidence:    "potential",
+			RequiredPerms: "cloudfunctions.functions.create, iam.serviceAccounts.actAs",
 		})
 	case "roles/compute.admin":
 		paths = append(paths, PrivilegeEscalationPath{
-			Name:        "Compute Admin - Metadata Injection",
-			Description: "Can add startup scripts with SA access",
-			Command:     "gcloud compute instances add-metadata <instance> --metadata=startup-script='curl -H \"Metadata-Flavor: Google\" http://metadata/...'",
+			Name:          "Compute Admin - Metadata Injection",
+			Description:   "Can add startup scripts with SA access",
+			Command:       "gcloud compute instances add-metadata <instance> --metadata=startup-script='curl -H \"Metadata-Flavor: Google\" http://metadata/...'",
+			SourceRole:    role,
+			SourceScope:   scopeDisplay,
+			Confidence:    "potential",
+			RequiredPerms: "compute.instances.setMetadata",
 		})
 	case "roles/container.admin":
 		paths = append(paths, PrivilegeEscalationPath{
-			Name:        "Container Admin - Pod Deployment",
-			Description: "Can deploy pods with service account access",
-			Command:     fmt.Sprintf("gcloud container clusters get-credentials <cluster> --project=%s", projectID),
+			Name:          "Container Admin - Pod Deployment",
+			Description:   "May deploy pods with SA access (requires GKE cluster + K8s RBAC permissions)",
+			Command:       fmt.Sprintf("gcloud container clusters get-credentials <cluster> --project=%s", scopeID),
+			SourceRole:    role,
+			SourceScope:   scopeDisplay,
+			Confidence:    "potential",
+			RequiredPerms: "container.clusters.getCredentials (GCP) + pods/create (K8s RBAC)",
 		})
 	case "roles/owner", "roles/editor":
 		paths = append(paths, PrivilegeEscalationPath{
-			Name:        "Owner/Editor - Full Project Access",
-			Description: "Has full control over project resources",
-			Command:     fmt.Sprintf("gcloud projects get-iam-policy %s", projectID),
+			Name:          "Owner/Editor - Full Project Access",
+			Description:   "Has full control over project resources",
+			Command:       fmt.Sprintf("gcloud projects get-iam-policy %s", scopeID),
+			SourceRole:    role,
+			SourceScope:   scopeDisplay,
+			Confidence:    "confirmed",
+			RequiredPerms: "(broad permissions granted by role)",
 		})
 	}
 
@@ -831,12 +875,25 @@ func (m *WhoAmIModule) generateLoot() {
 
 		// Privilege escalation loot
 		for _, path := range m.PrivEscPaths {
+			confidenceNote := ""
+			if path.Confidence == "potential" {
+				confidenceNote = "# NOTE: This is a POTENTIAL path based on role name. Actual exploitation depends on resource configuration.\n"
+			}
 			m.LootMap["whoami-privesc"].Contents += fmt.Sprintf(
 				"## %s\n"+
 					"# %s\n"+
+					"# Source: %s at %s\n"+
+					"# Confidence: %s\n"+
+					"# Required permissions: %s\n"+
+					"%s"+
 					"%s\n\n",
 				path.Name,
 				path.Description,
+				path.SourceRole,
+				path.SourceScope,
+				path.Confidence,
+				path.RequiredPerms,
+				confidenceNote,
 				path.Command,
 			)
 		}
@@ -1064,6 +1121,10 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 			privescHeader := []string{
 				"Path Name",
 				"Description",
+				"Source Role",
+				"Source Scope",
+				"Confidence",
+				"Required Perms",
 				"Command",
 			}
 
@@ -1072,6 +1133,10 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 				privescBody = append(privescBody, []string{
 					path.Name,
 					path.Description,
+					path.SourceRole,
+					path.SourceScope,
+					path.Confidence,
+					path.RequiredPerms,
 					path.Command,
 				})
 			}
