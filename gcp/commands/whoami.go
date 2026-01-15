@@ -8,6 +8,7 @@ import (
 
 	IAMService "github.com/BishopFox/cloudfox/gcp/services/iamService"
 	OAuthService "github.com/BishopFox/cloudfox/gcp/services/oauthService"
+	privescservice "github.com/BishopFox/cloudfox/gcp/services/privescService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -679,14 +680,47 @@ func (m *WhoAmIModule) findImpersonationTargets(ctx context.Context, logger inte
 }
 
 // identifyPrivEscPaths identifies privilege escalation paths based on current permissions
+// Uses privescService for comprehensive analysis consistent with the privesc module
+// Filters results to only show paths relevant to the current identity and their groups
+// Will use cached privesc data from context if available (e.g., from all-checks run)
 func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal.Logger) {
-	// Check for privilege escalation opportunities based on role bindings
-	for _, rb := range m.RoleBindings {
-		paths := getPrivEscPathsForRole(rb.Role, rb.Scope, rb.ScopeID)
-		m.PrivEscPaths = append(m.PrivEscPaths, paths...)
+	// Build set of principals to filter for (current identity + groups)
+	relevantPrincipals := make(map[string]bool)
+	// Add current identity email (with various formats)
+	relevantPrincipals[m.Identity.Email] = true
+	relevantPrincipals[strings.ToLower(m.Identity.Email)] = true
+	// Add with type prefixes
+	if m.Identity.Type == "serviceAccount" {
+		relevantPrincipals["serviceAccount:"+m.Identity.Email] = true
+		relevantPrincipals["serviceAccount:"+strings.ToLower(m.Identity.Email)] = true
+	} else {
+		relevantPrincipals["user:"+m.Identity.Email] = true
+		relevantPrincipals["user:"+strings.ToLower(m.Identity.Email)] = true
+	}
+	// Add groups (enumerated or provided)
+	for _, group := range m.Identity.Groups {
+		if group.Email != "" {
+			relevantPrincipals[group.Email] = true
+			relevantPrincipals[strings.ToLower(group.Email)] = true
+			relevantPrincipals["group:"+group.Email] = true
+			relevantPrincipals["group:"+strings.ToLower(group.Email)] = true
+		}
+	}
+	// Add special principals that apply to everyone
+	relevantPrincipals["allUsers"] = true
+	relevantPrincipals["allAuthenticatedUsers"] = true
+
+	// Check if privesc cache is available from context (e.g., from all-checks run)
+	privescCache := gcpinternal.GetPrivescCacheFromContext(ctx)
+	if privescCache != nil && privescCache.IsPopulated() {
+		logger.InfoM("Using cached privesc data", globals.GCP_WHOAMI_MODULE_NAME)
+		m.identifyPrivEscPathsFromCache(privescCache, relevantPrincipals, logger)
+	} else {
+		// No cache available, run fresh privesc analysis
+		m.identifyPrivEscPathsFromAnalysis(ctx, relevantPrincipals, logger)
 	}
 
-	// Check impersonation-based privilege escalation
+	// Also check impersonation-based privilege escalation from findImpersonationTargets
 	for _, target := range m.ImpersonationTargets {
 		if target.CanImpersonate {
 			path := PrivilegeEscalationPath{
@@ -720,22 +754,117 @@ func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal
 	}
 }
 
+// identifyPrivEscPathsFromCache extracts privesc paths from the cached data
+func (m *WhoAmIModule) identifyPrivEscPathsFromCache(cache *gcpinternal.PrivescCache, relevantPrincipals map[string]bool, logger internal.Logger) {
+	// Check each relevant principal against the cache
+	for principal := range relevantPrincipals {
+		hasPrivesc, methods := cache.HasPrivescForPrincipal(principal)
+		if !hasPrivesc {
+			continue
+		}
+
+		for _, method := range methods {
+			privEscPath := PrivilegeEscalationPath{
+				Name:          method.Method,
+				Description:   fmt.Sprintf("Risk Level: %s", method.RiskLevel),
+				Command:       "", // Cache doesn't store exploit commands
+				SourceRole:    principal,
+				SourceScope:   method.Target,
+				Confidence:    strings.ToLower(method.RiskLevel),
+				RequiredPerms: strings.Join(method.Permissions, ", "),
+			}
+			m.PrivEscPaths = append(m.PrivEscPaths, privEscPath)
+		}
+	}
+}
+
+// identifyPrivEscPathsFromAnalysis runs fresh privesc analysis using privescService
+func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, relevantPrincipals map[string]bool, logger internal.Logger) {
+	// Use privescService for comprehensive privesc analysis
+	svc := privescservice.New()
+
+	// Build project names map
+	projectNames := make(map[string]string)
+	for _, proj := range m.Identity.Projects {
+		if proj.DisplayName != "" {
+			projectNames[proj.ProjectID] = proj.DisplayName
+		}
+	}
+
+	// Run combined privesc analysis (org, folder, project levels)
+	result, err := svc.CombinedPrivescAnalysis(ctx, m.ProjectIDs, projectNames)
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not analyze privilege escalation paths")
+		return
+	}
+
+	if result == nil {
+		return
+	}
+
+	// Filter and convert privescservice.PrivescPath to whoami's PrivilegeEscalationPath format
+	// Only include paths where the principal matches current identity or their groups
+	for _, path := range result.AllPaths {
+		// Check if this path's principal is relevant to the current identity
+		if !relevantPrincipals[path.Principal] && !relevantPrincipals[strings.ToLower(path.Principal)] {
+			continue
+		}
+
+		privEscPath := PrivilegeEscalationPath{
+			Name:          path.Method,
+			Description:   path.Description,
+			Command:       path.ExploitCommand,
+			SourceRole:    fmt.Sprintf("%s (%s)", path.Principal, path.PrincipalType),
+			SourceScope:   fmt.Sprintf("%s/%s", path.ScopeType, path.ScopeID),
+			Confidence:    strings.ToLower(path.RiskLevel),
+			RequiredPerms: strings.Join(path.Permissions, ", "),
+		}
+		m.PrivEscPaths = append(m.PrivEscPaths, privEscPath)
+	}
+}
+
 // isDangerousRole checks if a role is considered dangerous
+// Uses the dangerous permissions list from privescService for consistency
 func isDangerousRole(role string) bool {
+	// Roles that directly map to dangerous permissions from privescService
 	dangerousRoles := []string{
+		// Owner/Editor - broad access
 		"roles/owner",
 		"roles/editor",
+		// IAM roles - service account impersonation and key creation
 		"roles/iam.securityAdmin",
 		"roles/iam.serviceAccountAdmin",
 		"roles/iam.serviceAccountKeyAdmin",
 		"roles/iam.serviceAccountTokenCreator",
+		"roles/iam.serviceAccountUser", // iam.serviceAccounts.actAs
+		// Resource Manager - IAM policy modification
 		"roles/resourcemanager.organizationAdmin",
 		"roles/resourcemanager.folderAdmin",
 		"roles/resourcemanager.projectIamAdmin",
-		"roles/cloudfunctions.admin",
+		// Compute - metadata injection, instance creation
 		"roles/compute.admin",
+		"roles/compute.instanceAdmin",
+		"roles/compute.instanceAdmin.v1",
+		// Serverless - code execution with SA
+		"roles/cloudfunctions.admin",
+		"roles/cloudfunctions.developer",
+		"roles/run.admin",
+		"roles/run.developer",
+		// CI/CD - Cloud Build SA abuse
+		"roles/cloudbuild.builds.editor",
+		"roles/cloudbuild.builds.builder",
+		// GKE - cluster and pod access
 		"roles/container.admin",
+		"roles/container.clusterAdmin",
+		// Storage
 		"roles/storage.admin",
+		// Secrets
+		"roles/secretmanager.admin",
+		"roles/secretmanager.secretAccessor",
+		// Deployment Manager
+		"roles/deploymentmanager.editor",
+		// Org Policy
+		"roles/orgpolicy.policyAdmin",
 	}
 
 	for _, dr := range dangerousRoles {
@@ -746,83 +875,6 @@ func isDangerousRole(role string) bool {
 	return false
 }
 
-// getPrivEscPathsForRole returns privilege escalation paths for a given role
-// Note: These are POTENTIAL paths based on role name inference, not verified permissions.
-// The actual ability to exploit these paths depends on specific GKE/resource configurations.
-func getPrivEscPathsForRole(role, scopeType, scopeID string) []PrivilegeEscalationPath {
-	var paths []PrivilegeEscalationPath
-
-	// Build scope display string
-	scopeDisplay := scopeID
-	if scopeType != "" {
-		scopeDisplay = fmt.Sprintf("%s/%s", scopeType, scopeID)
-	}
-
-	switch role {
-	case "roles/iam.serviceAccountTokenCreator":
-		paths = append(paths, PrivilegeEscalationPath{
-			Name:          "Token Creator - Impersonate any SA",
-			Description:   "Can generate access tokens for any service account in scope",
-			Command:       fmt.Sprintf("gcloud iam service-accounts list --project=%s", scopeID),
-			SourceRole:    role,
-			SourceScope:   scopeDisplay,
-			Confidence:    "potential",
-			RequiredPerms: "iam.serviceAccounts.getAccessToken",
-		})
-	case "roles/iam.serviceAccountKeyAdmin":
-		paths = append(paths, PrivilegeEscalationPath{
-			Name:          "Key Admin - Create persistent keys",
-			Description:   "Can create service account keys for any SA in scope",
-			Command:       fmt.Sprintf("gcloud iam service-accounts list --project=%s", scopeID),
-			SourceRole:    role,
-			SourceScope:   scopeDisplay,
-			Confidence:    "potential",
-			RequiredPerms: "iam.serviceAccountKeys.create",
-		})
-	case "roles/cloudfunctions.admin":
-		paths = append(paths, PrivilegeEscalationPath{
-			Name:          "Cloud Functions Admin - Code Execution",
-			Description:   "Can deploy Cloud Functions with SA permissions",
-			Command:       "gcloud functions deploy malicious-function --runtime=python39 --trigger-http --service-account=<target-sa>",
-			SourceRole:    role,
-			SourceScope:   scopeDisplay,
-			Confidence:    "potential",
-			RequiredPerms: "cloudfunctions.functions.create, iam.serviceAccounts.actAs",
-		})
-	case "roles/compute.admin":
-		paths = append(paths, PrivilegeEscalationPath{
-			Name:          "Compute Admin - Metadata Injection",
-			Description:   "Can add startup scripts with SA access",
-			Command:       "gcloud compute instances add-metadata <instance> --metadata=startup-script='curl -H \"Metadata-Flavor: Google\" http://metadata/...'",
-			SourceRole:    role,
-			SourceScope:   scopeDisplay,
-			Confidence:    "potential",
-			RequiredPerms: "compute.instances.setMetadata",
-		})
-	case "roles/container.admin":
-		paths = append(paths, PrivilegeEscalationPath{
-			Name:          "Container Admin - Pod Deployment",
-			Description:   "May deploy pods with SA access (requires GKE cluster + K8s RBAC permissions)",
-			Command:       fmt.Sprintf("gcloud container clusters get-credentials <cluster> --project=%s", scopeID),
-			SourceRole:    role,
-			SourceScope:   scopeDisplay,
-			Confidence:    "potential",
-			RequiredPerms: "container.clusters.getCredentials (GCP) + pods/create (K8s RBAC)",
-		})
-	case "roles/owner", "roles/editor":
-		paths = append(paths, PrivilegeEscalationPath{
-			Name:          "Owner/Editor - Full Project Access",
-			Description:   "Has full control over project resources",
-			Command:       fmt.Sprintf("gcloud projects get-iam-policy %s", scopeID),
-			SourceRole:    role,
-			SourceScope:   scopeDisplay,
-			Confidence:    "confirmed",
-			RequiredPerms: "(broad permissions granted by role)",
-		})
-	}
-
-	return paths
-}
 
 // ------------------------------
 // Loot File Management
