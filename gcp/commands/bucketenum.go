@@ -14,7 +14,10 @@ import (
 )
 
 var (
-	bucketEnumMaxObjects int
+	bucketEnumMaxObjects  int
+	bucketEnumAllObjects  bool
+	bucketEnumNoLimit     bool
+	maxObjectsWasSet      bool // tracks if --max-objects was explicitly set
 )
 
 var GCPBucketEnumCommand = &cobra.Command{
@@ -39,19 +42,25 @@ File categories detected:
 - Source: Git repositories
 - Cloud: Cloud Functions source, build artifacts
 
-WARNING: This may take a long time for buckets with many objects.
-Use --max-objects to limit the scan.`,
+Use --all-objects to enumerate ALL bucket contents (not just sensitive files).
+WARNING: Full enumeration may take a long time for buckets with many objects.
+Use --max-objects to limit the scan, or --no-limit for unlimited.`,
 	Run: runGCPBucketEnumCommand,
 }
 
 func init() {
-	GCPBucketEnumCommand.Flags().IntVar(&bucketEnumMaxObjects, "max-objects", 1000, "Maximum objects to scan per bucket (0 for unlimited)")
+	GCPBucketEnumCommand.Flags().IntVar(&bucketEnumMaxObjects, "max-objects", 1000, "Maximum objects to scan per bucket (default 1000)")
+	GCPBucketEnumCommand.Flags().BoolVar(&bucketEnumAllObjects, "all-objects", false, "Enumerate ALL bucket contents, not just sensitive files (implies --no-limit unless --max-objects is set)")
+	GCPBucketEnumCommand.Flags().BoolVar(&bucketEnumNoLimit, "no-limit", false, "Remove the object limit (enumerate all objects in each bucket)")
 }
 
 type BucketEnumModule struct {
 	gcpinternal.BaseGCPModule
 	ProjectSensitiveFiles map[string][]bucketenumservice.SensitiveFileInfo // projectID -> files
+	ProjectAllObjects     map[string][]bucketenumservice.ObjectInfo        // projectID -> all objects (when --all-objects)
 	LootMap               map[string]map[string]*internal.LootFile         // projectID -> loot files
+	EnumerateAll          bool                                             // whether to enumerate all objects
+	MaxObjects            int                                              // max objects per bucket (0 = unlimited)
 	mu                    sync.Mutex
 }
 
@@ -69,39 +78,96 @@ func runGCPBucketEnumCommand(cmd *cobra.Command, args []string) {
 		return
 	}
 
+	// Determine effective max objects limit
+	effectiveMaxObjects := bucketEnumMaxObjects
+	maxObjectsExplicitlySet := cmd.Flags().Changed("max-objects")
+
+	// --no-limit flag sets unlimited
+	if bucketEnumNoLimit {
+		effectiveMaxObjects = 0
+	}
+
+	// --all-objects implies no limit UNLESS --max-objects was explicitly set
+	if bucketEnumAllObjects && !maxObjectsExplicitlySet {
+		effectiveMaxObjects = 0
+	}
+
 	module := &BucketEnumModule{
 		BaseGCPModule:         gcpinternal.NewBaseGCPModule(cmdCtx),
 		ProjectSensitiveFiles: make(map[string][]bucketenumservice.SensitiveFileInfo),
+		ProjectAllObjects:     make(map[string][]bucketenumservice.ObjectInfo),
 		LootMap:               make(map[string]map[string]*internal.LootFile),
+		EnumerateAll:          bucketEnumAllObjects,
+		MaxObjects:            effectiveMaxObjects,
 	}
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 }
 
 func (m *BucketEnumModule) Execute(ctx context.Context, logger internal.Logger) {
-	logger.InfoM(fmt.Sprintf("Scanning buckets for sensitive files (max %d objects per bucket)...", bucketEnumMaxObjects), globals.GCP_BUCKETENUM_MODULE_NAME)
+	maxMsg := fmt.Sprintf("%d", m.MaxObjects)
+	if m.MaxObjects == 0 {
+		maxMsg = "unlimited"
+	}
+
+	if m.EnumerateAll {
+		logger.InfoM(fmt.Sprintf("Enumerating ALL bucket contents (%s objects per bucket)...", maxMsg), globals.GCP_BUCKETENUM_MODULE_NAME)
+	} else {
+		logger.InfoM(fmt.Sprintf("Scanning buckets for sensitive files (%s objects per bucket)...", maxMsg), globals.GCP_BUCKETENUM_MODULE_NAME)
+	}
+
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_BUCKETENUM_MODULE_NAME, m.processProject)
 
-	allFiles := m.getAllSensitiveFiles()
-	if len(allFiles) == 0 {
-		logger.InfoM("No sensitive files found", globals.GCP_BUCKETENUM_MODULE_NAME)
-		return
-	}
-
-	// Count by risk level
-	criticalCount := 0
-	highCount := 0
-	for _, file := range allFiles {
-		switch file.RiskLevel {
-		case "CRITICAL":
-			criticalCount++
-		case "HIGH":
-			highCount++
+	if m.EnumerateAll {
+		// Full enumeration mode
+		allObjects := m.getAllObjects()
+		if len(allObjects) == 0 {
+			logger.InfoM("No objects found in buckets", globals.GCP_BUCKETENUM_MODULE_NAME)
+			return
 		}
+
+		// Count public objects
+		publicCount := 0
+		for _, obj := range allObjects {
+			if obj.IsPublic {
+				publicCount++
+			}
+		}
+
+		logger.SuccessM(fmt.Sprintf("Found %d object(s) across all buckets (%d public)",
+			len(allObjects), publicCount), globals.GCP_BUCKETENUM_MODULE_NAME)
+	} else {
+		// Sensitive files mode
+		allFiles := m.getAllSensitiveFiles()
+		if len(allFiles) == 0 {
+			logger.InfoM("No sensitive files found", globals.GCP_BUCKETENUM_MODULE_NAME)
+			return
+		}
+
+		// Count by risk level
+		criticalCount := 0
+		highCount := 0
+		for _, file := range allFiles {
+			switch file.RiskLevel {
+			case "CRITICAL":
+				criticalCount++
+			case "HIGH":
+				highCount++
+			}
+		}
+
+		logger.SuccessM(fmt.Sprintf("Found %d potentially sensitive file(s) (%d CRITICAL, %d HIGH)",
+			len(allFiles), criticalCount, highCount), globals.GCP_BUCKETENUM_MODULE_NAME)
 	}
 
-	logger.SuccessM(fmt.Sprintf("Found %d potentially sensitive file(s) (%d CRITICAL, %d HIGH)",
-		len(allFiles), criticalCount, highCount), globals.GCP_BUCKETENUM_MODULE_NAME)
 	m.writeOutput(ctx, logger)
+}
+
+func (m *BucketEnumModule) getAllObjects() []bucketenumservice.ObjectInfo {
+	var all []bucketenumservice.ObjectInfo
+	for _, objects := range m.ProjectAllObjects {
+		all = append(all, objects...)
+	}
+	return all
 }
 
 func (m *BucketEnumModule) getAllSensitiveFiles() []bucketenumservice.SensitiveFileInfo {
@@ -123,13 +189,20 @@ func (m *BucketEnumModule) processProject(ctx context.Context, projectID string,
 	// Initialize loot for this project
 	if m.LootMap[projectID] == nil {
 		m.LootMap[projectID] = make(map[string]*internal.LootFile)
-		m.LootMap[projectID]["bucket-enum-sensitive-commands"] = &internal.LootFile{
-			Name:     "bucket-enum-sensitive-commands",
-			Contents: "# GCS Download Commands for CRITICAL/HIGH Risk Files\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
-		}
-		m.LootMap[projectID]["bucket-enum-commands"] = &internal.LootFile{
-			Name:     "bucket-enum-commands",
-			Contents: "# GCS Download Commands for All Detected Files\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+		if m.EnumerateAll {
+			m.LootMap[projectID]["bucket-enum-all-commands"] = &internal.LootFile{
+				Name:     "bucket-enum-all-commands",
+				Contents: "# GCS Download Commands for All Objects\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+			}
+		} else {
+			m.LootMap[projectID]["bucket-enum-sensitive-commands"] = &internal.LootFile{
+				Name:     "bucket-enum-sensitive-commands",
+				Contents: "# GCS Download Commands for CRITICAL/HIGH Risk Files\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+			}
+			m.LootMap[projectID]["bucket-enum-commands"] = &internal.LootFile{
+				Name:     "bucket-enum-commands",
+				Contents: "# GCS Download Commands for All Detected Files\n# Generated by CloudFox\n# WARNING: Only use with proper authorization\n\n",
+			}
 		}
 	}
 	m.mu.Unlock()
@@ -147,25 +220,64 @@ func (m *BucketEnumModule) processProject(ctx context.Context, projectID string,
 		logger.InfoM(fmt.Sprintf("Found %d bucket(s) in project %s", len(buckets), projectID), globals.GCP_BUCKETENUM_MODULE_NAME)
 	}
 
-	// Scan each bucket
-	var projectFiles []bucketenumservice.SensitiveFileInfo
-	for _, bucketName := range buckets {
-		files, err := svc.EnumerateBucketSensitiveFiles(bucketName, projectID, bucketEnumMaxObjects)
-		if err != nil {
-			m.CommandCounter.Error++
-			gcpinternal.HandleGCPError(err, logger, globals.GCP_BUCKETENUM_MODULE_NAME,
-				fmt.Sprintf("Could not scan bucket %s in project %s", bucketName, projectID))
-			continue
+	if m.EnumerateAll {
+		// Enumerate ALL objects in each bucket
+		var projectObjects []bucketenumservice.ObjectInfo
+		for _, bucketName := range buckets {
+			objects, err := svc.EnumerateAllBucketObjects(bucketName, projectID, m.MaxObjects)
+			if err != nil {
+				m.CommandCounter.Error++
+				gcpinternal.HandleGCPError(err, logger, globals.GCP_BUCKETENUM_MODULE_NAME,
+					fmt.Sprintf("Could not enumerate bucket %s in project %s", bucketName, projectID))
+				continue
+			}
+			projectObjects = append(projectObjects, objects...)
 		}
-		projectFiles = append(projectFiles, files...)
-	}
 
-	m.mu.Lock()
-	m.ProjectSensitiveFiles[projectID] = projectFiles
-	for _, file := range projectFiles {
-		m.addFileToLoot(projectID, file)
+		m.mu.Lock()
+		m.ProjectAllObjects[projectID] = projectObjects
+		for _, obj := range projectObjects {
+			m.addObjectToLoot(projectID, obj)
+		}
+		m.mu.Unlock()
+	} else {
+		// Scan for sensitive files only
+		var projectFiles []bucketenumservice.SensitiveFileInfo
+		for _, bucketName := range buckets {
+			files, err := svc.EnumerateBucketSensitiveFiles(bucketName, projectID, m.MaxObjects)
+			if err != nil {
+				m.CommandCounter.Error++
+				gcpinternal.HandleGCPError(err, logger, globals.GCP_BUCKETENUM_MODULE_NAME,
+					fmt.Sprintf("Could not scan bucket %s in project %s", bucketName, projectID))
+				continue
+			}
+			projectFiles = append(projectFiles, files...)
+		}
+
+		m.mu.Lock()
+		m.ProjectSensitiveFiles[projectID] = projectFiles
+		for _, file := range projectFiles {
+			m.addFileToLoot(projectID, file)
+		}
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
+}
+
+func (m *BucketEnumModule) addObjectToLoot(projectID string, obj bucketenumservice.ObjectInfo) {
+	if lootFile := m.LootMap[projectID]["bucket-enum-all-commands"]; lootFile != nil {
+		publicMarker := ""
+		if obj.IsPublic {
+			publicMarker = " [PUBLIC]"
+		}
+		lootFile.Contents += fmt.Sprintf(
+			"# gs://%s/%s%s\n"+
+				"# Size: %d bytes, Type: %s\n"+
+				"%s\n\n",
+			obj.BucketName, obj.ObjectName, publicMarker,
+			obj.Size, obj.ContentType,
+			obj.DownloadCmd,
+		)
+	}
 }
 
 func (m *BucketEnumModule) addFileToLoot(projectID string, file bucketenumservice.SensitiveFileInfo) {
@@ -214,6 +326,10 @@ func (m *BucketEnumModule) getSensitiveFilesHeader() []string {
 	return []string{"Project ID", "Project Name", "Bucket", "Object Name", "Category", "Size", "Public"}
 }
 
+func (m *BucketEnumModule) getAllObjectsHeader() []string {
+	return []string{"Project ID", "Project Name", "Bucket", "Object Name", "Content Type", "Size", "Public", "Updated"}
+}
+
 func (m *BucketEnumModule) filesToTableBody(files []bucketenumservice.SensitiveFileInfo) [][]string {
 	var body [][]string
 	for _, file := range files {
@@ -257,24 +373,58 @@ func (m *BucketEnumModule) sensitiveFilesToTableBody(files []bucketenumservice.S
 	return body
 }
 
+func (m *BucketEnumModule) allObjectsToTableBody(objects []bucketenumservice.ObjectInfo) [][]string {
+	var body [][]string
+	for _, obj := range objects {
+		publicStatus := "No"
+		if obj.IsPublic {
+			publicStatus = "Yes"
+		}
+		body = append(body, []string{
+			obj.ProjectID,
+			m.GetProjectName(obj.ProjectID),
+			obj.BucketName,
+			obj.ObjectName,
+			obj.ContentType,
+			formatFileSize(obj.Size),
+			publicStatus,
+			obj.Updated,
+		})
+	}
+	return body
+}
+
 func (m *BucketEnumModule) buildTablesForProject(projectID string) []internal.TableFile {
 	var tableFiles []internal.TableFile
 
-	files := m.ProjectSensitiveFiles[projectID]
-	if len(files) > 0 {
-		tableFiles = append(tableFiles, internal.TableFile{
-			Name:   "bucket-enum",
-			Header: m.getFilesHeader(),
-			Body:   m.filesToTableBody(files),
-		})
-
-		sensitiveBody := m.sensitiveFilesToTableBody(files)
-		if len(sensitiveBody) > 0 {
+	if m.EnumerateAll {
+		// Full enumeration mode
+		objects := m.ProjectAllObjects[projectID]
+		if len(objects) > 0 {
 			tableFiles = append(tableFiles, internal.TableFile{
-				Name:   "bucket-enum-sensitive",
-				Header: m.getSensitiveFilesHeader(),
-				Body:   sensitiveBody,
+				Name:   "bucket-enum-all",
+				Header: m.getAllObjectsHeader(),
+				Body:   m.allObjectsToTableBody(objects),
 			})
+		}
+	} else {
+		// Sensitive files mode
+		files := m.ProjectSensitiveFiles[projectID]
+		if len(files) > 0 {
+			tableFiles = append(tableFiles, internal.TableFile{
+				Name:   "bucket-enum",
+				Header: m.getFilesHeader(),
+				Body:   m.filesToTableBody(files),
+			})
+
+			sensitiveBody := m.sensitiveFilesToTableBody(files)
+			if len(sensitiveBody) > 0 {
+				tableFiles = append(tableFiles, internal.TableFile{
+					Name:   "bucket-enum-sensitive",
+					Header: m.getSensitiveFilesHeader(),
+					Body:   sensitiveBody,
+				})
+			}
 		}
 	}
 
@@ -287,7 +437,19 @@ func (m *BucketEnumModule) writeHierarchicalOutput(ctx context.Context, logger i
 		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
 	}
 
-	for projectID := range m.ProjectSensitiveFiles {
+	// Get the appropriate project map based on mode
+	var projectIDs []string
+	if m.EnumerateAll {
+		for projectID := range m.ProjectAllObjects {
+			projectIDs = append(projectIDs, projectID)
+		}
+	} else {
+		for projectID := range m.ProjectSensitiveFiles {
+			projectIDs = append(projectIDs, projectID)
+		}
+	}
+
+	for _, projectID := range projectIDs {
 		tableFiles := m.buildTablesForProject(projectID)
 
 		var lootFiles []internal.LootFile
@@ -311,25 +473,48 @@ func (m *BucketEnumModule) writeHierarchicalOutput(ctx context.Context, logger i
 }
 
 func (m *BucketEnumModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
-	allFiles := m.getAllSensitiveFiles()
-
 	var tables []internal.TableFile
 
-	if len(allFiles) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "bucket-enum",
-			Header: m.getFilesHeader(),
-			Body:   m.filesToTableBody(allFiles),
-		})
-
-		sensitiveBody := m.sensitiveFilesToTableBody(allFiles)
-		if len(sensitiveBody) > 0 {
+	if m.EnumerateAll {
+		// Full enumeration mode
+		allObjects := m.getAllObjects()
+		if len(allObjects) > 0 {
 			tables = append(tables, internal.TableFile{
-				Name:   "bucket-enum-sensitive",
-				Header: m.getSensitiveFilesHeader(),
-				Body:   sensitiveBody,
+				Name:   "bucket-enum-all",
+				Header: m.getAllObjectsHeader(),
+				Body:   m.allObjectsToTableBody(allObjects),
 			})
-			logger.InfoM(fmt.Sprintf("[FINDING] Found %d CRITICAL/HIGH risk files!", len(sensitiveBody)), globals.GCP_BUCKETENUM_MODULE_NAME)
+
+			// Count public objects
+			publicCount := 0
+			for _, obj := range allObjects {
+				if obj.IsPublic {
+					publicCount++
+				}
+			}
+			if publicCount > 0 {
+				logger.InfoM(fmt.Sprintf("[FINDING] Found %d publicly accessible object(s)!", publicCount), globals.GCP_BUCKETENUM_MODULE_NAME)
+			}
+		}
+	} else {
+		// Sensitive files mode
+		allFiles := m.getAllSensitiveFiles()
+		if len(allFiles) > 0 {
+			tables = append(tables, internal.TableFile{
+				Name:   "bucket-enum",
+				Header: m.getFilesHeader(),
+				Body:   m.filesToTableBody(allFiles),
+			})
+
+			sensitiveBody := m.sensitiveFilesToTableBody(allFiles)
+			if len(sensitiveBody) > 0 {
+				tables = append(tables, internal.TableFile{
+					Name:   "bucket-enum-sensitive",
+					Header: m.getSensitiveFilesHeader(),
+					Body:   sensitiveBody,
+				})
+				logger.InfoM(fmt.Sprintf("[FINDING] Found %d CRITICAL/HIGH risk files!", len(sensitiveBody)), globals.GCP_BUCKETENUM_MODULE_NAME)
+			}
 		}
 	}
 

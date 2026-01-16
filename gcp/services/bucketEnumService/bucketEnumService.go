@@ -269,6 +269,71 @@ func (s *BucketEnumService) isFalsePositive(objectName string, pattern Sensitive
 	return false
 }
 
+// ObjectInfo represents any file in a bucket (for full enumeration)
+type ObjectInfo struct {
+	BucketName   string `json:"bucketName"`
+	ObjectName   string `json:"objectName"`
+	ProjectID    string `json:"projectId"`
+	Size         int64  `json:"size"`
+	ContentType  string `json:"contentType"`
+	Updated      string `json:"updated"`
+	StorageClass string `json:"storageClass"`
+	IsPublic     bool   `json:"isPublic"`
+	DownloadCmd  string `json:"downloadCmd"`
+}
+
+// EnumerateAllBucketObjects lists ALL objects in a bucket (no filtering)
+func (s *BucketEnumService) EnumerateAllBucketObjects(bucketName, projectID string, maxObjects int) ([]ObjectInfo, error) {
+	ctx := context.Background()
+	var storageService *storage.Service
+	var err error
+
+	if s.session != nil {
+		storageService, err = storage.NewService(ctx, s.session.GetClientOption())
+	} else {
+		storageService, err = storage.NewService(ctx)
+	}
+	if err != nil {
+		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
+	}
+
+	var objects []ObjectInfo
+	objectCount := 0
+
+	// List objects in the bucket
+	req := storageService.Objects.List(bucketName)
+
+	err = req.Pages(ctx, func(objList *storage.Objects) error {
+		for _, obj := range objList.Items {
+			if maxObjects > 0 && objectCount >= maxObjects {
+				return iterator.Done
+			}
+
+			isPublic := s.isObjectPublic(obj)
+
+			objects = append(objects, ObjectInfo{
+				BucketName:   bucketName,
+				ObjectName:   obj.Name,
+				ProjectID:    projectID,
+				Size:         int64(obj.Size),
+				ContentType:  obj.ContentType,
+				Updated:      obj.Updated,
+				StorageClass: obj.StorageClass,
+				IsPublic:     isPublic,
+				DownloadCmd:  fmt.Sprintf("gsutil cp gs://%s/%s .", bucketName, obj.Name),
+			})
+			objectCount++
+		}
+		return nil
+	})
+
+	if err != nil && err != iterator.Done {
+		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
+	}
+
+	return objects, nil
+}
+
 // GetBucketsList lists all buckets in a project
 func (s *BucketEnumService) GetBucketsList(projectID string) ([]string, error) {
 	ctx := context.Background()
