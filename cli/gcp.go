@@ -33,8 +33,8 @@ var (
 	GCPWrapTable       bool
 	GCPFlatOutput      bool
 
-	// Privesc analysis flag
-	GCPWithPrivesc bool
+	// Attack path analysis flag
+	GCPAttackPaths bool
 
 	// misc options
 	// GCPIgnoreCache		bool
@@ -115,14 +115,15 @@ var (
 				}
 			}
 
-			// If --with-privesc flag is set, run privesc analysis and populate cache
-			// This allows individual modules to show the Priv Esc column
-			if GCPWithPrivesc && len(GCPProjectIDs) > 0 {
-				GCPLogger.InfoM("Running privilege escalation analysis (--with-privesc)...", "gcp")
-				privescCache := runPrivescAndPopulateCache(ctx)
-				if privescCache != nil && privescCache.IsPopulated() {
-					ctx = gcpinternal.SetPrivescCacheInContext(ctx, privescCache)
-					GCPLogger.SuccessM("Privesc cache populated - modules will show Priv Esc column", "gcp")
+			// If --attack-paths flag is set, run attack path analysis and populate cache
+			// This allows individual modules to show the Attack Paths column
+			if GCPAttackPaths && len(GCPProjectIDs) > 0 {
+				GCPLogger.InfoM("Running attack path analysis (privesc/exfil/lateral)...", "gcp")
+				attackPathCache := runAttackPathAnalysisAndPopulateCache(ctx)
+				if attackPathCache != nil && attackPathCache.IsPopulated() {
+					ctx = gcpinternal.SetAttackPathCacheInContext(ctx, attackPathCache)
+					privesc, exfil, lateral := attackPathCache.GetStats()
+					GCPLogger.SuccessM(fmt.Sprintf("Attack path cache populated: %d privesc, %d exfil, %d lateral - modules will show Attack Paths column", privesc, exfil, lateral), "gcp")
 				}
 			}
 
@@ -222,12 +223,13 @@ var GCPAllChecksCommand = &cobra.Command{
 			privescCmd.Run(cmd, args)
 			executedModules = append(executedModules, "privesc")
 
-			// After running privesc, populate cache from the analysis for other modules
-			privescCache := runPrivescAndPopulateCache(ctx)
-			if privescCache != nil && privescCache.IsPopulated() {
-				ctx = gcpinternal.SetPrivescCacheInContext(ctx, privescCache)
+			// After running privesc, populate attack path cache for other modules
+			attackPathCache := runAttackPathAnalysisAndPopulateCache(ctx)
+			if attackPathCache != nil && attackPathCache.IsPopulated() {
+				ctx = gcpinternal.SetAttackPathCacheInContext(ctx, attackPathCache)
 				cmd.SetContext(ctx)
-				GCPLogger.SuccessM("Privesc cache populated - other modules will show Priv Esc column", "all-checks")
+				privesc, exfil, lateral := attackPathCache.GetStats()
+				GCPLogger.SuccessM(fmt.Sprintf("Attack path cache populated: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "all-checks")
 			}
 			GCPLogger.InfoM("", "all-checks")
 		}
@@ -392,7 +394,7 @@ func init() {
 	// GCPCommands.PersistentFlags().IntVarP(&Goroutines, "max-goroutines", "g", 30, "Maximum number of concurrent goroutines")
 	GCPCommands.PersistentFlags().BoolVarP(&GCPWrapTable, "wrap", "w", false, "Wrap table to fit in terminal (complicates grepping)")
 	GCPCommands.PersistentFlags().BoolVar(&GCPFlatOutput, "flat-output", false, "Use legacy flat output structure instead of hierarchical per-project directories")
-	GCPCommands.PersistentFlags().BoolVar(&GCPWithPrivesc, "with-privesc", false, "Run privilege escalation analysis and add Priv Esc column to output (runs privesc first)")
+	GCPCommands.PersistentFlags().BoolVar(&GCPAttackPaths, "attack-paths", false, "Run attack path analysis (privesc/exfil/lateral) and add Attack Paths column to module output")
 
 	// Available commands
 	GCPCommands.AddCommand(
