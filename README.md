@@ -300,8 +300,28 @@ For detailed documentation on each GCP command, see the [GCP Commands Wiki](http
 | GCP | [backup-inventory](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#backup-inventory) | Enumerate backup policies, protected resources, and identify backup gaps |
 
 ## Attack Path Analysis
+
+CloudFox GCP uses a **unified attack path analysis** system that combines privilege escalation, lateral movement, and data exfiltration analysis. The three attack path modules share a common backend (`attackpathService`) that analyzes IAM policies across all 4 hierarchy levels: Organization → Folder → Project → Resource.
+
+### `--attack-paths` Global Flag
+
+When running compute/service modules, add `--attack-paths` to see attack path capabilities for service accounts:
+
+```bash
+# Run instances module with attack path analysis
+cloudfox gcp instances -p my-project --attack-paths
+
+# Run service accounts with attack paths
+cloudfox gcp serviceaccounts --all-projects --attack-paths
+```
+
+This adds an **"Attack Paths"** column showing: `Yes (P:3 E:2 L:1)` where P=Privesc, E=Exfil, L=Lateral counts.
+
+**Modules supporting `--attack-paths`**: instances, serviceaccounts, functions, cloudrun, gke, composer, dataproc, dataflow, notebooks, cloudbuild, scheduler, appengine
+
 | Provider | Command Name | Description |
 | - | - | - |
+| GCP | [privesc](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#privesc) | Identify privilege escalation paths (SA impersonation, key creation, IAM modification) |
 | GCP | [lateral-movement](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#lateral-movement) | Map lateral movement paths, credential theft vectors, and pivot opportunities |
 | GCP | [data-exfiltration](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#data-exfiltration) | Identify data exfiltration paths, potential vectors, and missing security hardening |
 | GCP | [public-access](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#public-access) | Find resources with allUsers/allAuthenticatedUsers access across 16 GCP services |

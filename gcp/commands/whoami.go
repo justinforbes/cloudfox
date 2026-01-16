@@ -1446,6 +1446,8 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 	if m.Extended {
 		identityBody = append(identityBody, []string{"Impersonation Targets", fmt.Sprintf("%d", len(m.ImpersonationTargets))})
 		identityBody = append(identityBody, []string{"Privilege Escalation Paths", fmt.Sprintf("%d", len(m.PrivEscPaths))})
+		identityBody = append(identityBody, []string{"Lateral Movement Paths", fmt.Sprintf("%d", len(m.LateralMoveCapabilities))})
+		identityBody = append(identityBody, []string{"Data Exfiltration Paths", fmt.Sprintf("%d", len(m.DataExfilCapabilities))})
 	}
 
 	// Role bindings table
