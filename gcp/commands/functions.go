@@ -55,7 +55,7 @@ type FunctionsModule struct {
 	// Module-specific fields - per-project for hierarchical output
 	ProjectFunctions map[string][]FunctionsService.FunctionInfo // projectID -> functions
 	LootMap          map[string]map[string]*internal.LootFile   // projectID -> loot files
-	PrivescCache     *gcpinternal.PrivescCache                  // Cached privesc analysis results
+	AttackPathCache  *gcpinternal.AttackPathCache               // Cached attack path analysis results
 	mu               sync.Mutex
 }
 
@@ -92,8 +92,8 @@ func runGCPFunctionsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *FunctionsModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_FUNCTIONS_MODULE_NAME, m.processProject)
 
@@ -418,7 +418,7 @@ func (m *FunctionsModule) getTableHeader() []string {
 		"Ingress",
 		"Public",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"VPC Connector",
 		"Secrets",
 		"Resource Role",
@@ -461,13 +461,13 @@ func (m *FunctionsModule) functionsToTableBody(functions []FunctionsService.Func
 			serviceAccount = "-"
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if serviceAccount != "-" {
-				privEsc = m.PrivescCache.GetPrivescSummary(serviceAccount)
+				attackPaths = m.AttackPathCache.GetAttackSummary(serviceAccount)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
@@ -486,7 +486,7 @@ func (m *FunctionsModule) functionsToTableBody(functions []FunctionsService.Func
 					fn.IngressSettings,
 					boolToYesNo(fn.IsPublic),
 					serviceAccount,
-					privEsc,
+					attackPaths,
 					vpcConnector,
 					secretsInfo,
 					binding.Role,
@@ -507,7 +507,7 @@ func (m *FunctionsModule) functionsToTableBody(functions []FunctionsService.Func
 				fn.IngressSettings,
 				boolToYesNo(fn.IsPublic),
 				serviceAccount,
-				privEsc,
+				attackPaths,
 				vpcConnector,
 				secretsInfo,
 				"-",

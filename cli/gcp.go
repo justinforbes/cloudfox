@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/BishopFox/cloudfox/gcp/commands"
+	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
 	oauthservice "github.com/BishopFox/cloudfox/gcp/services/oauthService"
 	orgsservice "github.com/BishopFox/cloudfox/gcp/services/organizationsService"
-	privescservice "github.com/BishopFox/cloudfox/gcp/services/privescService"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/spf13/cobra"
@@ -263,9 +263,9 @@ var GCPAllChecksCommand = &cobra.Command{
 	},
 }
 
-// runPrivescAndPopulateCache runs the privesc analysis and returns a populated cache
-func runPrivescAndPopulateCache(ctx context.Context) *gcpinternal.PrivescCache {
-	cache := gcpinternal.NewPrivescCache()
+// runAttackPathAnalysisAndPopulateCache runs attack path analysis for all types and returns a populated cache
+func runAttackPathAnalysisAndPopulateCache(ctx context.Context) *gcpinternal.AttackPathCache {
+	cache := gcpinternal.NewAttackPathCache()
 
 	// Get project IDs from context
 	projectIDs, ok := ctx.Value("projectIDs").([]string)
@@ -279,33 +279,58 @@ func runPrivescAndPopulateCache(ctx context.Context) *gcpinternal.PrivescCache {
 		projectNames = make(map[string]string)
 	}
 
-	// Run privesc analysis
-	svc := privescservice.New()
-	result, err := svc.CombinedPrivescAnalysis(ctx, projectIDs, projectNames)
+	// Use unified attackpathService for all 3 types
+	svc := attackpathservice.New()
+
+	// Run analysis for all attack path types
+	result, err := svc.CombinedAttackPathAnalysis(ctx, projectIDs, projectNames, "all")
 	if err != nil {
-		GCPLogger.ErrorM(fmt.Sprintf("Failed to run privesc analysis: %v", err), "all-checks")
+		GCPLogger.ErrorM(fmt.Sprintf("Failed to run attack path analysis: %v", err), "all-checks")
 		return cache
 	}
 
-	// Convert privesc paths to cache format
-	var pathInfos []gcpinternal.PrivescPathInfo
+	// Convert paths to cache format
+	var pathInfos []gcpinternal.AttackPathInfo
 	for _, path := range result.AllPaths {
-		pathInfos = append(pathInfos, gcpinternal.PrivescPathInfo{
+		var pathType gcpinternal.AttackPathType
+		switch path.PathType {
+		case "privesc":
+			pathType = gcpinternal.AttackPathPrivesc
+		case "exfil":
+			pathType = gcpinternal.AttackPathExfil
+		case "lateral":
+			pathType = gcpinternal.AttackPathLateral
+		default:
+			continue
+		}
+
+		pathInfos = append(pathInfos, gcpinternal.AttackPathInfo{
 			Principal:     path.Principal,
 			PrincipalType: path.PrincipalType,
 			Method:        path.Method,
+			PathType:      pathType,
+			Category:      path.Category,
 			RiskLevel:     path.RiskLevel,
 			Target:        path.TargetResource,
 			Permissions:   path.Permissions,
+			ScopeType:     path.ScopeType,
+			ScopeID:       path.ScopeID,
 		})
 	}
 
 	// Populate cache
 	cache.PopulateFromPaths(pathInfos)
 
-	GCPLogger.InfoM(fmt.Sprintf("Found %d privilege escalation path(s)", len(result.AllPaths)), "all-checks")
+	privesc, exfil, lateral := cache.GetStats()
+	GCPLogger.InfoM(fmt.Sprintf("Attack path analysis: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "all-checks")
 
 	return cache
+}
+
+// runPrivescAndPopulateCache is kept for backward compatibility
+// DEPRECATED: Use runAttackPathAnalysisAndPopulateCache instead
+func runPrivescAndPopulateCache(ctx context.Context) *gcpinternal.PrivescCache {
+	return runAttackPathAnalysisAndPopulateCache(ctx)
 }
 
 // printExecutionSummary prints a summary of all executed modules

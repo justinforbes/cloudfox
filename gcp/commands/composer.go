@@ -32,7 +32,7 @@ type ComposerModule struct {
 	gcpinternal.BaseGCPModule
 	ProjectEnvironments map[string][]composerservice.EnvironmentInfo // projectID -> environments
 	LootMap             map[string]map[string]*internal.LootFile     // projectID -> loot files
-	PrivescCache        *gcpinternal.PrivescCache                    // Cached privesc analysis results
+	AttackPathCache     *gcpinternal.AttackPathCache                 // Cached attack path analysis results
 	mu                  sync.Mutex
 }
 
@@ -59,8 +59,8 @@ func runGCPComposerCommand(cmd *cobra.Command, args []string) {
 }
 
 func (m *ComposerModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_COMPOSER_MODULE_NAME, m.processProject)
 
@@ -182,7 +182,7 @@ func (m *ComposerModule) getTableHeader() []string {
 		"Location",
 		"State",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"Private",
 		"Private Endpoint",
 		"Airflow URI",
@@ -199,13 +199,13 @@ func (m *ComposerModule) environmentsToTableBody(environments []composerservice.
 			sa = "(default)"
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
-				privEsc = m.PrivescCache.GetPrivescSummary(sa)
+				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
@@ -231,7 +231,7 @@ func (m *ComposerModule) environmentsToTableBody(environments []composerservice.
 			env.Location,
 			env.State,
 			sa,
-			privEsc,
+			attackPaths,
 			boolToYesNo(env.PrivateEnvironment),
 			boolToYesNo(env.EnablePrivateEndpoint),
 			airflowURI,

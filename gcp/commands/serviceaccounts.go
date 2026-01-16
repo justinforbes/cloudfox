@@ -57,7 +57,7 @@ type ServiceAccountsModule struct {
 	// Module-specific fields - per-project for hierarchical output
 	ProjectServiceAccounts map[string][]ServiceAccountAnalysis      // projectID -> service accounts
 	LootMap                map[string]map[string]*internal.LootFile // projectID -> loot files
-	PrivescCache           *gcpinternal.PrivescCache                // Cached privesc analysis results
+	AttackPathCache        *gcpinternal.AttackPathCache             // Cached attack path analysis results
 	mu                     sync.Mutex
 }
 
@@ -97,8 +97,8 @@ func runGCPServiceAccountsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *ServiceAccountsModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	// Run enumeration with concurrency
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_SERVICEACCOUNTS_MODULE_NAME, m.processProject)
@@ -386,7 +386,7 @@ func (m *ServiceAccountsModule) getTableHeader() []string {
 		"Project Name",
 		"Project ID",
 		"Email",
-		"Priv Esc",
+		"Attack Paths",
 		"Display Name",
 		"Disabled",
 		"Default SA",
@@ -417,10 +417,10 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 			dwd = "Yes"
 		}
 
-		// Check privesc for this service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
-			privEsc = m.PrivescCache.GetPrivescSummary(sa.Email)
+		// Check attack paths (privesc/exfil/lateral) for this service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
+			attackPaths = m.AttackPathCache.GetAttackSummary(sa.Email)
 		}
 
 		// Count user-managed keys
@@ -443,7 +443,7 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, privEsc, sa.DisplayName,
+						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
 						disabled, defaultSA, dwd, keyCount, "TokenCreator", member,
 					})
 				}
@@ -453,7 +453,7 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, privEsc, sa.DisplayName,
+						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
 						disabled, defaultSA, dwd, keyCount, "KeyAdmin", member,
 					})
 				}
@@ -463,7 +463,7 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, privEsc, sa.DisplayName,
+						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
 						disabled, defaultSA, dwd, keyCount, "ActAs", member,
 					})
 				}
@@ -473,7 +473,7 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, privEsc, sa.DisplayName,
+						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
 						disabled, defaultSA, dwd, keyCount, "SAAdmin", member,
 					})
 				}
@@ -483,7 +483,7 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, privEsc, sa.DisplayName,
+						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
 						disabled, defaultSA, dwd, keyCount, "SignBlob", member,
 					})
 				}
@@ -493,7 +493,7 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, privEsc, sa.DisplayName,
+						m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
 						disabled, defaultSA, dwd, keyCount, "SignJwt", member,
 					})
 				}
@@ -502,7 +502,7 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 
 		if !hasBindings {
 			body = append(body, []string{
-				m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, privEsc, sa.DisplayName,
+				m.GetProjectName(sa.ProjectID), sa.ProjectID, sa.Email, attackPaths, sa.DisplayName,
 				disabled, defaultSA, dwd, keyCount, "-", "-",
 			})
 		}

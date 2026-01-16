@@ -62,7 +62,7 @@ type GKEModule struct {
 	ProjectClusters  map[string][]GKEService.ClusterInfo       // projectID -> clusters
 	ProjectNodePools map[string][]GKEService.NodePoolInfo      // projectID -> node pools
 	LootMap          map[string]map[string]*internal.LootFile  // projectID -> loot files
-	PrivescCache     *gcpinternal.PrivescCache                 // Cached privesc analysis results
+	AttackPathCache  *gcpinternal.AttackPathCache              // Cached attack path analysis results
 	mu               sync.Mutex
 }
 
@@ -100,8 +100,8 @@ func runGCPGKECommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *GKEModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_GKE_MODULE_NAME, m.processProject)
 
@@ -373,7 +373,7 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 	// Node pools table
 	nodePoolHeader := []string{
 		"Project Name", "Project ID", "Cluster", "Node Pool", "Machine Type", "Node Count",
-		"Service Account", "Priv Esc", "Cloud Platform Scope", "Auto Upgrade", "Secure Boot", "Preemptible",
+		"Service Account", "Attack Paths", "Cloud Platform Scope", "Auto Upgrade", "Secure Boot", "Preemptible",
 	}
 
 	var nodePoolBody [][]string
@@ -383,19 +383,19 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 			saDisplay = "-"
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if saDisplay != "-" {
-				privEsc = m.PrivescCache.GetPrivescSummary(saDisplay)
+				attackPaths = m.AttackPathCache.GetAttackSummary(saDisplay)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
 		nodePoolBody = append(nodePoolBody, []string{
 			m.GetProjectName(np.ProjectID), np.ProjectID, np.ClusterName, np.Name,
-			np.MachineType, fmt.Sprintf("%d", np.NodeCount), saDisplay, privEsc,
+			np.MachineType, fmt.Sprintf("%d", np.NodeCount), saDisplay, attackPaths,
 			boolToYesNo(np.HasCloudPlatformScope), boolToYesNo(np.AutoUpgrade),
 			boolToYesNo(np.SecureBoot), boolToYesNo(np.Preemptible || np.Spot),
 		})

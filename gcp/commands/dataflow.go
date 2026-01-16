@@ -32,7 +32,7 @@ type DataflowModule struct {
 	gcpinternal.BaseGCPModule
 	ProjectJobs  map[string][]dataflowservice.JobInfo    // projectID -> jobs
 	LootMap      map[string]map[string]*internal.LootFile // projectID -> loot files
-	PrivescCache *gcpinternal.PrivescCache               // Cached privesc analysis results
+	AttackPathCache *gcpinternal.AttackPathCache         // Cached attack path analysis results
 	mu           sync.Mutex
 }
 
@@ -59,8 +59,8 @@ func runGCPDataflowCommand(cmd *cobra.Command, args []string) {
 }
 
 func (m *DataflowModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_DATAFLOW_MODULE_NAME, m.processProject)
 
@@ -176,7 +176,7 @@ func (m *DataflowModule) getTableHeader() []string {
 		"State",
 		"Location",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"Public IPs",
 		"Workers",
 	}
@@ -190,13 +190,13 @@ func (m *DataflowModule) jobsToTableBody(jobs []dataflowservice.JobInfo) [][]str
 			publicIPs = "Yes"
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if job.ServiceAccount != "" {
-				privEsc = m.PrivescCache.GetPrivescSummary(job.ServiceAccount)
+				attackPaths = m.AttackPathCache.GetAttackSummary(job.ServiceAccount)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
@@ -208,7 +208,7 @@ func (m *DataflowModule) jobsToTableBody(jobs []dataflowservice.JobInfo) [][]str
 			job.State,
 			job.Location,
 			job.ServiceAccount,
-			privEsc,
+			attackPaths,
 			publicIPs,
 			fmt.Sprintf("%d", job.NumWorkers),
 		})

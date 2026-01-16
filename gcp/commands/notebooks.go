@@ -33,7 +33,7 @@ type NotebooksModule struct {
 	ProjectInstances map[string][]notebooksservice.NotebookInstanceInfo // projectID -> instances
 	ProjectRuntimes  map[string][]notebooksservice.RuntimeInfo          // projectID -> runtimes
 	LootMap          map[string]map[string]*internal.LootFile           // projectID -> loot files
-	PrivescCache     *gcpinternal.PrivescCache                          // Cached privesc analysis results
+	AttackPathCache  *gcpinternal.AttackPathCache                       // Cached attack path analysis results
 	mu               sync.Mutex
 }
 
@@ -61,8 +61,8 @@ func runGCPNotebooksCommand(cmd *cobra.Command, args []string) {
 }
 
 func (m *NotebooksModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_NOTEBOOKS_MODULE_NAME, m.processProject)
 
@@ -196,7 +196,7 @@ func (m *NotebooksModule) getInstancesHeader() []string {
 		"State",
 		"Machine Type",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"Network",
 		"Subnet",
 		"Public IP",
@@ -217,7 +217,7 @@ func (m *NotebooksModule) getRuntimesHeader() []string {
 		"Type",
 		"Machine Type",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"Network",
 		"Subnet",
 	}
@@ -235,13 +235,13 @@ func (m *NotebooksModule) instancesToTableBody(instances []notebooksservice.Note
 			sa = "(default)"
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
-				privEsc = m.PrivescCache.GetPrivescSummary(sa)
+				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
@@ -269,7 +269,7 @@ func (m *NotebooksModule) instancesToTableBody(instances []notebooksservice.Note
 			instance.State,
 			instance.MachineType,
 			sa,
-			privEsc,
+			attackPaths,
 			network,
 			subnet,
 			boolToYesNo(!instance.NoPublicIP),
@@ -290,13 +290,13 @@ func (m *NotebooksModule) runtimesToTableBody(runtimes []notebooksservice.Runtim
 			sa = "-"
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "-" && sa != "" {
-				privEsc = m.PrivescCache.GetPrivescSummary(sa)
+				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
@@ -317,7 +317,7 @@ func (m *NotebooksModule) runtimesToTableBody(runtimes []notebooksservice.Runtim
 			runtime.RuntimeType,
 			runtime.MachineType,
 			sa,
-			privEsc,
+			attackPaths,
 			network,
 			subnet,
 		})

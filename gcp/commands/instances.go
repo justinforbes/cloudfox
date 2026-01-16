@@ -55,7 +55,7 @@ type InstancesModule struct {
 	ProjectInstances map[string][]ComputeEngineService.ComputeEngineInfo    // projectID -> instances
 	ProjectMetadata  map[string]*ComputeEngineService.ProjectMetadataInfo   // projectID -> metadata
 	LootMap          map[string]map[string]*internal.LootFile               // projectID -> loot files
-	PrivescCache     *gcpinternal.PrivescCache                              // Cached privesc analysis results
+	AttackPathCache  *gcpinternal.AttackPathCache                           // Cached attack path analysis results
 	mu               sync.Mutex
 }
 
@@ -96,8 +96,8 @@ func runGCPInstancesCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *InstancesModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	// Run enumeration with concurrency
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_INSTANCES_MODULE_NAME, m.processProject)
@@ -552,7 +552,7 @@ func (m *InstancesModule) getInstancesTableHeader() []string {
 		"External IP",
 		"Internal IP",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"Scopes",
 		"Default SA",
 		"Broad Scopes",
@@ -598,13 +598,13 @@ func (m *InstancesModule) instancesToTableBody(instances []ComputeEngineService.
 			scopes = ComputeEngineService.FormatScopes(instance.ServiceAccounts[0].Scopes)
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if saEmail != "-" {
-				privEsc = m.PrivescCache.GetPrivescSummary(saEmail)
+				attackPaths = m.AttackPathCache.GetAttackSummary(saEmail)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
@@ -637,7 +637,7 @@ func (m *InstancesModule) instancesToTableBody(instances []ComputeEngineService.
 			externalIP,
 			instance.InternalIP,
 			saEmail,
-			privEsc,
+			attackPaths,
 			scopes,
 			boolToYesNo(instance.HasDefaultSA),
 			boolToYesNo(instance.HasCloudScopes),

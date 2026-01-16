@@ -52,7 +52,7 @@ type CloudRunModule struct {
 	ProjectServices map[string][]CloudRunService.ServiceInfo // projectID -> services
 	ProjectJobs     map[string][]CloudRunService.JobInfo     // projectID -> jobs
 	LootMap         map[string]map[string]*internal.LootFile // projectID -> loot files
-	PrivescCache    *gcpinternal.PrivescCache                // Cached privesc analysis results
+	AttackPathCache *gcpinternal.AttackPathCache             // Cached attack path analysis results
 	mu              sync.Mutex
 }
 
@@ -90,8 +90,8 @@ func runGCPCloudRunCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *CloudRunModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_CLOUDRUN_MODULE_NAME, m.processProject)
 
@@ -470,7 +470,7 @@ func (m *CloudRunModule) buildTablesForProject(projectID string, services []Clou
 	// Services table
 	servicesHeader := []string{
 		"Project ID", "Project Name", "Name", "Region", "URL", "Ingress", "Public",
-		"Invokers", "Service Account", "Priv Esc", "Default SA", "Image", "VPC Access",
+		"Invokers", "Service Account", "Attack Paths", "Default SA", "Image", "VPC Access",
 		"Min/Max", "Env Vars", "Secrets", "Hardcoded",
 	}
 
@@ -510,20 +510,20 @@ func (m *CloudRunModule) buildTablesForProject(projectID string, services []Clou
 			hardcoded = fmt.Sprintf("Yes (%d)", len(svc.HardcodedSecrets))
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if svc.ServiceAccount != "" {
-				privEsc = m.PrivescCache.GetPrivescSummary(svc.ServiceAccount)
+				attackPaths = m.AttackPathCache.GetAttackSummary(svc.ServiceAccount)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
 		servicesBody = append(servicesBody, []string{
 			svc.ProjectID, m.GetProjectName(svc.ProjectID), svc.Name, svc.Region, svc.URL,
 			formatIngress(svc.IngressSettings), publicStatus, invokers, svc.ServiceAccount,
-			privEsc, defaultSA, svc.ContainerImage, vpcAccess, scaling, envVars, secrets, hardcoded,
+			attackPaths, defaultSA, svc.ContainerImage, vpcAccess, scaling, envVars, secrets, hardcoded,
 		})
 	}
 
@@ -537,7 +537,7 @@ func (m *CloudRunModule) buildTablesForProject(projectID string, services []Clou
 
 	// Jobs table
 	jobsHeader := []string{
-		"Project ID", "Project Name", "Name", "Region", "Service Account", "Priv Esc", "Default SA",
+		"Project ID", "Project Name", "Name", "Region", "Service Account", "Attack Paths", "Default SA",
 		"Image", "Tasks", "Parallelism", "Last Execution", "Env Vars", "Secrets", "Hardcoded",
 	}
 
@@ -565,19 +565,19 @@ func (m *CloudRunModule) buildTablesForProject(projectID string, services []Clou
 			lastExec = extractName(job.LastExecution)
 		}
 
-		// Check privesc for the service account
-		jobPrivEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		jobAttackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if job.ServiceAccount != "" {
-				jobPrivEsc = m.PrivescCache.GetPrivescSummary(job.ServiceAccount)
+				jobAttackPaths = m.AttackPathCache.GetAttackSummary(job.ServiceAccount)
 			} else {
-				jobPrivEsc = "No"
+				jobAttackPaths = "No"
 			}
 		}
 
 		jobsBody = append(jobsBody, []string{
 			job.ProjectID, m.GetProjectName(job.ProjectID), job.Name, job.Region,
-			job.ServiceAccount, jobPrivEsc, defaultSA, job.ContainerImage,
+			job.ServiceAccount, jobAttackPaths, defaultSA, job.ContainerImage,
 			fmt.Sprintf("%d", job.TaskCount), fmt.Sprintf("%d", job.Parallelism),
 			lastExec, envVars, secrets, hardcoded,
 		})

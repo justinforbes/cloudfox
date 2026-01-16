@@ -49,7 +49,7 @@ type SchedulerModule struct {
 
 	ProjectJobs  map[string][]SchedulerService.JobInfo    // projectID -> jobs
 	LootMap      map[string]map[string]*internal.LootFile // projectID -> loot files
-	PrivescCache *gcpinternal.PrivescCache                // Cached privesc analysis results
+	AttackPathCache *gcpinternal.AttackPathCache          // Cached attack path analysis results
 	mu           sync.Mutex
 }
 
@@ -86,8 +86,8 @@ func runGCPSchedulerCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *SchedulerModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_SCHEDULER_MODULE_NAME, m.processProject)
 
@@ -246,7 +246,7 @@ func (m *SchedulerModule) getTableHeader() []string {
 		"Target Type",
 		"Target",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"Last Run",
 	}
 }
@@ -264,13 +264,13 @@ func (m *SchedulerModule) jobsToTableBody(jobs []SchedulerService.JobInfo) [][]s
 			sa = job.ServiceAccount
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "-" {
-				privEsc = m.PrivescCache.GetPrivescSummary(sa)
+				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
@@ -293,7 +293,7 @@ func (m *SchedulerModule) jobsToTableBody(jobs []SchedulerService.JobInfo) [][]s
 			job.TargetType,
 			target,
 			sa,
-			privEsc,
+			attackPaths,
 			lastRun,
 		})
 	}

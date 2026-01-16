@@ -32,7 +32,7 @@ type DataprocModule struct {
 	gcpinternal.BaseGCPModule
 	ProjectClusters map[string][]dataprocservice.ClusterInfo // projectID -> clusters
 	LootMap         map[string]map[string]*internal.LootFile // projectID -> loot files
-	PrivescCache    *gcpinternal.PrivescCache                // Cached privesc analysis results
+	AttackPathCache *gcpinternal.AttackPathCache             // Cached attack path analysis results
 	mu              sync.Mutex
 }
 
@@ -59,8 +59,8 @@ func runGCPDataprocCommand(cmd *cobra.Command, args []string) {
 }
 
 func (m *DataprocModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_DATAPROC_MODULE_NAME, m.processProject)
 
@@ -184,7 +184,7 @@ func (m *DataprocModule) getTableHeader() []string {
 		"Master Instances",
 		"Workers",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"Public IPs",
 		"Kerberos",
 		"Resource Role",
@@ -200,13 +200,13 @@ func (m *DataprocModule) clustersToTableBody(clusters []dataprocservice.ClusterI
 			sa = "(default)"
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
-				privEsc = m.PrivescCache.GetPrivescSummary(sa)
+				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
@@ -232,7 +232,7 @@ func (m *DataprocModule) clustersToTableBody(clusters []dataprocservice.ClusterI
 					masterInstances,
 					workerConfig,
 					sa,
-					privEsc,
+					attackPaths,
 					boolToYesNo(!cluster.InternalIPOnly),
 					boolToYesNo(cluster.KerberosEnabled),
 					binding.Role,
@@ -251,7 +251,7 @@ func (m *DataprocModule) clustersToTableBody(clusters []dataprocservice.ClusterI
 				masterInstances,
 				workerConfig,
 				sa,
-				privEsc,
+				attackPaths,
 				boolToYesNo(!cluster.InternalIPOnly),
 				boolToYesNo(cluster.KerberosEnabled),
 				"-",

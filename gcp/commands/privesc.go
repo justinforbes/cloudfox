@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	privescservice "github.com/BishopFox/cloudfox/gcp/services/privescService"
+	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -19,26 +19,54 @@ var GCPPrivescCommand = &cobra.Command{
 	Short:   "Identify privilege escalation paths in GCP organizations, folders, and projects",
 	Long: `Analyze GCP IAM policies to identify privilege escalation opportunities.
 
-This module examines IAM bindings at organization, folder, and project levels
+This module examines IAM bindings at organization, folder, project, and resource levels
 to find principals with dangerous permissions that could be used to escalate
 privileges within the GCP environment.
 
-Detected privilege escalation methods include:
-- Service Account Token Creation (iam.serviceAccounts.getAccessToken)
-- Service Account Key Creation (iam.serviceAccountKeys.create)
-- Service Account Implicit Delegation
-- Service Account SignBlob/SignJwt
+Detected privilege escalation methods (60+) include:
+
+Service Account Abuse:
+- Token Creation (getAccessToken, getOpenIdToken)
+- Key Creation (serviceAccountKeys.create, hmacKeys.create)
+- Implicit Delegation, SignBlob, SignJwt
+- Workload Identity Federation (external identity impersonation)
+
+IAM Policy Modification:
 - Project/Folder/Org IAM Policy Modification
-- Custom Role Modification (iam.roles.update)
+- Service Account IAM Policy + SA Creation combo
+- Custom Role Create/Update (iam.roles.create/update)
 - Org Policy Modification (orgpolicy.policy.set)
+- Resource-specific IAM (Pub/Sub, BigQuery, Artifact Registry, Compute, KMS, Source Repos)
+
+Compute & Serverless:
 - Compute Instance Metadata Injection (SSH keys, startup scripts)
 - Create GCE Instance with privileged SA
-- Cloud Functions/Run Deployment with SA Identity
+- Cloud Functions Create/Update with SA Identity
+- Cloud Run Services/Jobs Create/Update with SA Identity
+- App Engine Deploy with SA Identity
 - Cloud Build SA Abuse
+
+AI/ML:
+- Vertex AI Custom Jobs with SA
+- Vertex AI Notebooks with SA
+- AI Platform Jobs with SA
+
+Data Processing & Orchestration:
+- Dataproc Cluster Create / Job Submit
+- Cloud Composer Environment Create/Update
+- Dataflow Job Create
+- Cloud Workflows with SA
+- Eventarc Triggers with SA
+
+Scheduling & Tasks:
 - Cloud Scheduler HTTP Request with SA
+- Cloud Tasks with SA
+
+Other:
 - Deployment Manager Deployment
-- GKE Cluster Access
+- GKE Cluster Access, Pod Exec, Secrets
 - Secret Manager Access
+- KMS Key Access / Decrypt
 - API Key Creation/Listing`,
 	Run: runGCPPrivescCommand,
 }
@@ -47,10 +75,11 @@ type PrivescModule struct {
 	gcpinternal.BaseGCPModule
 
 	// All paths from combined analysis
-	AllPaths     []privescservice.PrivescPath
-	OrgPaths     []privescservice.PrivescPath
-	FolderPaths  []privescservice.PrivescPath
-	ProjectPaths map[string][]privescservice.PrivescPath // projectID -> paths
+	AllPaths      []attackpathservice.AttackPath
+	OrgPaths      []attackpathservice.AttackPath
+	FolderPaths   []attackpathservice.AttackPath
+	ProjectPaths  map[string][]attackpathservice.AttackPath // projectID -> paths
+	ResourcePaths []attackpathservice.AttackPath
 
 	// Org/folder info
 	OrgIDs      []string
@@ -78,10 +107,11 @@ func runGCPPrivescCommand(cmd *cobra.Command, args []string) {
 
 	module := &PrivescModule{
 		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
-		AllPaths:      []privescservice.PrivescPath{},
-		OrgPaths:      []privescservice.PrivescPath{},
-		FolderPaths:   []privescservice.PrivescPath{},
-		ProjectPaths:  make(map[string][]privescservice.PrivescPath),
+		AllPaths:      []attackpathservice.AttackPath{},
+		OrgPaths:      []attackpathservice.AttackPath{},
+		FolderPaths:   []attackpathservice.AttackPath{},
+		ProjectPaths:  make(map[string][]attackpathservice.AttackPath),
+		ResourcePaths: []attackpathservice.AttackPath{},
 		OrgIDs:        []string{},
 		OrgNames:      make(map[string]string),
 		FolderNames:   make(map[string]string),
@@ -91,11 +121,11 @@ func runGCPPrivescCommand(cmd *cobra.Command, args []string) {
 }
 
 func (m *PrivescModule) Execute(ctx context.Context, logger internal.Logger) {
-	logger.InfoM("Analyzing privilege escalation paths across organizations, folders, and projects...", globals.GCP_PRIVESC_MODULE_NAME)
+	logger.InfoM("Analyzing privilege escalation paths across organizations, folders, projects, and resources...", globals.GCP_PRIVESC_MODULE_NAME)
 
-	// Use combined analysis to get all privesc paths at once
-	svc := privescservice.New()
-	result, err := svc.CombinedPrivescAnalysis(ctx, m.ProjectIDs, m.ProjectNames)
+	// Use attackpathService with "privesc" path type
+	svc := attackpathservice.New()
+	result, err := svc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, m.ProjectNames, "privesc")
 	if err != nil {
 		m.CommandCounter.Error++
 		gcpinternal.HandleGCPError(err, logger, globals.GCP_PRIVESC_MODULE_NAME, "Failed to analyze privilege escalation")
@@ -106,6 +136,7 @@ func (m *PrivescModule) Execute(ctx context.Context, logger internal.Logger) {
 	m.AllPaths = result.AllPaths
 	m.OrgPaths = result.OrgPaths
 	m.FolderPaths = result.FolderPaths
+	m.ResourcePaths = result.ResourcePaths
 	m.OrgIDs = result.OrgIDs
 	m.OrgNames = result.OrgNames
 	m.FolderNames = result.FolderNames
@@ -129,9 +160,10 @@ func (m *PrivescModule) Execute(ctx context.Context, logger internal.Logger) {
 	orgCount := len(m.OrgPaths)
 	folderCount := len(m.FolderPaths)
 	projectCount := len(result.ProjectPaths)
+	resourceCount := len(m.ResourcePaths)
 
-	logger.SuccessM(fmt.Sprintf("Found %d privilege escalation path(s): %d org-level, %d folder-level, %d project-level",
-		len(m.AllPaths), orgCount, folderCount, projectCount), globals.GCP_PRIVESC_MODULE_NAME)
+	logger.SuccessM(fmt.Sprintf("Found %d privilege escalation path(s): %d org-level, %d folder-level, %d project-level, %d resource-level",
+		len(m.AllPaths), orgCount, folderCount, projectCount, resourceCount), globals.GCP_PRIVESC_MODULE_NAME)
 
 	m.writeOutput(ctx, logger)
 }
@@ -147,7 +179,7 @@ func (m *PrivescModule) generateLoot() {
 	}
 }
 
-func (m *PrivescModule) addPathToLoot(path privescservice.PrivescPath) {
+func (m *PrivescModule) addPathToLoot(path attackpathservice.AttackPath) {
 	lootFile := m.LootMap["privesc-exploit-commands"]
 	if lootFile == nil {
 		return
@@ -195,7 +227,7 @@ func (m *PrivescModule) getHeader() []string {
 	}
 }
 
-func (m *PrivescModule) pathsToTableBody(paths []privescservice.PrivescPath) [][]string {
+func (m *PrivescModule) pathsToTableBody(paths []attackpathservice.AttackPath) [][]string {
 	var body [][]string
 	for _, path := range paths {
 		scopeName := path.ScopeName

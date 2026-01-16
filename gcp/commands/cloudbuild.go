@@ -39,7 +39,7 @@ type CloudBuildModule struct {
 	ProjectBuilds           map[string][]cloudbuildservice.BuildInfo               // projectID -> builds
 	ProjectSecurityAnalysis map[string][]cloudbuildservice.TriggerSecurityAnalysis // projectID -> analysis
 	LootMap                 map[string]map[string]*internal.LootFile               // projectID -> loot files
-	PrivescCache            *gcpinternal.PrivescCache                              // Cached privesc analysis results
+	AttackPathCache         *gcpinternal.AttackPathCache                           // Cached attack path analysis results
 	mu                      sync.Mutex
 }
 
@@ -78,8 +78,8 @@ func runGCPCloudBuildCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *CloudBuildModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get privesc cache from context (populated by --with-privesc flag or all-checks)
-	m.PrivescCache = gcpinternal.GetPrivescCacheFromContext(ctx)
+	// Get attack path cache from context (populated by all-checks or attack path analysis)
+	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_CLOUDBUILD_MODULE_NAME, m.processProject)
 
@@ -305,7 +305,7 @@ func (m *CloudBuildModule) getTriggersHeader() []string {
 		"Branch/Tag",
 		"Config File",
 		"Service Account",
-		"Priv Esc",
+		"Attack Paths",
 		"Disabled",
 		"Privesc Potential",
 	}
@@ -346,13 +346,13 @@ func (m *CloudBuildModule) triggersToTableBody(triggers []cloudbuildservice.Trig
 			sa = "(default)"
 		}
 
-		// Check privesc for the service account
-		privEsc := "-"
-		if m.PrivescCache != nil && m.PrivescCache.IsPopulated() {
+		// Check attack paths (privesc/exfil/lateral) for the service account
+		attackPaths := "-"
+		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
-				privEsc = m.PrivescCache.GetPrivescSummary(sa)
+				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
 			} else {
-				privEsc = "No"
+				attackPaths = "No"
 			}
 		}
 
@@ -365,7 +365,7 @@ func (m *CloudBuildModule) triggersToTableBody(triggers []cloudbuildservice.Trig
 			branchTag,
 			trigger.Filename,
 			sa,
-			privEsc,
+			attackPaths,
 			disabled,
 			privescPotential,
 		})
