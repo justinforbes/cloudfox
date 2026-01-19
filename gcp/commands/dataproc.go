@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -233,8 +234,8 @@ func (m *DataprocModule) clustersToTableBody(clusters []dataprocservice.ClusterI
 					workerConfig,
 					sa,
 					attackPaths,
-					boolToYesNo(!cluster.InternalIPOnly),
-					boolToYesNo(cluster.KerberosEnabled),
+					shared.BoolToYesNo(!cluster.InternalIPOnly),
+					shared.BoolToYesNo(cluster.KerberosEnabled),
 					binding.Role,
 					binding.Member,
 				})
@@ -252,8 +253,8 @@ func (m *DataprocModule) clustersToTableBody(clusters []dataprocservice.ClusterI
 				workerConfig,
 				sa,
 				attackPaths,
-				boolToYesNo(!cluster.InternalIPOnly),
-				boolToYesNo(cluster.KerberosEnabled),
+				shared.BoolToYesNo(!cluster.InternalIPOnly),
+				shared.BoolToYesNo(cluster.KerberosEnabled),
 				"-",
 				"-",
 			})

@@ -6,13 +6,30 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	logging "google.golang.org/api/logging/v2"
 )
 
-type LoggingService struct{}
+type LoggingService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *LoggingService {
 	return &LoggingService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *LoggingService {
+	return &LoggingService{
+		session: session,
+	}
+}
+
+// getService returns a Logging service client using cached session if available
+func (ls *LoggingService) getService(ctx context.Context) (*logging.Service, error) {
+	if ls.session != nil {
+		return sdk.CachedGetLoggingService(ctx, ls.session)
+	}
+	return logging.NewService(ctx)
 }
 
 // SinkInfo holds Cloud Logging sink details with security-relevant information
@@ -66,7 +83,7 @@ type MetricInfo struct {
 func (ls *LoggingService) Sinks(projectID string) ([]SinkInfo, error) {
 	ctx := context.Background()
 
-	service, err := logging.NewService(ctx)
+	service, err := ls.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "logging.googleapis.com")
 	}
@@ -94,7 +111,7 @@ func (ls *LoggingService) Sinks(projectID string) ([]SinkInfo, error) {
 func (ls *LoggingService) Metrics(projectID string) ([]MetricInfo, error) {
 	ctx := context.Background()
 
-	service, err := logging.NewService(ctx)
+	service, err := ls.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "logging.googleapis.com")
 	}

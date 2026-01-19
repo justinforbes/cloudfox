@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	compute "google.golang.org/api/compute/v1"
 )
 
@@ -19,6 +20,14 @@ func New() *VPCService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *VPCService {
 	return &VPCService{session: session}
+}
+
+// getService returns a Compute service client using cached session if available
+func (s *VPCService) getService(ctx context.Context) (*compute.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetComputeService(ctx, s.session)
+	}
+	return compute.NewService(ctx)
 }
 
 // VPCNetworkInfo represents a VPC network
@@ -76,14 +85,8 @@ type RouteInfo struct {
 // ListVPCNetworks retrieves all VPC networks
 func (s *VPCService) ListVPCNetworks(projectID string) ([]VPCNetworkInfo, error) {
 	ctx := context.Background()
-	var service *compute.Service
-	var err error
 
-	if s.session != nil {
-		service, err = compute.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = compute.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
@@ -106,14 +109,8 @@ func (s *VPCService) ListVPCNetworks(projectID string) ([]VPCNetworkInfo, error)
 // ListSubnets retrieves all subnets
 func (s *VPCService) ListSubnets(projectID string) ([]SubnetInfo, error) {
 	ctx := context.Background()
-	var service *compute.Service
-	var err error
 
-	if s.session != nil {
-		service, err = compute.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = compute.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
@@ -140,14 +137,8 @@ func (s *VPCService) ListSubnets(projectID string) ([]SubnetInfo, error) {
 // ListVPCPeerings retrieves all VPC peering connections
 func (s *VPCService) ListVPCPeerings(projectID string) ([]VPCPeeringInfo, error) {
 	ctx := context.Background()
-	var service *compute.Service
-	var err error
 
-	if s.session != nil {
-		service, err = compute.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = compute.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
@@ -185,14 +176,8 @@ func (s *VPCService) ListVPCPeerings(projectID string) ([]VPCPeeringInfo, error)
 // ListRoutes retrieves all routes
 func (s *VPCService) ListRoutes(projectID string) ([]RouteInfo, error) {
 	ctx := context.Background()
-	var service *compute.Service
-	var err error
 
-	if s.session != nil {
-		service, err = compute.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = compute.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}

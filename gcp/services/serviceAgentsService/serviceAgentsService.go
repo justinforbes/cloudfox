@@ -6,13 +6,22 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v1"
 )
 
-type ServiceAgentsService struct{}
+type ServiceAgentsService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *ServiceAgentsService {
 	return &ServiceAgentsService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *ServiceAgentsService {
+	return &ServiceAgentsService{
+		session: session,
+	}
 }
 
 // ServiceAgentInfo represents a Google-managed service agent
@@ -105,10 +114,18 @@ var KnownServiceAgents = map[string]struct {
 	},
 }
 
+// getResourceManagerService returns a Cloud Resource Manager service client using cached session if available
+func (s *ServiceAgentsService) getResourceManagerService(ctx context.Context) (*cloudresourcemanager.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetResourceManagerService(ctx, s.session)
+	}
+	return cloudresourcemanager.NewService(ctx)
+}
+
 // GetServiceAgents retrieves all service agents with IAM bindings
 func (s *ServiceAgentsService) GetServiceAgents(projectID string) ([]ServiceAgentInfo, error) {
 	ctx := context.Background()
-	service, err := cloudresourcemanager.NewService(ctx)
+	service, err := s.getResourceManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}

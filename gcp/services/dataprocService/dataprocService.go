@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	dataproc "google.golang.org/api/dataproc/v1"
 )
 
@@ -19,6 +20,14 @@ func New() *DataprocService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *DataprocService {
 	return &DataprocService{session: session}
+}
+
+// getService returns a Dataproc service client using cached session if available
+func (s *DataprocService) getService(ctx context.Context) (*dataproc.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetDataprocService(ctx, s.session)
+	}
+	return dataproc.NewService(ctx)
 }
 
 // ClusterInfo represents a Dataproc cluster
@@ -92,14 +101,8 @@ var dataprocRegions = []string{
 // ListClusters retrieves all Dataproc clusters
 func (s *DataprocService) ListClusters(projectID string) ([]ClusterInfo, error) {
 	ctx := context.Background()
-	var service *dataproc.Service
-	var err error
 
-	if s.session != nil {
-		service, err = dataproc.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = dataproc.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "dataproc.googleapis.com")
 	}
@@ -125,14 +128,8 @@ func (s *DataprocService) ListClusters(projectID string) ([]ClusterInfo, error) 
 // ListJobs retrieves recent Dataproc jobs
 func (s *DataprocService) ListJobs(projectID, region string) ([]JobInfo, error) {
 	ctx := context.Background()
-	var service *dataproc.Service
-	var err error
 
-	if s.session != nil {
-		service, err = dataproc.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = dataproc.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "dataproc.googleapis.com")
 	}

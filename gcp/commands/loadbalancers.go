@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -348,7 +349,7 @@ func (m *LoadBalancersModule) backendServicesToTableBody(services []loadbalancer
 			be.Protocol,
 			fmt.Sprintf("%d", be.Port),
 			secPolicy,
-			boolToYesNo(be.EnableCDN),
+			shared.BoolToYesNo(be.EnableCDN),
 			healthCheck,
 			sessionAffinity,
 			backends,

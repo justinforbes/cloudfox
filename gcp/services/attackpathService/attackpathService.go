@@ -11,6 +11,7 @@ import (
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	crmv1 "google.golang.org/api/cloudresourcemanager/v1"
 	"google.golang.org/api/iam/v1"
 	"google.golang.org/api/iterator"
@@ -34,6 +35,46 @@ func New() *AttackPathService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *AttackPathService {
 	return &AttackPathService{session: session}
+}
+
+// getIAMService returns an IAM service using cached session if available
+func (s *AttackPathService) getIAMService(ctx context.Context) (*iam.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetIAMService(ctx, s.session)
+	}
+	return iam.NewService(ctx)
+}
+
+// getResourceManagerService returns a Resource Manager service using cached session if available
+func (s *AttackPathService) getResourceManagerService(ctx context.Context) (*crmv1.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetResourceManagerService(ctx, s.session)
+	}
+	return crmv1.NewService(ctx)
+}
+
+// getStorageService returns a Storage service using cached session if available
+func (s *AttackPathService) getStorageService(ctx context.Context) (*storage.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetStorageService(ctx, s.session)
+	}
+	return storage.NewService(ctx)
+}
+
+// getBigQueryService returns a BigQuery service using cached session if available
+func (s *AttackPathService) getBigQueryService(ctx context.Context) (*bigquery.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetBigQueryService(ctx, s.session)
+	}
+	return bigquery.NewService(ctx)
+}
+
+// getComputeService returns a Compute service using cached session if available
+func (s *AttackPathService) getComputeService(ctx context.Context) (*compute.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetComputeService(ctx, s.session)
+	}
+	return compute.NewService(ctx)
 }
 
 // DataExfilPermission represents a permission that enables data exfiltration
@@ -305,12 +346,7 @@ func (s *AttackPathService) AnalyzeOrganizationAttackPaths(ctx context.Context, 
 	defer orgsClient.Close()
 
 	// Get IAM service for role resolution
-	var iamService *iam.Service
-	if s.session != nil {
-		iamService, err = iam.NewService(ctx, s.session.GetClientOption())
-	} else {
-		iamService, err = iam.NewService(ctx)
-	}
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		iamService = nil
 	}
@@ -378,12 +414,7 @@ func (s *AttackPathService) AnalyzeFolderAttackPaths(ctx context.Context, pathTy
 	defer foldersClient.Close()
 
 	// Get IAM service for role resolution
-	var iamService *iam.Service
-	if s.session != nil {
-		iamService, err = iam.NewService(ctx, s.session.GetClientOption())
-	} else {
-		iamService, err = iam.NewService(ctx)
-	}
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		iamService = nil
 	}
@@ -436,13 +467,7 @@ func (s *AttackPathService) AnalyzeProjectAttackPaths(ctx context.Context, proje
 	var paths []AttackPath
 
 	// Get project IAM policy
-	var crmService *crmv1.Service
-	var err error
-	if s.session != nil {
-		crmService, err = crmv1.NewService(ctx, s.session.GetClientOption())
-	} else {
-		crmService, err = crmv1.NewService(ctx)
-	}
+	crmService, err := s.getResourceManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
@@ -453,12 +478,7 @@ func (s *AttackPathService) AnalyzeProjectAttackPaths(ctx context.Context, proje
 	}
 
 	// Get IAM service for role resolution
-	var iamService *iam.Service
-	if s.session != nil {
-		iamService, err = iam.NewService(ctx, s.session.GetClientOption())
-	} else {
-		iamService, err = iam.NewService(ctx)
-	}
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		iamService = nil
 	}
@@ -494,13 +514,7 @@ func (s *AttackPathService) AnalyzeResourceAttackPaths(ctx context.Context, proj
 	exfilPermMap, lateralPermMap, privescPermMap := s.getPermissionMaps(pathType)
 
 	// Get IAM service for role resolution
-	var iamService *iam.Service
-	var err error
-	if s.session != nil {
-		iamService, err = iam.NewService(ctx, s.session.GetClientOption())
-	} else {
-		iamService, err = iam.NewService(ctx)
-	}
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		iamService = nil
 	}
@@ -528,13 +542,7 @@ func (s *AttackPathService) AnalyzeResourceAttackPaths(ctx context.Context, proj
 func (s *AttackPathService) analyzeBucketIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
 	var paths []AttackPath
 
-	var storageService *storage.Service
-	var err error
-	if s.session != nil {
-		storageService, err = storage.NewService(ctx, s.session.GetClientOption())
-	} else {
-		storageService, err = storage.NewService(ctx)
-	}
+	storageService, err := s.getStorageService(ctx)
 	if err != nil {
 		return paths
 	}
@@ -572,13 +580,7 @@ func (s *AttackPathService) analyzeBucketIAM(ctx context.Context, projectID, pat
 func (s *AttackPathService) analyzeBigQueryIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
 	var paths []AttackPath
 
-	var bqService *bigquery.Service
-	var err error
-	if s.session != nil {
-		bqService, err = bigquery.NewService(ctx, s.session.GetClientOption())
-	} else {
-		bqService, err = bigquery.NewService(ctx)
-	}
+	bqService, err := s.getBigQueryService(ctx)
 	if err != nil {
 		return paths
 	}
@@ -636,11 +638,7 @@ func (s *AttackPathService) analyzeServiceAccountIAM(ctx context.Context, projec
 
 	if iamService == nil {
 		var err error
-		if s.session != nil {
-			iamService, err = iam.NewService(ctx, s.session.GetClientOption())
-		} else {
-			iamService, err = iam.NewService(ctx)
-		}
+		iamService, err = s.getIAMService(ctx)
 		if err != nil {
 			return paths
 		}
@@ -679,13 +677,7 @@ func (s *AttackPathService) analyzeServiceAccountIAM(ctx context.Context, projec
 func (s *AttackPathService) analyzeComputeResourceIAM(ctx context.Context, projectID, pathType string, exfilPermMap map[string]DataExfilPermission, lateralPermMap map[string]LateralMovementPermission, privescPermMap map[string]PrivescPermission, iamService *iam.Service) []AttackPath {
 	var paths []AttackPath
 
-	var computeService *compute.Service
-	var err error
-	if s.session != nil {
-		computeService, err = compute.NewService(ctx, s.session.GetClientOption())
-	} else {
-		computeService, err = compute.NewService(ctx)
-	}
+	computeService, err := s.getComputeService(ctx)
 	if err != nil {
 		return paths
 	}

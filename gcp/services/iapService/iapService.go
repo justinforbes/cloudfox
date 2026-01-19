@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	iap "google.golang.org/api/iap/v1"
 )
 
@@ -19,6 +20,14 @@ func New() *IAPService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *IAPService {
 	return &IAPService{session: session}
+}
+
+// getService returns an IAP service client using cached session if available
+func (s *IAPService) getService(ctx context.Context) (*iap.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetIAPService(ctx, s.session)
+	}
+	return iap.NewService(ctx)
 }
 
 // IAPSettingsInfo represents IAP settings for a resource
@@ -55,14 +64,8 @@ type IAMBinding struct {
 // ListTunnelDestGroups retrieves tunnel destination groups
 func (s *IAPService) ListTunnelDestGroups(projectID string) ([]TunnelDestGroup, error) {
 	ctx := context.Background()
-	var service *iap.Service
-	var err error
 
-	if s.session != nil {
-		service, err = iap.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = iap.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iap.googleapis.com")
 	}
@@ -123,14 +126,8 @@ func (s *IAPService) getTunnelDestGroupIAMBindings(service *iap.Service, resourc
 // GetIAPSettings retrieves IAP settings for a resource
 func (s *IAPService) GetIAPSettings(projectID, resourcePath string) (*IAPSettingsInfo, error) {
 	ctx := context.Background()
-	var service *iap.Service
-	var err error
 
-	if s.session != nil {
-		service, err = iap.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = iap.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iap.googleapis.com")
 	}

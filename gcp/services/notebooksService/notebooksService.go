@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	notebooks "google.golang.org/api/notebooks/v1"
 )
 
@@ -19,6 +20,14 @@ func New() *NotebooksService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *NotebooksService {
 	return &NotebooksService{session: session}
+}
+
+// getService returns a Notebooks service client using cached session if available
+func (s *NotebooksService) getService(ctx context.Context) (*notebooks.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetNotebooksService(ctx, s.session)
+	}
+	return notebooks.NewService(ctx)
 }
 
 // NotebookInstanceInfo represents a Vertex AI Workbench or legacy notebook instance
@@ -69,14 +78,8 @@ type RuntimeInfo struct {
 // ListInstances retrieves all notebook instances
 func (s *NotebooksService) ListInstances(projectID string) ([]NotebookInstanceInfo, error) {
 	ctx := context.Background()
-	var service *notebooks.Service
-	var err error
 
-	if s.session != nil {
-		service, err = notebooks.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = notebooks.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "notebooks.googleapis.com")
 	}
@@ -103,14 +106,8 @@ func (s *NotebooksService) ListInstances(projectID string) ([]NotebookInstanceIn
 // ListRuntimes retrieves all managed notebook runtimes
 func (s *NotebooksService) ListRuntimes(projectID string) ([]RuntimeInfo, error) {
 	ctx := context.Background()
-	var service *notebooks.Service
-	var err error
 
-	if s.session != nil {
-		service, err = notebooks.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = notebooks.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "notebooks.googleapis.com")
 	}

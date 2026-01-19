@@ -9,8 +9,8 @@ import (
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	apikeys "google.golang.org/api/apikeys/v2"
-	"google.golang.org/api/option"
 )
 
 var logger internal.Logger
@@ -29,12 +29,12 @@ func NewWithSession(session *gcpinternal.SafeSession) *APIKeysService {
 	return &APIKeysService{session: session}
 }
 
-// getClientOption returns the appropriate client option based on session
-func (s *APIKeysService) getClientOption() option.ClientOption {
+// getService returns an API Keys service client using cached session if available
+func (s *APIKeysService) getService(ctx context.Context) (*apikeys.Service, error) {
 	if s.session != nil {
-		return s.session.GetClientOption()
+		return sdk.CachedGetAPIKeysService(ctx, s.session)
 	}
-	return nil
+	return apikeys.NewService(ctx)
 }
 
 // APIKeyInfo represents information about an API key
@@ -67,14 +67,8 @@ type APIKeyInfo struct {
 // ListAPIKeys retrieves all API keys in a project
 func (s *APIKeysService) ListAPIKeys(projectID string) ([]APIKeyInfo, error) {
 	ctx := context.Background()
-	var service *apikeys.Service
-	var err error
 
-	if s.session != nil {
-		service, err = apikeys.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = apikeys.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
 	}
@@ -100,14 +94,8 @@ func (s *APIKeysService) ListAPIKeys(projectID string) ([]APIKeyInfo, error) {
 // GetAPIKey retrieves a single API key with its key string
 func (s *APIKeysService) GetAPIKey(keyName string) (*APIKeyInfo, error) {
 	ctx := context.Background()
-	var service *apikeys.Service
-	var err error
 
-	if s.session != nil {
-		service, err = apikeys.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = apikeys.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
 	}
@@ -132,14 +120,8 @@ func (s *APIKeysService) GetAPIKey(keyName string) (*APIKeyInfo, error) {
 // GetKeyString retrieves the key string value for an API key
 func (s *APIKeysService) GetKeyString(keyName string) (string, error) {
 	ctx := context.Background()
-	var service *apikeys.Service
-	var err error
 
-	if s.session != nil {
-		service, err = apikeys.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = apikeys.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return "", gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
 	}

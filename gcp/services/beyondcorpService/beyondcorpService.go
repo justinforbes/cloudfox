@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	beyondcorp "google.golang.org/api/beyondcorp/v1"
 )
 
@@ -19,6 +20,14 @@ func New() *BeyondCorpService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *BeyondCorpService {
 	return &BeyondCorpService{session: session}
+}
+
+// getService returns a BeyondCorp service client using cached session if available
+func (s *BeyondCorpService) getService(ctx context.Context) (*beyondcorp.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetBeyondCorpService(ctx, s.session)
+	}
+	return beyondcorp.NewService(ctx)
 }
 
 // IAMBinding represents an IAM binding
@@ -64,14 +73,8 @@ type AppConnectionInfo struct {
 // ListAppConnectors retrieves all BeyondCorp app connectors
 func (s *BeyondCorpService) ListAppConnectors(projectID string) ([]AppConnectorInfo, error) {
 	ctx := context.Background()
-	var service *beyondcorp.Service
-	var err error
 
-	if s.session != nil {
-		service, err = beyondcorp.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = beyondcorp.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "beyondcorp.googleapis.com")
 	}
@@ -116,14 +119,8 @@ func (s *BeyondCorpService) ListAppConnectors(projectID string) ([]AppConnectorI
 // ListAppConnections retrieves all BeyondCorp app connections
 func (s *BeyondCorpService) ListAppConnections(projectID string) ([]AppConnectionInfo, error) {
 	ctx := context.Background()
-	var service *beyondcorp.Service
-	var err error
 
-	if s.session != nil {
-		service, err = beyondcorp.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = beyondcorp.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "beyondcorp.googleapis.com")
 	}

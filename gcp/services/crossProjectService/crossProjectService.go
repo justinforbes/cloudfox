@@ -6,16 +6,57 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	cloudresourcemanager "google.golang.org/api/cloudresourcemanager/v1"
 	iam "google.golang.org/api/iam/v1"
 	logging "google.golang.org/api/logging/v2"
 	pubsub "google.golang.org/api/pubsub/v1"
 )
 
-type CrossProjectService struct{}
+type CrossProjectService struct {
+	session *gcpinternal.SafeSession
+}
 
 func New() *CrossProjectService {
 	return &CrossProjectService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *CrossProjectService {
+	return &CrossProjectService{
+		session: session,
+	}
+}
+
+// getResourceManagerService returns a Resource Manager service using cached session if available
+func (s *CrossProjectService) getResourceManagerService(ctx context.Context) (*cloudresourcemanager.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetResourceManagerService(ctx, s.session)
+	}
+	return cloudresourcemanager.NewService(ctx)
+}
+
+// getIAMService returns an IAM service using cached session if available
+func (s *CrossProjectService) getIAMService(ctx context.Context) (*iam.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetIAMService(ctx, s.session)
+	}
+	return iam.NewService(ctx)
+}
+
+// getLoggingService returns a Logging service using cached session if available
+func (s *CrossProjectService) getLoggingService(ctx context.Context) (*logging.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetLoggingService(ctx, s.session)
+	}
+	return logging.NewService(ctx)
+}
+
+// getPubSubService returns a PubSub service using cached session if available
+func (s *CrossProjectService) getPubSubService(ctx context.Context) (*pubsub.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetPubSubService(ctx, s.session)
+	}
+	return pubsub.NewService(ctx)
 }
 
 // CrossProjectBinding represents a cross-project IAM binding
@@ -79,7 +120,7 @@ type CrossProjectPubSubExport struct {
 func (s *CrossProjectService) AnalyzeCrossProjectAccess(projectIDs []string) ([]CrossProjectBinding, error) {
 	ctx := context.Background()
 
-	crmService, err := cloudresourcemanager.NewService(ctx)
+	crmService, err := s.getResourceManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
@@ -134,12 +175,12 @@ func (s *CrossProjectService) AnalyzeCrossProjectAccess(projectIDs []string) ([]
 func (s *CrossProjectService) GetCrossProjectServiceAccounts(projectIDs []string) ([]CrossProjectServiceAccount, error) {
 	ctx := context.Background()
 
-	iamService, err := iam.NewService(ctx)
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
 
-	crmService, err := cloudresourcemanager.NewService(ctx)
+	crmService, err := s.getResourceManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
@@ -210,7 +251,7 @@ func (s *CrossProjectService) GetCrossProjectServiceAccounts(projectIDs []string
 func (s *CrossProjectService) FindLateralMovementPaths(projectIDs []string) ([]LateralMovementPath, error) {
 	ctx := context.Background()
 
-	crmService, err := cloudresourcemanager.NewService(ctx)
+	crmService, err := s.getResourceManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
@@ -454,7 +495,7 @@ func categorizePrivilegeLevel(role string) string {
 func (s *CrossProjectService) FindCrossProjectLoggingSinks(projectIDs []string) ([]CrossProjectLoggingSink, error) {
 	ctx := context.Background()
 
-	loggingService, err := logging.NewService(ctx)
+	loggingService, err := s.getLoggingService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "logging.googleapis.com")
 	}
@@ -595,7 +636,7 @@ func analyzeLoggingSinkRisk(sink *logging.LogSink, targetProject string, knownPr
 func (s *CrossProjectService) FindCrossProjectPubSubExports(projectIDs []string) ([]CrossProjectPubSubExport, error) {
 	ctx := context.Background()
 
-	pubsubService, err := pubsub.NewService(ctx)
+	pubsubService, err := s.getPubSubService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "pubsub.googleapis.com")
 	}

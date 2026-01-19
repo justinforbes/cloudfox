@@ -10,6 +10,7 @@ import (
 	kmsservice "github.com/BishopFox/cloudfox/gcp/services/kmsService"
 	pubsubservice "github.com/BishopFox/cloudfox/gcp/services/pubsubService"
 	spannerservice "github.com/BishopFox/cloudfox/gcp/services/spannerService"
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -306,7 +307,7 @@ func (m *PublicAccessModule) checkStorageBuckets(ctx context.Context, projectID 
 
 		for _, binding := range policy.Bindings {
 			for _, member := range binding.Members {
-				if member == "allUsers" || member == "allAuthenticatedUsers" {
+				if shared.IsPublicPrincipal(member) {
 					resource := PublicResource{
 						ResourceType:   "Cloud Storage",
 						ResourceName:   bucket.Name,
@@ -340,7 +341,7 @@ func (m *PublicAccessModule) checkComputeSnapshots(ctx context.Context, projectI
 
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" || member == "allAuthenticatedUsers" {
+					if shared.IsPublicPrincipal(member) {
 						resource := PublicResource{
 							ResourceType:   "Compute Snapshot",
 							ResourceName:   snapshot.Name,
@@ -381,7 +382,7 @@ func (m *PublicAccessModule) checkComputeImages(ctx context.Context, projectID s
 
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" || member == "allAuthenticatedUsers" {
+					if shared.IsPublicPrincipal(member) {
 						resource := PublicResource{
 							ResourceType:   "Compute Image",
 							ResourceName:   image.Name,
@@ -476,7 +477,7 @@ func (m *PublicAccessModule) checkCloudRunServices(ctx context.Context, projectI
 
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" || member == "allAuthenticatedUsers" {
+					if shared.IsPublicPrincipal(member) {
 						serviceName := publicAccessExtractResourceName(svc.Name)
 						location := publicAccessExtractLocation(svc.Name)
 						res := PublicResource{
@@ -521,7 +522,7 @@ func (m *PublicAccessModule) checkCloudFunctions(ctx context.Context, projectID 
 
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" || member == "allAuthenticatedUsers" {
+					if shared.IsPublicPrincipal(member) {
 						funcName := publicAccessExtractResourceName(fn.Name)
 						location := publicAccessExtractLocation(fn.Name)
 
@@ -566,7 +567,7 @@ func (m *PublicAccessModule) checkPubSubTopics(ctx context.Context, projectID st
 
 	for _, topic := range topics {
 		for _, binding := range topic.IAMBindings {
-			if binding.Member == "allUsers" || binding.Member == "allAuthenticatedUsers" {
+			if shared.IsPublicPrincipal(binding.Member) {
 				resource := PublicResource{
 					ResourceType:   "Pub/Sub Topic",
 					ResourceName:   topic.Name,
@@ -591,7 +592,7 @@ func (m *PublicAccessModule) checkPubSubSubscriptions(ctx context.Context, proje
 
 	for _, sub := range subs {
 		for _, binding := range sub.IAMBindings {
-			if binding.Member == "allUsers" || binding.Member == "allAuthenticatedUsers" {
+			if shared.IsPublicPrincipal(binding.Member) {
 				resource := PublicResource{
 					ResourceType:   "Pub/Sub Subscription",
 					ResourceName:   sub.Name,
@@ -625,7 +626,7 @@ func (m *PublicAccessModule) checkSecretManagerSecrets(ctx context.Context, proj
 
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" || member == "allAuthenticatedUsers" {
+					if shared.IsPublicPrincipal(member) {
 						secretName := publicAccessExtractResourceName(secret.Name)
 						resource := PublicResource{
 							ResourceType:   "Secret Manager",
@@ -668,7 +669,7 @@ func (m *PublicAccessModule) checkArtifactRegistry(ctx context.Context, projectI
 
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" || member == "allAuthenticatedUsers" {
+					if shared.IsPublicPrincipal(member) {
 						repoName := publicAccessExtractResourceName(repo.Name)
 						location := publicAccessExtractLocation(repo.Name)
 						resource := PublicResource{
@@ -706,7 +707,7 @@ func (m *PublicAccessModule) checkKMSKeys(ctx context.Context, projectID string,
 
 	for _, key := range keys {
 		for _, binding := range key.IAMBindings {
-			if binding.Member == "allUsers" || binding.Member == "allAuthenticatedUsers" {
+			if shared.IsPublicPrincipal(binding.Member) {
 				resource := PublicResource{
 					ResourceType:   "Cloud KMS",
 					ResourceName:   key.Name,
@@ -735,7 +736,7 @@ func (m *PublicAccessModule) checkSpanner(ctx context.Context, projectID string,
 	// Check instances
 	for _, instance := range result.Instances {
 		for _, binding := range instance.IAMBindings {
-			if binding.Member == "allUsers" || binding.Member == "allAuthenticatedUsers" {
+			if shared.IsPublicPrincipal(binding.Member) {
 				resource := PublicResource{
 					ResourceType:   "Spanner Instance",
 					ResourceName:   instance.Name,
@@ -752,7 +753,7 @@ func (m *PublicAccessModule) checkSpanner(ctx context.Context, projectID string,
 	// Check databases
 	for _, db := range result.Databases {
 		for _, binding := range db.IAMBindings {
-			if binding.Member == "allUsers" || binding.Member == "allAuthenticatedUsers" {
+			if shared.IsPublicPrincipal(binding.Member) {
 				resource := PublicResource{
 					ResourceType:   "Spanner Database",
 					ResourceName:   db.Name,
@@ -847,7 +848,7 @@ func (m *PublicAccessModule) checkDataprocClusters(ctx context.Context, projectI
 
 				for _, binding := range policy.Bindings {
 					for _, member := range binding.Members {
-						if member == "allUsers" || member == "allAuthenticatedUsers" {
+						if shared.IsPublicPrincipal(member) {
 							resource := PublicResource{
 								ResourceType:   "Dataproc Cluster",
 								ResourceName:   cluster.ClusterName,
@@ -890,7 +891,7 @@ func (m *PublicAccessModule) checkNotebooks(ctx context.Context, projectID strin
 
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" || member == "allAuthenticatedUsers" {
+					if shared.IsPublicPrincipal(member) {
 						location := publicAccessExtractLocation(instance.Name)
 						resource := PublicResource{
 							ResourceType:   "Notebook Instance",
@@ -934,7 +935,7 @@ func (m *PublicAccessModule) checkSourceRepos(ctx context.Context, projectID str
 
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" || member == "allAuthenticatedUsers" {
+					if shared.IsPublicPrincipal(member) {
 						resource := PublicResource{
 							ResourceType:   "Source Repository",
 							ResourceName:   publicAccessExtractResourceName(repo.Name),

@@ -11,6 +11,7 @@ import (
 	"cloud.google.com/go/pubsub"
 	"cloud.google.com/go/storage"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	run "google.golang.org/api/run/v1"
 	secretmanager "google.golang.org/api/secretmanager/v1"
 	"google.golang.org/api/iterator"
@@ -39,6 +40,30 @@ func (s *ResourceIAMService) getClientOption() option.ClientOption {
 		return s.session.GetClientOption()
 	}
 	return nil
+}
+
+// getSecretManagerService returns a cached Secret Manager service
+func (s *ResourceIAMService) getSecretManagerService(ctx context.Context) (*secretmanager.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetSecretManagerService(ctx, s.session)
+	}
+	return secretmanager.NewService(ctx)
+}
+
+// getCloudFunctionsService returns a cached Cloud Functions service (v1)
+func (s *ResourceIAMService) getCloudFunctionsService(ctx context.Context) (*cloudfunctions.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetCloudFunctionsService(ctx, s.session)
+	}
+	return cloudfunctions.NewService(ctx)
+}
+
+// getCloudRunService returns a cached Cloud Run service
+func (s *ResourceIAMService) getCloudRunService(ctx context.Context) (*run.APIService, error) {
+	if s.session != nil {
+		return sdk.CachedGetCloudRunService(ctx, s.session)
+	}
+	return run.NewService(ctx)
 }
 
 // ResourceIAMBinding represents an IAM binding on a specific resource
@@ -345,13 +370,7 @@ func (s *ResourceIAMService) GetPubSubIAM(ctx context.Context, projectID string)
 func (s *ResourceIAMService) GetSecretManagerIAM(ctx context.Context, projectID string) ([]ResourceIAMBinding, error) {
 	var bindings []ResourceIAMBinding
 
-	var smService *secretmanager.Service
-	var err error
-	if s.session != nil {
-		smService, err = secretmanager.NewService(ctx, s.getClientOption())
-	} else {
-		smService, err = secretmanager.NewService(ctx)
-	}
+	smService, err := s.getSecretManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "secretmanager.googleapis.com")
 	}
@@ -474,13 +493,7 @@ func (s *ResourceIAMService) GetKMSIAM(ctx context.Context, projectID string) ([
 func (s *ResourceIAMService) GetCloudFunctionsIAM(ctx context.Context, projectID string) ([]ResourceIAMBinding, error) {
 	var bindings []ResourceIAMBinding
 
-	var cfService *cloudfunctions.Service
-	var err error
-	if s.session != nil {
-		cfService, err = cloudfunctions.NewService(ctx, s.getClientOption())
-	} else {
-		cfService, err = cloudfunctions.NewService(ctx)
-	}
+	cfService, err := s.getCloudFunctionsService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudfunctions.googleapis.com")
 	}
@@ -530,13 +543,7 @@ func (s *ResourceIAMService) GetCloudFunctionsIAM(ctx context.Context, projectID
 func (s *ResourceIAMService) GetCloudRunIAM(ctx context.Context, projectID string) ([]ResourceIAMBinding, error) {
 	var bindings []ResourceIAMBinding
 
-	var runService *run.APIService
-	var err error
-	if s.session != nil {
-		runService, err = run.NewService(ctx, s.getClientOption())
-	} else {
-		runService, err = run.NewService(ctx)
-	}
+	runService, err := s.getCloudRunService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "run.googleapis.com")
 	}

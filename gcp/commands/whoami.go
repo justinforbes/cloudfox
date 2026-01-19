@@ -9,6 +9,7 @@ import (
 	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
 	IAMService "github.com/BishopFox/cloudfox/gcp/services/iamService"
 	OAuthService "github.com/BishopFox/cloudfox/gcp/services/oauthService"
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -675,21 +676,21 @@ func (m *WhoAmIModule) findImpersonationTargets(ctx context.Context, logger inte
 			canActAs := false
 
 			for _, tc := range impersonationInfo.TokenCreators {
-				if tc == fullMember || tc == m.Identity.Email || tc == "allUsers" || tc == "allAuthenticatedUsers" {
+				if tc == fullMember || tc == m.Identity.Email || shared.IsPublicPrincipal(tc) {
 					canImpersonate = true
 					break
 				}
 			}
 
 			for _, kc := range impersonationInfo.KeyCreators {
-				if kc == fullMember || kc == m.Identity.Email || kc == "allUsers" || kc == "allAuthenticatedUsers" {
+				if kc == fullMember || kc == m.Identity.Email || shared.IsPublicPrincipal(kc) {
 					canCreateKeys = true
 					break
 				}
 			}
 
 			for _, aa := range impersonationInfo.ActAsUsers {
-				if aa == fullMember || aa == m.Identity.Email || aa == "allUsers" || aa == "allAuthenticatedUsers" {
+				if aa == fullMember || aa == m.Identity.Email || shared.IsPublicPrincipal(aa) {
 					canActAs = true
 					break
 				}
@@ -1544,9 +1545,9 @@ func (m *WhoAmIModule) buildTables() []internal.TableFile {
 				impersonationBody = append(impersonationBody, []string{
 					target.ServiceAccount,
 					target.ProjectID,
-					whoamiBoolToYesNo(target.CanImpersonate),
-					whoamiBoolToYesNo(target.CanCreateKeys),
-					whoamiBoolToYesNo(target.CanActAs),
+					shared.BoolToYesNo(target.CanImpersonate),
+					shared.BoolToYesNo(target.CanCreateKeys),
+					shared.BoolToYesNo(target.CanActAs),
 				})
 			}
 
@@ -1697,10 +1698,3 @@ func (m *WhoAmIModule) writeFlatOutput(ctx context.Context, logger internal.Logg
 	}
 }
 
-// whoamiBoolToYesNo converts a boolean to "Yes" or "No"
-func whoamiBoolToYesNo(b bool) string {
-	if b {
-		return "Yes"
-	}
-	return "No"
-}

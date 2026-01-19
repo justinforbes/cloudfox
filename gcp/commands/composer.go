@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -232,8 +233,8 @@ func (m *ComposerModule) environmentsToTableBody(environments []composerservice.
 			env.State,
 			sa,
 			attackPaths,
-			boolToYesNo(env.PrivateEnvironment),
-			boolToYesNo(env.EnablePrivateEndpoint),
+			shared.BoolToYesNo(env.PrivateEnvironment),
+			shared.BoolToYesNo(env.EnablePrivateEndpoint),
 			airflowURI,
 			dagBucket,
 			imageVersion,

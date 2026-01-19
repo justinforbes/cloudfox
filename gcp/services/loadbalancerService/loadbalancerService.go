@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	compute "google.golang.org/api/compute/v1"
 )
 
@@ -18,6 +19,14 @@ func New() *LoadBalancerService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *LoadBalancerService {
 	return &LoadBalancerService{session: session}
+}
+
+// getService returns a Compute service client using cached session if available
+func (s *LoadBalancerService) getService(ctx context.Context) (*compute.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetComputeService(ctx, s.session)
+	}
+	return compute.NewService(ctx)
 }
 
 // LoadBalancerInfo represents a load balancer configuration
@@ -71,14 +80,8 @@ type BackendServiceInfo struct {
 // ListLoadBalancers retrieves all load balancers in a project
 func (s *LoadBalancerService) ListLoadBalancers(projectID string) ([]LoadBalancerInfo, error) {
 	ctx := context.Background()
-	var service *compute.Service
-	var err error
 
-	if s.session != nil {
-		service, err = compute.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = compute.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
@@ -114,14 +117,8 @@ func (s *LoadBalancerService) ListLoadBalancers(projectID string) ([]LoadBalance
 // ListSSLPolicies retrieves all SSL policies
 func (s *LoadBalancerService) ListSSLPolicies(projectID string) ([]SSLPolicyInfo, error) {
 	ctx := context.Background()
-	var service *compute.Service
-	var err error
 
-	if s.session != nil {
-		service, err = compute.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = compute.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
@@ -150,14 +147,8 @@ func (s *LoadBalancerService) ListSSLPolicies(projectID string) ([]SSLPolicyInfo
 // ListBackendServices retrieves all backend services
 func (s *LoadBalancerService) ListBackendServices(projectID string) ([]BackendServiceInfo, error) {
 	ctx := context.Background()
-	var service *compute.Service
-	var err error
 
-	if s.session != nil {
-		service, err = compute.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = compute.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}

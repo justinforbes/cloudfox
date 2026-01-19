@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	scheduler "google.golang.org/api/cloudscheduler/v1"
 )
 
@@ -31,10 +32,18 @@ var schedulerRegions = []string{
 	"africa-south1", "me-central1", "me-west1",
 }
 
-type SchedulerService struct{}
+type SchedulerService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *SchedulerService {
 	return &SchedulerService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *SchedulerService {
+	return &SchedulerService{
+		session: session,
+	}
 }
 
 // JobInfo holds Cloud Scheduler job details with security-relevant information
@@ -70,13 +79,21 @@ type JobInfo struct {
 	Status            string  // Last attempt status
 }
 
+// getService returns a Cloud Scheduler service client using cached session if available
+func (ss *SchedulerService) getService(ctx context.Context) (*scheduler.Service, error) {
+	if ss.session != nil {
+		return sdk.CachedGetSchedulerService(ctx, ss.session)
+	}
+	return scheduler.NewService(ctx)
+}
+
 // Jobs retrieves all Cloud Scheduler jobs in a project across all regions
 // Note: The Cloud Scheduler API does NOT support the "-" wildcard for locations
 // so we must iterate through regions explicitly
 func (ss *SchedulerService) Jobs(projectID string) ([]JobInfo, error) {
 	ctx := context.Background()
 
-	service, err := scheduler.NewService(ctx)
+	service, err := ss.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudscheduler.googleapis.com")
 	}

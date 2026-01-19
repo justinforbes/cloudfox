@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -155,7 +156,7 @@ func (m *NotebooksModule) addToLoot(projectID string, instance notebooksservice.
 			"# Public IP: %s, Proxy Access: %s\n",
 		instance.Name, instance.ProjectID, instance.Location,
 		instance.State, instance.ServiceAccount,
-		boolToYesNo(!instance.NoPublicIP), boolToYesNo(!instance.NoProxyAccess),
+		shared.BoolToYesNo(!instance.NoPublicIP), shared.BoolToYesNo(!instance.NoProxyAccess),
 	)
 
 	if instance.ProxyUri != "" {
@@ -272,8 +273,8 @@ func (m *NotebooksModule) instancesToTableBody(instances []notebooksservice.Note
 			attackPaths,
 			network,
 			subnet,
-			boolToYesNo(!instance.NoPublicIP),
-			boolToYesNo(!instance.NoProxyAccess),
+			shared.BoolToYesNo(!instance.NoPublicIP),
+			shared.BoolToYesNo(!instance.NoProxyAccess),
 			proxyUri,
 			gpu,
 			creator,

@@ -6,13 +6,28 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	sqladmin "google.golang.org/api/sqladmin/v1"
 )
 
-type CloudSQLService struct{}
+type CloudSQLService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *CloudSQLService {
 	return &CloudSQLService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *CloudSQLService {
+	return &CloudSQLService{session: session}
+}
+
+// getService returns a SQL Admin service, either cached from the session or a new one
+func (cs *CloudSQLService) getService(ctx context.Context) (*sqladmin.Service, error) {
+	if cs.session != nil {
+		return sdk.CachedGetSQLAdminService(ctx, cs.session)
+	}
+	return sqladmin.NewService(ctx)
 }
 
 // SQLInstanceInfo holds Cloud SQL instance details with security-relevant information
@@ -75,7 +90,7 @@ type AuthorizedNetwork struct {
 func (cs *CloudSQLService) Instances(projectID string) ([]SQLInstanceInfo, error) {
 	ctx := context.Background()
 
-	service, err := sqladmin.NewService(ctx)
+	service, err := cs.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "sqladmin.googleapis.com")
 	}

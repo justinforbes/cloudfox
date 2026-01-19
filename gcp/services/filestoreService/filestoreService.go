@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	file "google.golang.org/api/file/v1"
 )
 
@@ -15,6 +16,12 @@ type FilestoreService struct {
 
 func New() *FilestoreService {
 	return &FilestoreService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *FilestoreService {
+	return &FilestoreService{
+		session: session,
+	}
 }
 
 type FilestoreInstanceInfo struct {
@@ -44,9 +51,17 @@ type NfsExportOption struct {
 	AnonGID    int64    `json:"anonGid"`
 }
 
+// getService returns a Filestore service client using cached session if available
+func (s *FilestoreService) getService(ctx context.Context) (*file.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetFilestoreService(ctx, s.session)
+	}
+	return file.NewService(ctx)
+}
+
 func (s *FilestoreService) ListInstances(projectID string) ([]FilestoreInstanceInfo, error) {
 	ctx := context.Background()
-	service, err := file.NewService(ctx)
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "file.googleapis.com")
 	}

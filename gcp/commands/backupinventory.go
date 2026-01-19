@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -313,7 +314,7 @@ func (m *BackupInventoryModule) enumerateSnapshots(ctx context.Context, projectI
 					})
 					// Check for public access
 					for _, member := range binding.Members {
-						if member == "allUsers" || member == "allAuthenticatedUsers" {
+						if shared.IsPublicPrincipal(member) {
 							snap.PublicAccess = true
 						}
 					}

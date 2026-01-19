@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	KMSService "github.com/BishopFox/cloudfox/gcp/services/kmsService"
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -332,8 +333,8 @@ func (m *KMSModule) keysToTableBody(keys []KMSService.CryptoKeyInfo) [][]string 
 			key.PrimaryVersion,
 			key.PrimaryState,
 			rotation,
-			boolToYesNo(key.IsPublicEncrypt),
-			boolToYesNo(key.IsPublicDecrypt),
+			shared.BoolToYesNo(key.IsPublicEncrypt),
+			shared.BoolToYesNo(key.IsPublicDecrypt),
 		}
 
 		// If key has IAM bindings, create one row per binding

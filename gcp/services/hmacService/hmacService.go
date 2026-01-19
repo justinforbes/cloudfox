@@ -6,6 +6,7 @@ import (
 	"time"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	"google.golang.org/api/storage/v1"
 )
 
@@ -19,6 +20,14 @@ func New() *HMACService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *HMACService {
 	return &HMACService{session: session}
+}
+
+// getStorageService returns a Storage service client using cached session if available
+func (s *HMACService) getStorageService(ctx context.Context) (*storage.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetStorageService(ctx, s.session)
+	}
+	return storage.NewService(ctx)
 }
 
 // HMACKeyInfo represents a GCS HMAC key (S3-compatible access)
@@ -39,14 +48,8 @@ type HMACKeyInfo struct {
 // ListHMACKeys lists all HMAC keys in a project
 func (s *HMACService) ListHMACKeys(projectID string) ([]HMACKeyInfo, error) {
 	ctx := context.Background()
-	var storageService *storage.Service
-	var err error
 
-	if s.session != nil {
-		storageService, err = storage.NewService(ctx, s.session.GetClientOption())
-	} else {
-		storageService, err = storage.NewService(ctx)
-	}
+	storageService, err := s.getStorageService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
 	}

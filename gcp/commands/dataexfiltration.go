@@ -12,6 +12,7 @@ import (
 	orgpolicyservice "github.com/BishopFox/cloudfox/gcp/services/orgpolicyService"
 	pubsubservice "github.com/BishopFox/cloudfox/gcp/services/pubsubService"
 	vpcscservice "github.com/BishopFox/cloudfox/gcp/services/vpcscService"
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -758,12 +759,14 @@ func (m *DataExfiltrationModule) findPublicSnapshots(ctx context.Context, projec
 			accessLevel := ""
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" {
-						accessLevel = "allUsers"
-						break
-					}
-					if member == "allAuthenticatedUsers" && accessLevel != "allUsers" {
-						accessLevel = "allAuthenticatedUsers"
+					if shared.IsPublicPrincipal(member) {
+						if member == "allUsers" {
+							accessLevel = "allUsers"
+							break
+						}
+						if accessLevel != "allUsers" {
+							accessLevel = "allAuthenticatedUsers"
+						}
 					}
 				}
 			}
@@ -829,12 +832,14 @@ func (m *DataExfiltrationModule) findPublicImages(ctx context.Context, projectID
 			accessLevel := ""
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					if member == "allUsers" {
-						accessLevel = "allUsers"
-						break
-					}
-					if member == "allAuthenticatedUsers" && accessLevel != "allUsers" {
-						accessLevel = "allAuthenticatedUsers"
+					if shared.IsPublicPrincipal(member) {
+						if member == "allUsers" {
+							accessLevel = "allUsers"
+							break
+						}
+						if accessLevel != "allUsers" {
+							accessLevel = "allAuthenticatedUsers"
+						}
 					}
 				}
 			}
@@ -908,12 +913,14 @@ func (m *DataExfiltrationModule) findPublicBuckets(ctx context.Context, projectI
 		accessLevel := ""
 		for _, binding := range policy.Bindings {
 			for _, member := range binding.Members {
-				if member == "allUsers" {
-					accessLevel = "allUsers"
-					break
-				}
-				if member == "allAuthenticatedUsers" && accessLevel != "allUsers" {
-					accessLevel = "allAuthenticatedUsers"
+				if shared.IsPublicPrincipal(member) {
+					if member == "allUsers" {
+						accessLevel = "allUsers"
+						break
+					}
+					if accessLevel != "allUsers" {
+						accessLevel = "allAuthenticatedUsers"
+					}
 				}
 			}
 		}
@@ -1619,18 +1626,6 @@ gcloud secrets versions access latest --secret=SECRET_NAME --project=%s`, projec
 	default:
 		return fmt.Sprintf("# Permission: %s\n# Refer to GCP documentation for exploitation", permission)
 	}
-}
-
-// extractPrincipalType extracts the type from a principal name like "user:email" or "serviceAccount:email"
-func extractPrincipalType(principalName string) string {
-	if strings.HasPrefix(principalName, "user:") {
-		return "user"
-	} else if strings.HasPrefix(principalName, "serviceAccount:") {
-		return "serviceAccount"
-	} else if strings.HasPrefix(principalName, "group:") {
-		return "group"
-	}
-	return "unknown"
 }
 
 // ------------------------------

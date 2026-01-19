@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -355,10 +356,10 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 		clusterBody = append(clusterBody, []string{
 			m.GetProjectName(cluster.ProjectID), cluster.ProjectID, cluster.Name, cluster.Location,
 			endpoint, cluster.Status, cluster.CurrentMasterVersion, clusterMode,
-			boolToYesNo(cluster.PrivateCluster), boolToYesNo(cluster.MasterAuthorizedOnly),
-			boolToYesNo(cluster.NetworkPolicy), boolToYesNo(cluster.WorkloadIdentity != ""),
-			boolToYesNo(cluster.ShieldedNodes), boolToYesNo(cluster.BinaryAuthorization),
-			releaseChannel, boolToYesNo(cluster.ConfigConnector),
+			shared.BoolToYesNo(cluster.PrivateCluster), shared.BoolToYesNo(cluster.MasterAuthorizedOnly),
+			shared.BoolToYesNo(cluster.NetworkPolicy), shared.BoolToYesNo(cluster.WorkloadIdentity != ""),
+			shared.BoolToYesNo(cluster.ShieldedNodes), shared.BoolToYesNo(cluster.BinaryAuthorization),
+			releaseChannel, shared.BoolToYesNo(cluster.ConfigConnector),
 		})
 	}
 
@@ -396,8 +397,8 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 		nodePoolBody = append(nodePoolBody, []string{
 			m.GetProjectName(np.ProjectID), np.ProjectID, np.ClusterName, np.Name,
 			np.MachineType, fmt.Sprintf("%d", np.NodeCount), saDisplay, attackPaths,
-			boolToYesNo(np.HasCloudPlatformScope), boolToYesNo(np.AutoUpgrade),
-			boolToYesNo(np.SecureBoot), boolToYesNo(np.Preemptible || np.Spot),
+			shared.BoolToYesNo(np.HasCloudPlatformScope), shared.BoolToYesNo(np.AutoUpgrade),
+			shared.BoolToYesNo(np.SecureBoot), shared.BoolToYesNo(np.Preemptible || np.Spot),
 		})
 	}
 

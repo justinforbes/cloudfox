@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -639,18 +640,18 @@ func (m *InstancesModule) instancesToTableBody(instances []ComputeEngineService.
 			saEmail,
 			attackPaths,
 			scopes,
-			boolToYesNo(instance.HasDefaultSA),
-			boolToYesNo(instance.HasCloudScopes),
-			boolToYesNo(instance.OSLoginEnabled),
-			boolToYesNo(instance.OSLogin2FAEnabled),
-			boolToYesNo(instance.BlockProjectSSHKeys),
-			boolToYesNo(instance.SerialPortEnabled),
-			boolToYesNo(instance.CanIPForward),
-			boolToYesNo(instance.ShieldedVM),
-			boolToYesNo(instance.SecureBoot),
-			boolToYesNo(instance.VTPMEnabled),
-			boolToYesNo(instance.IntegrityMonitoring),
-			boolToYesNo(instance.ConfidentialVM),
+			shared.BoolToYesNo(instance.HasDefaultSA),
+			shared.BoolToYesNo(instance.HasCloudScopes),
+			shared.BoolToYesNo(instance.OSLoginEnabled),
+			shared.BoolToYesNo(instance.OSLogin2FAEnabled),
+			shared.BoolToYesNo(instance.BlockProjectSSHKeys),
+			shared.BoolToYesNo(instance.SerialPortEnabled),
+			shared.BoolToYesNo(instance.CanIPForward),
+			shared.BoolToYesNo(instance.ShieldedVM),
+			shared.BoolToYesNo(instance.SecureBoot),
+			shared.BoolToYesNo(instance.VTPMEnabled),
+			shared.BoolToYesNo(instance.IntegrityMonitoring),
+			shared.BoolToYesNo(instance.ConfidentialVM),
 			encryption,
 			kmsKey,
 		}

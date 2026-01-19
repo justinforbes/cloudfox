@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -484,7 +485,7 @@ func (m *FunctionsModule) functionsToTableBody(functions []FunctionsService.Func
 					triggerInfo,
 					url,
 					fn.IngressSettings,
-					boolToYesNo(fn.IsPublic),
+					shared.BoolToYesNo(fn.IsPublic),
 					serviceAccount,
 					attackPaths,
 					vpcConnector,
@@ -505,7 +506,7 @@ func (m *FunctionsModule) functionsToTableBody(functions []FunctionsService.Func
 				triggerInfo,
 				url,
 				fn.IngressSettings,
-				boolToYesNo(fn.IsPublic),
+				shared.BoolToYesNo(fn.IsPublic),
 				serviceAccount,
 				attackPaths,
 				vpcConnector,

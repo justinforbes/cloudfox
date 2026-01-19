@@ -12,6 +12,7 @@ import (
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	secretmanagerpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	"github.com/googleapis/gax-go/v2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/iterator"
@@ -42,6 +43,14 @@ type SecretsService struct {
 	session *gcpinternal.SafeSession
 }
 
+// getClient returns a cached Secret Manager client
+func (s *SecretsService) getClient(ctx context.Context) (*secretmanager.Client, error) {
+	if s.session != nil {
+		return sdk.CachedGetSecretManagerClient(ctx, s.session)
+	}
+	return secretmanager.NewClient(ctx)
+}
+
 // New creates a SecretsService with the provided client
 func New(client *secretmanager.Client) SecretsService {
 	ss := SecretsService{
@@ -59,27 +68,21 @@ func New(client *secretmanager.Client) SecretsService {
 // NewWithSession creates a SecretsService with a SafeSession for managed authentication
 func NewWithSession(session *gcpinternal.SafeSession) (SecretsService, error) {
 	ctx := context.Background()
-	var client *secretmanager.Client
-	var err error
-
-	if session != nil {
-		client, err = secretmanager.NewClient(ctx, session.GetClientOption())
-	} else {
-		client, err = secretmanager.NewClient(ctx)
+	ss := SecretsService{
+		session: session,
 	}
+
+	client, err := ss.getClient(ctx)
 	if err != nil {
 		return SecretsService{}, gcpinternal.ParseGCPError(err, "secretmanager.googleapis.com")
 	}
 
-	ss := SecretsService{
-		Client: &SecretsManagerClientWrapper{
-			Closer: client.Close,
-			SecretLister: func(ctx context.Context, req *secretmanagerpb.ListSecretsRequest, opts ...gax.CallOption) Iterator {
-				return client.ListSecrets(ctx, req, opts...)
-			},
-			rawClient: client,
+	ss.Client = &SecretsManagerClientWrapper{
+		Closer: client.Close,
+		SecretLister: func(ctx context.Context, req *secretmanagerpb.ListSecretsRequest, opts ...gax.CallOption) Iterator {
+			return client.ListSecrets(ctx, req, opts...)
 		},
-		session: session,
+		rawClient: client,
 	}
 	return ss, nil
 }

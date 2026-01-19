@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	PubSubService "github.com/BishopFox/cloudfox/gcp/services/pubsubService"
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -105,7 +106,7 @@ func (m *PubSubModule) Execute(ctx context.Context, logger internal.Logger) {
 	pushSubs := 0
 	for _, topic := range allTopics {
 		for _, binding := range topic.IAMBindings {
-			if binding.Member == "allUsers" || binding.Member == "allAuthenticatedUsers" {
+			if shared.IsPublicPrincipal(binding.Member) {
 				publicTopics++
 				break
 			}
@@ -113,7 +114,7 @@ func (m *PubSubModule) Execute(ctx context.Context, logger internal.Logger) {
 	}
 	for _, sub := range allSubs {
 		for _, binding := range sub.IAMBindings {
-			if binding.Member == "allUsers" || binding.Member == "allAuthenticatedUsers" {
+			if shared.IsPublicPrincipal(binding.Member) {
 				publicSubs++
 				break
 			}

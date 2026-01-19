@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -144,10 +145,10 @@ func (m *OrgPoliciesModule) addPolicyToLoot(projectID string, policy orgpolicyse
 
 	lootFile.Contents += fmt.Sprintf(
 		"# Enforced: %s, AllowAll: %s, DenyAll: %s, Inherit: %s\n",
-		boolToYesNo(policy.Enforced),
-		boolToYesNo(policy.AllowAll),
-		boolToYesNo(policy.DenyAll),
-		boolToYesNo(policy.InheritParent),
+		shared.BoolToYesNo(policy.Enforced),
+		shared.BoolToYesNo(policy.AllowAll),
+		shared.BoolToYesNo(policy.DenyAll),
+		shared.BoolToYesNo(policy.InheritParent),
 	)
 
 	if len(policy.AllowedValues) > 0 {
@@ -213,10 +214,10 @@ func (m *OrgPoliciesModule) policiesToTableBody(policies []orgpolicyservice.OrgP
 			policy.ProjectID,
 			policy.Constraint,
 			description,
-			boolToYesNo(policy.Enforced),
-			boolToYesNo(policy.AllowAll),
-			boolToYesNo(policy.DenyAll),
-			boolToYesNo(policy.InheritParent),
+			shared.BoolToYesNo(policy.Enforced),
+			shared.BoolToYesNo(policy.AllowAll),
+			shared.BoolToYesNo(policy.DenyAll),
+			shared.BoolToYesNo(policy.InheritParent),
 			allowedValues,
 			deniedValues,
 		})

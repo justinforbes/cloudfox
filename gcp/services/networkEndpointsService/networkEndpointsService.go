@@ -6,14 +6,39 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	compute "google.golang.org/api/compute/v1"
 	servicenetworking "google.golang.org/api/servicenetworking/v1"
 )
 
-type NetworkEndpointsService struct{}
+type NetworkEndpointsService struct {
+	session *gcpinternal.SafeSession
+}
 
 func New() *NetworkEndpointsService {
 	return &NetworkEndpointsService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *NetworkEndpointsService {
+	return &NetworkEndpointsService{
+		session: session,
+	}
+}
+
+// getComputeService returns a Compute service client using cached session if available
+func (s *NetworkEndpointsService) getComputeService(ctx context.Context) (*compute.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetComputeService(ctx, s.session)
+	}
+	return compute.NewService(ctx)
+}
+
+// getServiceNetworkingService returns a Service Networking service client using cached session if available
+func (s *NetworkEndpointsService) getServiceNetworkingService(ctx context.Context) (*servicenetworking.APIService, error) {
+	if s.session != nil {
+		return sdk.CachedGetServiceNetworkingService(ctx, s.session)
+	}
+	return servicenetworking.NewService(ctx)
 }
 
 // PrivateServiceConnectEndpoint represents a PSC endpoint
@@ -64,7 +89,7 @@ type ServiceAttachment struct {
 // GetPrivateServiceConnectEndpoints retrieves PSC forwarding rules
 func (s *NetworkEndpointsService) GetPrivateServiceConnectEndpoints(projectID string) ([]PrivateServiceConnectEndpoint, error) {
 	ctx := context.Background()
-	service, err := compute.NewService(ctx)
+	service, err := s.getComputeService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
@@ -134,7 +159,7 @@ func (s *NetworkEndpointsService) GetPrivateServiceConnectEndpoints(projectID st
 // GetPrivateConnections retrieves private service connections
 func (s *NetworkEndpointsService) GetPrivateConnections(projectID string) ([]PrivateConnection, error) {
 	ctx := context.Background()
-	service, err := servicenetworking.NewService(ctx)
+	service, err := s.getServiceNetworkingService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "servicenetworking.googleapis.com")
 	}
@@ -142,7 +167,7 @@ func (s *NetworkEndpointsService) GetPrivateConnections(projectID string) ([]Pri
 	var connections []PrivateConnection
 
 	// List connections for the project's networks
-	computeService, err := compute.NewService(ctx)
+	computeService, err := s.getComputeService(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +211,7 @@ func (s *NetworkEndpointsService) GetPrivateConnections(projectID string) ([]Pri
 // GetServiceAttachments retrieves PSC service attachments (producer side)
 func (s *NetworkEndpointsService) GetServiceAttachments(projectID string) ([]ServiceAttachment, error) {
 	ctx := context.Background()
-	service, err := compute.NewService(ctx)
+	service, err := s.getComputeService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}

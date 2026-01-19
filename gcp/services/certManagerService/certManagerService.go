@@ -7,14 +7,23 @@ import (
 	"time"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	certificatemanager "google.golang.org/api/certificatemanager/v1"
 	compute "google.golang.org/api/compute/v1"
 )
 
-type CertManagerService struct{}
+type CertManagerService struct {
+	session *gcpinternal.SafeSession
+}
 
 func New() *CertManagerService {
 	return &CertManagerService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *CertManagerService {
+	return &CertManagerService{
+		session: session,
+	}
 }
 
 // Certificate represents an SSL/TLS certificate
@@ -57,10 +66,26 @@ type CertificateMap struct {
 	Certificates []string `json:"certificates"`
 }
 
+// getCertManagerService returns a Certificate Manager service client using cached session if available
+func (s *CertManagerService) getCertManagerService(ctx context.Context) (*certificatemanager.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetCertificateManagerService(ctx, s.session)
+	}
+	return certificatemanager.NewService(ctx)
+}
+
+// getComputeService returns a Compute service client using cached session if available
+func (s *CertManagerService) getComputeService(ctx context.Context) (*compute.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetComputeService(ctx, s.session)
+	}
+	return compute.NewService(ctx)
+}
+
 // GetCertificates retrieves Certificate Manager certificates
 func (s *CertManagerService) GetCertificates(projectID string) ([]Certificate, error) {
 	ctx := context.Background()
-	service, err := certificatemanager.NewService(ctx)
+	service, err := s.getCertManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "certificatemanager.googleapis.com")
 	}
@@ -124,7 +149,7 @@ func (s *CertManagerService) GetCertificates(projectID string) ([]Certificate, e
 // GetSSLCertificates retrieves classic Compute Engine SSL certificates
 func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertificate, error) {
 	ctx := context.Background()
-	service, err := compute.NewService(ctx)
+	service, err := s.getComputeService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
@@ -222,7 +247,7 @@ func (s *CertManagerService) GetSSLCertificates(projectID string) ([]SSLCertific
 // GetCertificateMaps retrieves certificate maps
 func (s *CertManagerService) GetCertificateMaps(projectID string) ([]CertificateMap, error) {
 	ctx := context.Background()
-	service, err := certificatemanager.NewService(ctx)
+	service, err := s.getCertManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "certificatemanager.googleapis.com")
 	}

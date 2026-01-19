@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	cloudbuild "google.golang.org/api/cloudbuild/v1"
 )
 
@@ -20,6 +21,14 @@ func New() *CloudBuildService {
 // NewWithSession creates a CloudBuildService with a SafeSession for managed authentication
 func NewWithSession(session *gcpinternal.SafeSession) *CloudBuildService {
 	return &CloudBuildService{session: session}
+}
+
+// getService returns a Cloud Build service client using cached session if available
+func (s *CloudBuildService) getService(ctx context.Context) (*cloudbuild.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetCloudBuildService(ctx, s.session)
+	}
+	return cloudbuild.NewService(ctx)
 }
 
 // TriggerInfo represents a Cloud Build trigger
@@ -92,14 +101,8 @@ type TriggerSecurityAnalysis struct {
 // ListTriggers retrieves all Cloud Build triggers in a project
 func (s *CloudBuildService) ListTriggers(projectID string) ([]TriggerInfo, error) {
 	ctx := context.Background()
-	var service *cloudbuild.Service
-	var err error
 
-	if s.session != nil {
-		service, err = cloudbuild.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = cloudbuild.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudbuild.googleapis.com")
 	}
@@ -136,14 +139,8 @@ func (s *CloudBuildService) ListTriggers(projectID string) ([]TriggerInfo, error
 // ListBuilds retrieves recent Cloud Build executions
 func (s *CloudBuildService) ListBuilds(projectID string, limit int64) ([]BuildInfo, error) {
 	ctx := context.Background()
-	var service *cloudbuild.Service
-	var err error
 
-	if s.session != nil {
-		service, err = cloudbuild.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = cloudbuild.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudbuild.googleapis.com")
 	}

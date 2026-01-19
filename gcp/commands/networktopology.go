@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"sort"
@@ -1452,8 +1453,8 @@ func (m *NetworkTopologyModule) subnetsToTableBody(subnets []Subnet) [][]string 
 					m.extractNetworkName(s.Network),
 					s.Region,
 					s.IPCIDRRange,
-					boolToYesNo(s.PrivateIPGoogleAccess),
-					boolToYesNo(s.FlowLogsEnabled),
+					shared.BoolToYesNo(s.PrivateIPGoogleAccess),
+					shared.BoolToYesNo(s.FlowLogsEnabled),
 					purpose,
 					binding.Role,
 					binding.Member,
@@ -1468,8 +1469,8 @@ func (m *NetworkTopologyModule) subnetsToTableBody(subnets []Subnet) [][]string 
 				m.extractNetworkName(s.Network),
 				s.Region,
 				s.IPCIDRRange,
-				boolToYesNo(s.PrivateIPGoogleAccess),
-				boolToYesNo(s.FlowLogsEnabled),
+				shared.BoolToYesNo(s.PrivateIPGoogleAccess),
+				shared.BoolToYesNo(s.FlowLogsEnabled),
 				purpose,
 				"-",
 				"-",
@@ -1490,8 +1491,8 @@ func (m *NetworkTopologyModule) peeringsToTableBody(peerings []VPCPeering) [][]s
 			m.extractNetworkName(p.PeerNetwork),
 			p.PeerProjectID,
 			p.State,
-			boolToYesNo(p.ImportCustomRoute),
-			boolToYesNo(p.ExportCustomRoute),
+			shared.BoolToYesNo(p.ImportCustomRoute),
+			shared.BoolToYesNo(p.ExportCustomRoute),
 		})
 	}
 	return body
@@ -1512,7 +1513,7 @@ func (m *NetworkTopologyModule) natsToTableBody(nats []CloudNATConfig) [][]strin
 			nat.Region,
 			m.extractNetworkName(nat.Network),
 			natIPs,
-			boolToYesNo(nat.EnableLogging),
+			shared.BoolToYesNo(nat.EnableLogging),
 		})
 	}
 	return body

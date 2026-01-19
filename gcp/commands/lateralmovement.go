@@ -12,6 +12,7 @@ import (
 	FunctionsService "github.com/BishopFox/cloudfox/gcp/services/functionsService"
 	GKEService "github.com/BishopFox/cloudfox/gcp/services/gkeService"
 	IAMService "github.com/BishopFox/cloudfox/gcp/services/iamService"
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -297,7 +298,7 @@ func (m *LateralMovementModule) findImpersonationChains(ctx context.Context, pro
 		// Token creators can impersonate
 		for _, creator := range impersonationInfo.TokenCreators {
 			// Skip allUsers/allAuthenticatedUsers - those are handled separately
-			if creator == "allUsers" || creator == "allAuthenticatedUsers" {
+			if shared.IsPublicPrincipal(creator) {
 				continue
 			}
 
@@ -323,7 +324,7 @@ func (m *LateralMovementModule) findImpersonationChains(ctx context.Context, pro
 
 		// Key creators can create persistent access
 		for _, creator := range impersonationInfo.KeyCreators {
-			if creator == "allUsers" || creator == "allAuthenticatedUsers" {
+			if shared.IsPublicPrincipal(creator) {
 				continue
 			}
 
@@ -807,18 +808,6 @@ gcloud compute snapshots add-iam-policy-binding SNAPSHOT_NAME \
 	default:
 		return fmt.Sprintf("# Permission: %s\n# Refer to GCP documentation for exploitation", permission)
 	}
-}
-
-// extractLateralPrincipalType extracts the type from a principal name
-func extractLateralPrincipalType(principalName string) string {
-	if strings.HasPrefix(principalName, "user:") {
-		return "user"
-	} else if strings.HasPrefix(principalName, "serviceAccount:") {
-		return "serviceAccount"
-	} else if strings.HasPrefix(principalName, "group:") {
-		return "group"
-	}
-	return "unknown"
 }
 
 // ------------------------------

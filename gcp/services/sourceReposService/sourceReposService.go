@@ -6,13 +6,22 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	sourcerepo "google.golang.org/api/sourcerepo/v1"
 )
 
-type SourceReposService struct{}
+type SourceReposService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *SourceReposService {
 	return &SourceReposService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *SourceReposService {
+	return &SourceReposService{
+		session: session,
+	}
 }
 
 // RepoInfo represents a Cloud Source Repository
@@ -33,10 +42,18 @@ type IAMBinding struct {
 	Member string `json:"member"`
 }
 
+// getService returns a source repo service client using cached session if available
+func (s *SourceReposService) getService(ctx context.Context) (*sourcerepo.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetSourceRepoService(ctx, s.session)
+	}
+	return sourcerepo.NewService(ctx)
+}
+
 // ListRepos retrieves all Cloud Source Repositories in a project
 func (s *SourceReposService) ListRepos(projectID string) ([]RepoInfo, error) {
 	ctx := context.Background()
-	service, err := sourcerepo.NewService(ctx)
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "sourcerepo.googleapis.com")
 	}

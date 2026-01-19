@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -216,7 +217,7 @@ func (m *MemorystoreModule) instancesToTableBody(instances []memorystoreservice.
 			fmt.Sprintf("%d", instance.MemorySizeGB),
 			instance.RedisVersion,
 			fmt.Sprintf("%s:%d", instance.Host, instance.Port),
-			boolToYesNo(instance.AuthEnabled),
+			shared.BoolToYesNo(instance.AuthEnabled),
 			transitEncryption,
 			instance.State,
 			extractNetworkName(instance.AuthorizedNetwork),

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	accesscontextmanager "google.golang.org/api/accesscontextmanager/v1"
 )
 
@@ -19,6 +20,14 @@ func New() *VPCSCService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *VPCSCService {
 	return &VPCSCService{session: session}
+}
+
+// getService returns an Access Context Manager service client using cached session if available
+func (s *VPCSCService) getService(ctx context.Context) (*accesscontextmanager.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetAccessContextManagerService(ctx, s.session)
+	}
+	return accesscontextmanager.NewService(ctx)
 }
 
 // AccessPolicyInfo represents an access policy
@@ -72,14 +81,8 @@ type AccessLevelInfo struct {
 // ListAccessPolicies retrieves all access policies for an organization
 func (s *VPCSCService) ListAccessPolicies(orgID string) ([]AccessPolicyInfo, error) {
 	ctx := context.Background()
-	var service *accesscontextmanager.Service
-	var err error
 
-	if s.session != nil {
-		service, err = accesscontextmanager.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = accesscontextmanager.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
@@ -111,14 +114,8 @@ func (s *VPCSCService) ListAccessPolicies(orgID string) ([]AccessPolicyInfo, err
 // ListServicePerimeters retrieves all service perimeters for an access policy
 func (s *VPCSCService) ListServicePerimeters(policyName string) ([]ServicePerimeterInfo, error) {
 	ctx := context.Background()
-	var service *accesscontextmanager.Service
-	var err error
 
-	if s.session != nil {
-		service, err = accesscontextmanager.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = accesscontextmanager.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
@@ -144,14 +141,8 @@ func (s *VPCSCService) ListServicePerimeters(policyName string) ([]ServicePerime
 // ListAccessLevels retrieves all access levels for an access policy
 func (s *VPCSCService) ListAccessLevels(policyName string) ([]AccessLevelInfo, error) {
 	ctx := context.Background()
-	var service *accesscontextmanager.Service
-	var err error
 
-	if s.session != nil {
-		service, err = accesscontextmanager.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = accesscontextmanager.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}

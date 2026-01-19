@@ -8,6 +8,7 @@ import (
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	SecretsService "github.com/BishopFox/cloudfox/gcp/services/secretsService"
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
@@ -258,34 +259,6 @@ func getSecretShortName(fullName string) string {
 	return fullName
 }
 
-// getSecretMemberType extracts the member type from a GCP IAM member string
-func getSecretMemberType(member string) string {
-	switch {
-	case member == "allUsers":
-		return "PUBLIC"
-	case member == "allAuthenticatedUsers":
-		return "ALL_AUTHENTICATED"
-	case strings.HasPrefix(member, "user:"):
-		return "User"
-	case strings.HasPrefix(member, "serviceAccount:"):
-		return "ServiceAccount"
-	case strings.HasPrefix(member, "group:"):
-		return "Group"
-	case strings.HasPrefix(member, "domain:"):
-		return "Domain"
-	case strings.HasPrefix(member, "projectOwner:"):
-		return "ProjectOwner"
-	case strings.HasPrefix(member, "projectEditor:"):
-		return "ProjectEditor"
-	case strings.HasPrefix(member, "projectViewer:"):
-		return "ProjectViewer"
-	case strings.HasPrefix(member, "deleted:"):
-		return "Deleted"
-	default:
-		return "Unknown"
-	}
-}
-
 // ------------------------------
 // Output Generation
 // ------------------------------
@@ -465,7 +438,7 @@ func (m *SecretsModule) secretsToTableBody(secrets []SecretsService.SecretInfo) 
 		if len(secret.IAMBindings) > 0 {
 			for _, binding := range secret.IAMBindings {
 				for _, member := range binding.Members {
-					memberType := getSecretMemberType(member)
+					memberType := shared.GetPrincipalType(member)
 					body = append(body, []string{
 						m.GetProjectName(secret.ProjectID),
 						secret.ProjectID,

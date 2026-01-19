@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	redis "google.golang.org/api/redis/v1"
 )
 
@@ -19,6 +20,14 @@ func New() *MemorystoreService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *MemorystoreService {
 	return &MemorystoreService{session: session}
+}
+
+// getService returns a Redis service client using cached session if available
+func (s *MemorystoreService) getService(ctx context.Context) (*redis.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetRedisService(ctx, s.session)
+	}
+	return redis.NewService(ctx)
 }
 
 // RedisInstanceInfo represents a Redis instance
@@ -44,14 +53,8 @@ type RedisInstanceInfo struct {
 // ListRedisInstances retrieves all Redis instances in a project
 func (s *MemorystoreService) ListRedisInstances(projectID string) ([]RedisInstanceInfo, error) {
 	ctx := context.Background()
-	var service *redis.Service
-	var err error
 
-	if s.session != nil {
-		service, err = redis.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = redis.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "redis.googleapis.com")
 	}

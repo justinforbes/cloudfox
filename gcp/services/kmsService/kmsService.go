@@ -6,13 +6,30 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	kms "google.golang.org/api/cloudkms/v1"
 )
 
-type KMSService struct{}
+type KMSService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *KMSService {
 	return &KMSService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *KMSService {
+	return &KMSService{
+		session: session,
+	}
+}
+
+// getService returns a KMS service client using cached session if available
+func (ks *KMSService) getService(ctx context.Context) (*kms.Service, error) {
+	if ks.session != nil {
+		return sdk.CachedGetKMSService(ctx, ks.session)
+	}
+	return kms.NewService(ctx)
 }
 
 // KeyRingInfo holds KMS key ring details
@@ -68,7 +85,7 @@ type CryptoKeyInfo struct {
 func (ks *KMSService) KeyRings(projectID string) ([]KeyRingInfo, error) {
 	ctx := context.Background()
 
-	service, err := kms.NewService(ctx)
+	service, err := ks.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudkms.googleapis.com")
 	}
@@ -103,7 +120,7 @@ func (ks *KMSService) KeyRings(projectID string) ([]KeyRingInfo, error) {
 func (ks *KMSService) CryptoKeys(projectID string) ([]CryptoKeyInfo, error) {
 	ctx := context.Background()
 
-	service, err := kms.NewService(ctx)
+	service, err := ks.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudkms.googleapis.com")
 	}

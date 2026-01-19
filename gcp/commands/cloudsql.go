@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -443,12 +444,12 @@ func (m *CloudSQLModule) instancesToTableBody(instances []CloudSQLService.SQLIns
 					instance.Tier,
 					publicIP,
 					privateIP,
-					boolToYesNo(instance.RequireSSL),
-					boolToYesNo(instance.BackupEnabled),
-					boolToYesNo(instance.PointInTimeRecovery),
+					shared.BoolToYesNo(instance.RequireSSL),
+					shared.BoolToYesNo(instance.BackupEnabled),
+					shared.BoolToYesNo(instance.PointInTimeRecovery),
 					encryptionDisplay,
-					boolToYesNo(instance.IAMAuthentication),
-					boolToYesNo(instance.PasswordPolicyEnabled),
+					shared.BoolToYesNo(instance.IAMAuthentication),
+					shared.BoolToYesNo(instance.PasswordPolicyEnabled),
 					instance.AvailabilityType,
 					networkName,
 					network.Value,
@@ -466,12 +467,12 @@ func (m *CloudSQLModule) instancesToTableBody(instances []CloudSQLService.SQLIns
 				instance.Tier,
 				publicIP,
 				privateIP,
-				boolToYesNo(instance.RequireSSL),
-				boolToYesNo(instance.BackupEnabled),
-				boolToYesNo(instance.PointInTimeRecovery),
+				shared.BoolToYesNo(instance.RequireSSL),
+				shared.BoolToYesNo(instance.BackupEnabled),
+				shared.BoolToYesNo(instance.PointInTimeRecovery),
 				encryptionDisplay,
-				boolToYesNo(instance.IAMAuthentication),
-				boolToYesNo(instance.PasswordPolicyEnabled),
+				shared.BoolToYesNo(instance.IAMAuthentication),
+				shared.BoolToYesNo(instance.PasswordPolicyEnabled),
 				instance.AvailabilityType,
 				"-",
 				"-",

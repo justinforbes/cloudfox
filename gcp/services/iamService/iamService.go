@@ -12,6 +12,7 @@ import (
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	cloudidentity "google.golang.org/api/cloudidentity/v1"
 	crmv1 "google.golang.org/api/cloudresourcemanager/v1"
 	iam "google.golang.org/api/iam/v1"
@@ -39,6 +40,30 @@ func (s *IAMService) getClientOption() option.ClientOption {
 		return s.session.GetClientOption()
 	}
 	return nil
+}
+
+// getIAMService returns an IAM service using cached SDK wrapper when session is available
+func (s *IAMService) getIAMService(ctx context.Context) (*iam.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetIAMService(ctx, s.session)
+	}
+	return iam.NewService(ctx)
+}
+
+// getResourceManagerService returns a Resource Manager service using cached SDK wrapper when session is available
+func (s *IAMService) getResourceManagerService(ctx context.Context) (*crmv1.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetResourceManagerService(ctx, s.session)
+	}
+	return crmv1.NewService(ctx)
+}
+
+// getCloudIdentityService returns a Cloud Identity service using cached SDK wrapper when session is available
+func (s *IAMService) getCloudIdentityService(ctx context.Context) (*cloudidentity.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetCloudIdentityService(ctx, s.session)
+	}
+	return cloudidentity.NewService(ctx)
 }
 
 // AncestryResource represents a single resource in the project's ancestry.
@@ -196,14 +221,7 @@ func (s *IAMService) projectAncestry(projectID string) ([]AncestryResource, erro
 
 	// Use the v1 GetAncestry API which only requires project-level read permissions
 	// This avoids needing resourcemanager.folders.get on each folder in the hierarchy
-	var crmService *crmv1.Service
-	var err error
-
-	if s.session != nil {
-		crmService, err = crmv1.NewService(ctx, s.session.GetClientOption())
-	} else {
-		crmService, err = crmv1.NewService(ctx)
-	}
+	crmService, err := s.getResourceManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
 	}
@@ -388,14 +406,7 @@ func contains(slice []string, item string) bool {
 // ServiceAccounts retrieves all service accounts in a project with detailed info
 func (s *IAMService) ServiceAccounts(projectID string) ([]ServiceAccountInfo, error) {
 	ctx := context.Background()
-	var iamService *iam.Service
-	var err error
-
-	if s.session != nil {
-		iamService, err = iam.NewService(ctx, s.session.GetClientOption())
-	} else {
-		iamService, err = iam.NewService(ctx)
-	}
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
@@ -487,14 +498,7 @@ func (s *IAMService) getServiceAccountKeys(ctx context.Context, iamService *iam.
 // CustomRoles retrieves all custom roles in a project
 func (s *IAMService) CustomRoles(projectID string) ([]CustomRole, error) {
 	ctx := context.Background()
-	var iamService *iam.Service
-	var err error
-
-	if s.session != nil {
-		iamService, err = iam.NewService(ctx, s.session.GetClientOption())
-	} else {
-		iamService, err = iam.NewService(ctx)
-	}
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
@@ -862,13 +866,7 @@ func (s *IAMService) GetRolePermissions(ctx context.Context, roleName string) ([
 		return nil, gcpinternal.ErrPermissionDenied
 	}
 
-	var iamService *iam.Service
-	var err error
-	if s.session != nil {
-		iamService, err = iam.NewService(ctx, s.session.GetClientOption())
-	} else {
-		iamService, err = iam.NewService(ctx)
-	}
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
@@ -1053,13 +1051,7 @@ func (s *IAMService) GetAllEntityPermissions(projectID string) ([]EntityPermissi
 // GetGroupMembership retrieves members of a Google Group using Cloud Identity API
 // Requires cloudidentity.groups.readonly or cloudidentity.groups scope
 func (s *IAMService) GetGroupMembership(ctx context.Context, groupEmail string) (*GroupInfo, error) {
-	var ciService *cloudidentity.Service
-	var err error
-	if s.session != nil {
-		ciService, err = cloudidentity.NewService(ctx, s.session.GetClientOption())
-	} else {
-		ciService, err = cloudidentity.NewService(ctx)
-	}
+	ciService, err := s.getCloudIdentityService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudidentity.googleapis.com")
 	}
@@ -1354,14 +1346,7 @@ var saImpersonationPermissions = map[string]string{
 
 // GetServiceAccountIAMPolicy gets the IAM policy for a specific service account
 func (s *IAMService) GetServiceAccountIAMPolicy(ctx context.Context, saEmail string, projectID string) (*SAImpersonationInfo, error) {
-	var iamService *iam.Service
-	var err error
-
-	if s.session != nil {
-		iamService, err = iam.NewService(ctx, s.session.GetClientOption())
-	} else {
-		iamService, err = iam.NewService(ctx)
-	}
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
@@ -1807,13 +1792,7 @@ func (s *IAMService) GetUserMFAStatus(ctx context.Context, email string) (*MFASt
 	// We need to use the Admin SDK Directory API which requires admin privileges
 	// For now, we'll attempt to look up the user and note if we can't
 
-	var ciService *cloudidentity.Service
-	var err error
-	if s.session != nil {
-		ciService, err = cloudidentity.NewService(ctx, s.session.GetClientOption())
-	} else {
-		ciService, err = cloudidentity.NewService(ctx)
-	}
+	ciService, err := s.getCloudIdentityService(ctx)
 	if err != nil {
 		status.Error = "Cloud Identity API not accessible"
 		return status, nil

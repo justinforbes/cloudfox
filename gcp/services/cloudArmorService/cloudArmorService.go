@@ -6,13 +6,22 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	compute "google.golang.org/api/compute/v1"
 )
 
-type CloudArmorService struct{}
+type CloudArmorService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *CloudArmorService {
 	return &CloudArmorService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *CloudArmorService {
+	return &CloudArmorService{
+		session: session,
+	}
 }
 
 // SecurityPolicy represents a Cloud Armor security policy
@@ -46,10 +55,18 @@ type RateLimitInfo struct {
 	ExceedAction   string `json:"exceedAction"`
 }
 
+// getService returns a Compute service client using cached session if available
+func (s *CloudArmorService) getService(ctx context.Context) (*compute.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetComputeService(ctx, s.session)
+	}
+	return compute.NewService(ctx)
+}
+
 // GetSecurityPolicies retrieves all Cloud Armor security policies
 func (s *CloudArmorService) GetSecurityPolicies(projectID string) ([]SecurityPolicy, error) {
 	ctx := context.Background()
-	service, err := compute.NewService(ctx)
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}
@@ -221,7 +238,7 @@ func (s *CloudArmorService) analyzePolicy(policy SecurityPolicy) []string {
 // GetUnprotectedLoadBalancers finds load balancers without Cloud Armor protection
 func (s *CloudArmorService) GetUnprotectedLoadBalancers(projectID string) ([]string, error) {
 	ctx := context.Background()
-	service, err := compute.NewService(ctx)
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "compute.googleapis.com")
 	}

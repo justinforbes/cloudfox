@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	composer "google.golang.org/api/composer/v1"
 )
 
@@ -44,6 +45,14 @@ func NewWithSession(session *gcpinternal.SafeSession) *ComposerService {
 	return &ComposerService{session: session}
 }
 
+// getService returns a Composer service client using cached session if available
+func (s *ComposerService) getService(ctx context.Context) (*composer.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetComposerService(ctx, s.session)
+	}
+	return composer.NewService(ctx)
+}
+
 // EnvironmentInfo represents a Cloud Composer environment
 type EnvironmentInfo struct {
 	Name              string   `json:"name"`
@@ -79,14 +88,8 @@ type EnvironmentInfo struct {
 // so we must iterate through regions explicitly
 func (s *ComposerService) ListEnvironments(projectID string) ([]EnvironmentInfo, error) {
 	ctx := context.Background()
-	var service *composer.Service
-	var err error
 
-	if s.session != nil {
-		service, err = composer.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = composer.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "composer.googleapis.com")
 	}

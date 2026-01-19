@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	accesscontextmanager "google.golang.org/api/accesscontextmanager/v1"
 )
 
@@ -19,6 +20,14 @@ func New() *AccessPolicyService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *AccessPolicyService {
 	return &AccessPolicyService{session: session}
+}
+
+// getService returns an Access Context Manager service using cached session if available
+func (s *AccessPolicyService) getService(ctx context.Context) (*accesscontextmanager.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetAccessContextManagerService(ctx, s.session)
+	}
+	return accesscontextmanager.NewService(ctx)
 }
 
 // AccessLevelInfo represents an access level (conditional access policy)
@@ -70,14 +79,8 @@ type GCIPSettingsInfo struct {
 // ListAccessLevels retrieves all access levels for an organization's policy
 func (s *AccessPolicyService) ListAccessLevels(orgID string) ([]AccessLevelInfo, error) {
 	ctx := context.Background()
-	var service *accesscontextmanager.Service
-	var err error
 
-	if s.session != nil {
-		service, err = accesscontextmanager.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = accesscontextmanager.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}
@@ -114,14 +117,8 @@ func (s *AccessPolicyService) ListAccessLevels(orgID string) ([]AccessLevelInfo,
 // ListAccessLevelsForPolicy retrieves access levels for a specific policy
 func (s *AccessPolicyService) ListAccessLevelsForPolicy(policyName string) ([]AccessLevelInfo, error) {
 	ctx := context.Background()
-	var service *accesscontextmanager.Service
-	var err error
 
-	if s.session != nil {
-		service, err = accesscontextmanager.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = accesscontextmanager.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "accesscontextmanager.googleapis.com")
 	}

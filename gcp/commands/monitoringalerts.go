@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -618,7 +619,7 @@ func (m *MonitoringAlertsModule) policiesToTableBody(policies []AlertPolicy, cha
 					m.GetProjectName(p.ProjectID),
 					p.ProjectID,
 					p.DisplayName,
-					boolToYesNo(p.Enabled),
+					shared.BoolToYesNo(p.Enabled),
 					cond.DisplayName,
 					metricType,
 					comparison,
@@ -632,7 +633,7 @@ func (m *MonitoringAlertsModule) policiesToTableBody(policies []AlertPolicy, cha
 				m.GetProjectName(p.ProjectID),
 				p.ProjectID,
 				p.DisplayName,
-				boolToYesNo(p.Enabled),
+				shared.BoolToYesNo(p.Enabled),
 				"-",
 				"-",
 				"-",
@@ -654,8 +655,8 @@ func (m *MonitoringAlertsModule) channelsToTableBody(channels []NotificationChan
 			c.ProjectID,
 			c.DisplayName,
 			c.Type,
-			boolToYesNo(c.Enabled),
-			boolToYesNo(c.Verified),
+			shared.BoolToYesNo(c.Enabled),
+			shared.BoolToYesNo(c.Verified),
 			destination,
 		})
 	}
@@ -682,14 +683,14 @@ func (m *MonitoringAlertsModule) uptimeToTableBody(checks []UptimeCheck) [][]str
 			m.GetProjectName(u.ProjectID),
 			u.ProjectID,
 			u.DisplayName,
-			boolToYesNo(u.Enabled),
+			shared.BoolToYesNo(u.Enabled),
 			host,
 			u.Protocol,
 			fmt.Sprintf("%d", u.Port),
 			path,
 			u.Period,
 			timeout,
-			boolToYesNo(u.SSLEnabled),
+			shared.BoolToYesNo(u.SSLEnabled),
 		})
 	}
 	return body

@@ -9,17 +9,16 @@ import (
 	"cloud.google.com/go/iam"
 	"cloud.google.com/go/storage"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	"google.golang.org/api/iterator"
-	"google.golang.org/api/option"
 	storageapi "google.golang.org/api/storage/v1"
 )
 
 type CloudStorageService struct {
-	client  *storage.Client
 	session *gcpinternal.SafeSession
 }
 
-// New creates a new CloudStorageService (legacy - uses ADC directly)
+// New creates a new CloudStorageService (requires session for SDK caching)
 func New() *CloudStorageService {
 	return &CloudStorageService{}
 }
@@ -27,11 +26,6 @@ func New() *CloudStorageService {
 // NewWithSession creates a CloudStorageService with a SafeSession for managed authentication
 func NewWithSession(session *gcpinternal.SafeSession) *CloudStorageService {
 	return &CloudStorageService{session: session}
-}
-
-// NewWithClient creates a CloudStorageService with an existing client (for reuse)
-func NewWithClient(client *storage.Client) *CloudStorageService {
-	return &CloudStorageService{client: client}
 }
 
 // IAMBinding represents a single IAM binding on a bucket
@@ -42,17 +36,17 @@ type IAMBinding struct {
 
 // LifecycleRule represents a single lifecycle rule on a bucket
 type LifecycleRule struct {
-	Action          string `json:"action"`          // Delete, SetStorageClass, AbortIncompleteMultipartUpload
-	StorageClass    string `json:"storageClass"`    // Target storage class (for SetStorageClass)
-	AgeDays         int64  `json:"ageDays"`         // Age condition in days
-	NumVersions     int64  `json:"numVersions"`     // Number of newer versions condition
-	IsLive          *bool  `json:"isLive"`          // Whether object is live (vs archived)
-	MatchesPrefix   string `json:"matchesPrefix"`   // Object name prefix match
-	MatchesSuffix   string `json:"matchesSuffix"`   // Object name suffix match
-	MatchesStorage  string `json:"matchesStorage"`  // Storage class match
-	CreatedBefore   string `json:"createdBefore"`   // Created before date condition
-	DaysSinceCustom int64  `json:"daysSinceCustom"` // Days since custom time
-	DaysSinceNoncurrent int64 `json:"daysSinceNoncurrent"` // Days since became noncurrent
+	Action              string `json:"action"`              // Delete, SetStorageClass, AbortIncompleteMultipartUpload
+	StorageClass        string `json:"storageClass"`        // Target storage class (for SetStorageClass)
+	AgeDays             int64  `json:"ageDays"`             // Age condition in days
+	NumVersions         int64  `json:"numVersions"`         // Number of newer versions condition
+	IsLive              *bool  `json:"isLive"`              // Whether object is live (vs archived)
+	MatchesPrefix       string `json:"matchesPrefix"`       // Object name prefix match
+	MatchesSuffix       string `json:"matchesSuffix"`       // Object name suffix match
+	MatchesStorage      string `json:"matchesStorage"`      // Storage class match
+	CreatedBefore       string `json:"createdBefore"`       // Created before date condition
+	DaysSinceCustom     int64  `json:"daysSinceCustom"`     // Days since custom time
+	DaysSinceNoncurrent int64  `json:"daysSinceNoncurrent"` // Days since became noncurrent
 }
 
 // BucketInfo contains bucket metadata and security-relevant configuration
@@ -82,14 +76,14 @@ type BucketInfo struct {
 	AutoclassTerminalClass   string `json:"autoclassTerminalClass"`   // Terminal storage class for autoclass
 
 	// Lifecycle configuration
-	LifecycleEnabled     bool            `json:"lifecycleEnabled"`     // Has lifecycle rules
-	LifecycleRuleCount   int             `json:"lifecycleRuleCount"`   // Number of lifecycle rules
-	LifecycleRules       []LifecycleRule `json:"lifecycleRules"`       // Parsed lifecycle rules
-	HasDeleteRule        bool            `json:"hasDeleteRule"`        // Has a delete action rule
-	HasArchiveRule       bool            `json:"hasArchiveRule"`       // Has a storage class transition rule
-	ShortestDeleteDays   int64           `json:"shortestDeleteDays"`   // Shortest delete age in days
-	TurboReplication     bool            `json:"turboReplication"`     // Turbo replication enabled (dual-region)
-	LocationType         string          `json:"locationType"`         // "region", "dual-region", or "multi-region"
+	LifecycleEnabled   bool            `json:"lifecycleEnabled"`   // Has lifecycle rules
+	LifecycleRuleCount int             `json:"lifecycleRuleCount"` // Number of lifecycle rules
+	LifecycleRules     []LifecycleRule `json:"lifecycleRules"`     // Parsed lifecycle rules
+	HasDeleteRule      bool            `json:"hasDeleteRule"`      // Has a delete action rule
+	HasArchiveRule     bool            `json:"hasArchiveRule"`     // Has a storage class transition rule
+	ShortestDeleteDays int64           `json:"shortestDeleteDays"` // Shortest delete age in days
+	TurboReplication   bool            `json:"turboReplication"`   // Turbo replication enabled (dual-region)
+	LocationType       string          `json:"locationType"`       // "region", "dual-region", or "multi-region"
 
 	// Public access indicators
 	IsPublic     bool   `json:"isPublic"`     // Has allUsers or allAuthenticatedUsers
@@ -106,13 +100,10 @@ type BucketInfo struct {
 func (cs *CloudStorageService) Buckets(projectID string) ([]BucketInfo, error) {
 	ctx := context.Background()
 
-	// Get or create client
-	client, closeClient, err := cs.getClient(ctx)
+	// Get cached client from SDK
+	client, err := cs.getClient(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if closeClient {
-		defer client.Close()
 	}
 
 	var buckets []BucketInfo
@@ -186,37 +177,22 @@ func (cs *CloudStorageService) Buckets(projectID string) ([]BucketInfo, error) {
 	return buckets, nil
 }
 
-// getClient returns a storage client, using session if available
-// Returns the client, whether to close it, and any error
-func (cs *CloudStorageService) getClient(ctx context.Context) (*storage.Client, bool, error) {
-	// If we have an existing client, use it
-	if cs.client != nil {
-		return cs.client, false, nil
-	}
-
-	// If we have a session, use its token source
+// getClient returns a cached storage client from SDK
+func (cs *CloudStorageService) getClient(ctx context.Context) (*storage.Client, error) {
 	if cs.session != nil {
-		client, err := storage.NewClient(ctx, cs.session.GetClientOption())
-		if err != nil {
-			return nil, false, fmt.Errorf("failed to create client with session: %v", err)
-		}
-		return client, true, nil
+		return sdk.CachedGetStorageClient(ctx, cs.session)
 	}
-
-	// Fall back to ADC
-	client, err := storage.NewClient(ctx)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to create client: %v", err)
-	}
-	return client, true, nil
+	// Fallback to direct creation for legacy usage (no caching)
+	return storage.NewClient(ctx)
 }
 
-// getClientOption returns the appropriate client option based on session
-func (cs *CloudStorageService) getClientOption() option.ClientOption {
+// getStorageService returns a cached storage REST API service from SDK
+func (cs *CloudStorageService) getStorageService(ctx context.Context) (*storageapi.Service, error) {
 	if cs.session != nil {
-		return cs.session.GetClientOption()
+		return sdk.CachedGetStorageService(ctx, cs.session)
 	}
-	return nil
+	// Fallback to direct creation for legacy usage (no caching)
+	return storageapi.NewService(ctx)
 }
 
 // getBucketIAMPolicy retrieves the IAM policy for a bucket and checks for public access
@@ -274,12 +250,9 @@ func (cs *CloudStorageService) getBucketIAMPolicy(ctx context.Context, client *s
 func (cs *CloudStorageService) GetBucketIAMPolicyOnly(bucketName string) ([]IAMBinding, error) {
 	ctx := context.Background()
 
-	client, closeClient, err := cs.getClient(ctx)
+	client, err := cs.getClient(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if closeClient {
-		defer client.Close()
 	}
 
 	bindings, _, _ := cs.getBucketIAMPolicy(ctx, client, bucketName)
@@ -323,16 +296,7 @@ func FormatIAMBindingsShort(bindings []IAMBinding) string {
 // enrichBucketFromRestAPI fetches additional bucket fields via the REST API
 // that may not be available in the Go SDK version
 func (cs *CloudStorageService) enrichBucketFromRestAPI(ctx context.Context, bucket *BucketInfo) {
-	var service *storageapi.Service
-	var err error
-
-	// Use session if available
-	if cs.session != nil {
-		service, err = storageapi.NewService(ctx, cs.session.GetClientOption())
-	} else {
-		service, err = storageapi.NewService(ctx)
-	}
-
+	service, err := cs.getStorageService(ctx)
 	if err != nil {
 		// Silently fail - these are optional enrichments
 		return

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	"google.golang.org/api/orgpolicy/v2"
 )
 
@@ -19,6 +20,14 @@ func New() *OrgPolicyService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *OrgPolicyService {
 	return &OrgPolicyService{session: session}
+}
+
+// getService returns an Org Policy service client using cached session if available
+func (s *OrgPolicyService) getService(ctx context.Context) (*orgpolicy.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetOrgPolicyService(ctx, s.session)
+	}
+	return orgpolicy.NewService(ctx)
 }
 
 // OrgPolicyInfo represents an organization policy
@@ -151,14 +160,8 @@ var SecurityRelevantConstraints = map[string]struct {
 // ListProjectPolicies lists all org policies for a project
 func (s *OrgPolicyService) ListProjectPolicies(projectID string) ([]OrgPolicyInfo, error) {
 	ctx := context.Background()
-	var service *orgpolicy.Service
-	var err error
 
-	if s.session != nil {
-		service, err = orgpolicy.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = orgpolicy.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "orgpolicy.googleapis.com")
 	}

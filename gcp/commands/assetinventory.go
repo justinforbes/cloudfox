@@ -10,6 +10,7 @@ import (
 	asset "cloud.google.com/go/asset/apiv1"
 	"cloud.google.com/go/asset/apiv1/assetpb"
 	assetservice "github.com/BishopFox/cloudfox/gcp/services/assetService"
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -642,7 +643,7 @@ func (m *AssetInventoryModule) buildAssetsTable(assets []assetservice.AssetInfo)
 			if asset.PublicAccess {
 				for _, binding := range asset.IAMBindings {
 					for _, member := range binding.Members {
-						if member == "allUsers" || member == "allAuthenticatedUsers" {
+						if shared.IsPublicPrincipal(member) {
 							publicBody = append(publicBody, []string{
 								asset.ProjectID,
 								m.GetProjectName(asset.ProjectID),

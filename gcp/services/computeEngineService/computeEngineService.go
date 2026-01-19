@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	"google.golang.org/api/compute/v1"
 )
 
@@ -121,7 +122,7 @@ type InstanceIAMInfo struct {
 // getService returns a compute service, using session if available
 func (ces *ComputeEngineService) getService(ctx context.Context) (*compute.Service, error) {
 	if ces.session != nil {
-		return compute.NewService(ctx, ces.session.GetClientOption())
+		return sdk.CachedGetComputeService(ctx, ces.session)
 	}
 	return compute.NewService(ctx)
 }

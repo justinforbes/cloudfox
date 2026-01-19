@@ -6,13 +6,29 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	pubsub "google.golang.org/api/pubsub/v1"
 )
 
-type PubSubService struct{}
+type PubSubService struct {
+	session *gcpinternal.SafeSession
+}
 
 func New() *PubSubService {
 	return &PubSubService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *PubSubService {
+	return &PubSubService{
+		session: session,
+	}
+}
+
+func (ps *PubSubService) getService(ctx context.Context) (*pubsub.Service, error) {
+	if ps.session != nil {
+		return sdk.CachedGetPubSubService(ctx, ps.session)
+	}
+	return pubsub.NewService(ctx)
 }
 
 // IAMBinding represents a single IAM role/member binding
@@ -74,7 +90,7 @@ type SubscriptionInfo struct {
 func (ps *PubSubService) Topics(projectID string) ([]TopicInfo, error) {
 	ctx := context.Background()
 
-	service, err := pubsub.NewService(ctx)
+	service, err := ps.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "pubsub.googleapis.com")
 	}
@@ -113,7 +129,7 @@ func (ps *PubSubService) Topics(projectID string) ([]TopicInfo, error) {
 func (ps *PubSubService) Subscriptions(projectID string) ([]SubscriptionInfo, error) {
 	ctx := context.Background()
 
-	service, err := pubsub.NewService(ctx)
+	service, err := ps.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "pubsub.googleapis.com")
 	}

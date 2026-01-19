@@ -6,13 +6,30 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	iam "google.golang.org/api/iam/v1"
 )
 
-type WorkloadIdentityService struct{}
+type WorkloadIdentityService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *WorkloadIdentityService {
 	return &WorkloadIdentityService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *WorkloadIdentityService {
+	return &WorkloadIdentityService{
+		session: session,
+	}
+}
+
+// getIAMService returns an IAM service client using cached session if available
+func (s *WorkloadIdentityService) getIAMService(ctx context.Context) (*iam.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetIAMService(ctx, s.session)
+	}
+	return iam.NewService(ctx)
 }
 
 // WorkloadIdentityPool represents a Workload Identity Pool
@@ -59,7 +76,7 @@ type FederatedIdentityBinding struct {
 func (s *WorkloadIdentityService) ListWorkloadIdentityPools(projectID string) ([]WorkloadIdentityPool, error) {
 	ctx := context.Background()
 
-	iamService, err := iam.NewService(ctx)
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
@@ -97,7 +114,7 @@ func (s *WorkloadIdentityService) ListWorkloadIdentityPools(projectID string) ([
 func (s *WorkloadIdentityService) ListWorkloadIdentityProviders(projectID, poolID string) ([]WorkloadIdentityProvider, error) {
 	ctx := context.Background()
 
-	iamService, err := iam.NewService(ctx)
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}
@@ -150,7 +167,7 @@ func (s *WorkloadIdentityService) ListWorkloadIdentityProviders(projectID, poolI
 func (s *WorkloadIdentityService) FindFederatedIdentityBindings(projectID string, pools []WorkloadIdentityPool) ([]FederatedIdentityBinding, error) {
 	ctx := context.Background()
 
-	iamService, err := iam.NewService(ctx)
+	iamService, err := s.getIAMService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}

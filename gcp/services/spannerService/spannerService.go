@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	spanner "google.golang.org/api/spanner/v1"
 )
 
@@ -15,6 +16,12 @@ type SpannerService struct {
 
 func New() *SpannerService {
 	return &SpannerService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *SpannerService {
+	return &SpannerService{
+		session: session,
+	}
 }
 
 // IAMBinding represents a single IAM binding (one role + one member)
@@ -50,10 +57,18 @@ type SpannerResult struct {
 	Databases []SpannerDatabaseInfo
 }
 
+// getService returns a Spanner service client using cached session if available
+func (s *SpannerService) getService(ctx context.Context) (*spanner.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetSpannerService(ctx, s.session)
+	}
+	return spanner.NewService(ctx)
+}
+
 // ListInstancesAndDatabases retrieves all Spanner instances and databases with IAM bindings
 func (s *SpannerService) ListInstancesAndDatabases(projectID string) (*SpannerResult, error) {
 	ctx := context.Background()
-	service, err := spanner.NewService(ctx)
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "spanner.googleapis.com")
 	}

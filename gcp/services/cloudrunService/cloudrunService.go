@@ -7,13 +7,29 @@ import (
 	"sync"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	run "google.golang.org/api/run/v2"
 )
 
-type CloudRunService struct{}
+type CloudRunService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *CloudRunService {
 	return &CloudRunService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *CloudRunService {
+	return &CloudRunService{
+		session: session,
+	}
+}
+
+func (crs *CloudRunService) getServiceV2(ctx context.Context) (*run.Service, error) {
+	if crs.session != nil {
+		return sdk.CachedGetCloudRunServiceV2(ctx, crs.session)
+	}
+	return run.NewService(ctx)
 }
 
 // ServiceInfo holds Cloud Run service details with security-relevant information
@@ -126,7 +142,7 @@ type JobInfo struct {
 func (cs *CloudRunService) Services(projectID string) ([]ServiceInfo, error) {
 	ctx := context.Background()
 
-	service, err := run.NewService(ctx)
+	service, err := cs.getServiceV2(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "run.googleapis.com")
 	}
@@ -183,7 +199,7 @@ var cloudRunRegions = []string{
 func (cs *CloudRunService) Jobs(projectID string) ([]JobInfo, error) {
 	ctx := context.Background()
 
-	service, err := run.NewService(ctx)
+	service, err := cs.getServiceV2(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "run.googleapis.com")
 	}

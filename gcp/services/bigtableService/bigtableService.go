@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	bigtableadmin "google.golang.org/api/bigtableadmin/v2"
 )
 
@@ -15,6 +16,12 @@ type BigtableService struct {
 
 func New() *BigtableService {
 	return &BigtableService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *BigtableService {
+	return &BigtableService{
+		session: session,
+	}
 }
 
 type BigtableInstanceInfo struct {
@@ -55,9 +62,17 @@ type BigtableResult struct {
 	Tables    []BigtableTableInfo
 }
 
+// getService returns a Bigtable Admin service client using cached session if available
+func (s *BigtableService) getService(ctx context.Context) (*bigtableadmin.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetBigtableAdminService(ctx, s.session)
+	}
+	return bigtableadmin.NewService(ctx)
+}
+
 func (s *BigtableService) ListInstances(projectID string) (*BigtableResult, error) {
 	ctx := context.Background()
-	service, err := bigtableadmin.NewService(ctx)
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "bigtableadmin.googleapis.com")
 	}

@@ -7,6 +7,8 @@ import (
 
 	logging "cloud.google.com/go/logging/apiv2"
 	"cloud.google.com/go/logging/apiv2/loggingpb"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	compute "google.golang.org/api/compute/v1"
 	container "google.golang.org/api/container/v1"
 	sqladmin "google.golang.org/api/sqladmin/v1beta4"
@@ -14,10 +16,50 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-type LoggingGapsService struct{}
+type LoggingGapsService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *LoggingGapsService {
 	return &LoggingGapsService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *LoggingGapsService {
+	return &LoggingGapsService{
+		session: session,
+	}
+}
+
+// getStorageService returns a Storage service client using cached session if available
+func (s *LoggingGapsService) getStorageService(ctx context.Context) (*storage.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetStorageService(ctx, s.session)
+	}
+	return storage.NewService(ctx)
+}
+
+// getComputeService returns a Compute service client using cached session if available
+func (s *LoggingGapsService) getComputeService(ctx context.Context) (*compute.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetComputeService(ctx, s.session)
+	}
+	return compute.NewService(ctx)
+}
+
+// getContainerService returns a Container service client using cached session if available
+func (s *LoggingGapsService) getContainerService(ctx context.Context) (*container.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetContainerService(ctx, s.session)
+	}
+	return container.NewService(ctx)
+}
+
+// getSQLAdminService returns a SQL Admin service client using cached session if available
+func (s *LoggingGapsService) getSQLAdminService(ctx context.Context) (*sqladmin.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetSQLAdminServiceBeta(ctx, s.session)
+	}
+	return sqladmin.NewService(ctx)
 }
 
 // LoggingGap represents a resource with missing or incomplete logging
@@ -116,7 +158,7 @@ func (s *LoggingGapsService) getProjectAuditConfig(projectID string) (*AuditLogC
 
 func (s *LoggingGapsService) checkBucketLogging(projectID string) ([]LoggingGap, error) {
 	ctx := context.Background()
-	service, err := storage.NewService(ctx)
+	service, err := s.getStorageService(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +207,7 @@ func (s *LoggingGapsService) checkBucketLogging(projectID string) ([]LoggingGap,
 
 func (s *LoggingGapsService) checkComputeLogging(projectID string) ([]LoggingGap, error) {
 	ctx := context.Background()
-	service, err := compute.NewService(ctx)
+	service, err := s.getComputeService(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +266,7 @@ func (s *LoggingGapsService) checkComputeLogging(projectID string) ([]LoggingGap
 
 func (s *LoggingGapsService) checkGKELogging(projectID string) ([]LoggingGap, error) {
 	ctx := context.Background()
-	service, err := container.NewService(ctx)
+	service, err := s.getContainerService(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +346,7 @@ func (s *LoggingGapsService) checkGKELogging(projectID string) ([]LoggingGap, er
 
 func (s *LoggingGapsService) checkCloudSQLLogging(projectID string) ([]LoggingGap, error) {
 	ctx := context.Background()
-	service, err := sqladmin.NewService(ctx)
+	service, err := s.getSQLAdminService(ctx)
 	if err != nil {
 		return nil, err
 	}

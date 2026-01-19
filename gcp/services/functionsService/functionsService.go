@@ -6,13 +6,22 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	cloudfunctions "google.golang.org/api/cloudfunctions/v2"
 )
 
-type FunctionsService struct{}
+type FunctionsService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *FunctionsService {
 	return &FunctionsService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *FunctionsService {
+	return &FunctionsService{
+		session: session,
+	}
 }
 
 // FunctionInfo holds Cloud Function details with security-relevant information
@@ -75,11 +84,19 @@ type IAMBinding struct {
 	Member string
 }
 
+// getService returns a Cloud Functions v2 service instance, using cached wrapper if session is available
+func (fs *FunctionsService) getService(ctx context.Context) (*cloudfunctions.Service, error) {
+	if fs.session != nil {
+		return sdk.CachedGetCloudFunctionsServiceV2(ctx, fs.session)
+	}
+	return cloudfunctions.NewService(ctx)
+}
+
 // Functions retrieves all Cloud Functions in a project across all regions
 func (fs *FunctionsService) Functions(projectID string) ([]FunctionInfo, error) {
 	ctx := context.Background()
 
-	service, err := cloudfunctions.NewService(ctx)
+	service, err := fs.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudfunctions.googleapis.com")
 	}

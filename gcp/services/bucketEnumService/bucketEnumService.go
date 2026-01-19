@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/storage/v1"
 )
@@ -21,6 +22,14 @@ func New() *BucketEnumService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *BucketEnumService {
 	return &BucketEnumService{session: session}
+}
+
+// getStorageService returns a Storage service client using cached session if available
+func (s *BucketEnumService) getStorageService(ctx context.Context) (*storage.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetStorageService(ctx, s.session)
+	}
+	return storage.NewService(ctx)
 }
 
 // SensitiveFileInfo represents a potentially sensitive file in a bucket
@@ -121,14 +130,8 @@ func GetSensitivePatterns() []SensitivePattern {
 // EnumerateBucketSensitiveFiles lists potentially sensitive files in a bucket
 func (s *BucketEnumService) EnumerateBucketSensitiveFiles(bucketName, projectID string, maxObjects int) ([]SensitiveFileInfo, error) {
 	ctx := context.Background()
-	var storageService *storage.Service
-	var err error
 
-	if s.session != nil {
-		storageService, err = storage.NewService(ctx, s.session.GetClientOption())
-	} else {
-		storageService, err = storage.NewService(ctx)
-	}
+	storageService, err := s.getStorageService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
 	}
@@ -285,14 +288,8 @@ type ObjectInfo struct {
 // EnumerateAllBucketObjects lists ALL objects in a bucket (no filtering)
 func (s *BucketEnumService) EnumerateAllBucketObjects(bucketName, projectID string, maxObjects int) ([]ObjectInfo, error) {
 	ctx := context.Background()
-	var storageService *storage.Service
-	var err error
 
-	if s.session != nil {
-		storageService, err = storage.NewService(ctx, s.session.GetClientOption())
-	} else {
-		storageService, err = storage.NewService(ctx)
-	}
+	storageService, err := s.getStorageService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
 	}
@@ -337,14 +334,8 @@ func (s *BucketEnumService) EnumerateAllBucketObjects(bucketName, projectID stri
 // GetBucketsList lists all buckets in a project
 func (s *BucketEnumService) GetBucketsList(projectID string) ([]string, error) {
 	ctx := context.Background()
-	var storageService *storage.Service
-	var err error
 
-	if s.session != nil {
-		storageService, err = storage.NewService(ctx, s.session.GetClientOption())
-	} else {
-		storageService, err = storage.NewService(ctx)
-	}
+	storageService, err := s.getStorageService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "storage.googleapis.com")
 	}

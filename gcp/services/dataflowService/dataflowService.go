@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	dataflow "google.golang.org/api/dataflow/v1b3"
 )
 
@@ -18,6 +19,14 @@ func New() *DataflowService {
 
 func NewWithSession(session *gcpinternal.SafeSession) *DataflowService {
 	return &DataflowService{session: session}
+}
+
+// getService returns a Dataflow service client using cached session if available
+func (s *DataflowService) getService(ctx context.Context) (*dataflow.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetDataflowService(ctx, s.session)
+	}
+	return dataflow.NewService(ctx)
 }
 
 // JobInfo represents a Dataflow job
@@ -57,14 +66,8 @@ type TemplateInfo struct {
 // ListJobs retrieves all Dataflow jobs in a project
 func (s *DataflowService) ListJobs(projectID string) ([]JobInfo, error) {
 	ctx := context.Background()
-	var service *dataflow.Service
-	var err error
 
-	if s.session != nil {
-		service, err = dataflow.NewService(ctx, s.session.GetClientOption())
-	} else {
-		service, err = dataflow.NewService(ctx)
-	}
+	service, err := s.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "dataflow.googleapis.com")
 	}

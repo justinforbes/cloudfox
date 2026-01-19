@@ -7,9 +7,10 @@ import (
 	"sync"
 
 	CloudStorageService "github.com/BishopFox/cloudfox/gcp/services/cloudStorageService"
-	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
+	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/spf13/cobra"
 )
 
@@ -205,43 +206,9 @@ func (m *BucketsModule) addBucketToLoot(projectID string, bucket CloudStorageSer
 	)
 }
 
-// ------------------------------
-// Helper functions
-// ------------------------------
-func boolToYesNo(b bool) string {
-	if b {
-		return "Yes"
-	}
-	return "No"
-}
-
-// getMemberType extracts the member type from a GCP IAM member string
-func getMemberType(member string) string {
-	switch {
-	case member == "allUsers":
-		return "PUBLIC"
-	case member == "allAuthenticatedUsers":
-		return "ALL_AUTHENTICATED"
-	case strings.HasPrefix(member, "user:"):
-		return "User"
-	case strings.HasPrefix(member, "serviceAccount:"):
-		return "ServiceAccount"
-	case strings.HasPrefix(member, "group:"):
-		return "Group"
-	case strings.HasPrefix(member, "domain:"):
-		return "Domain"
-	case strings.HasPrefix(member, "projectOwner:"):
-		return "ProjectOwner"
-	case strings.HasPrefix(member, "projectEditor:"):
-		return "ProjectEditor"
-	case strings.HasPrefix(member, "projectViewer:"):
-		return "ProjectViewer"
-	case strings.HasPrefix(member, "deleted:"):
-		return "Deleted"
-	default:
-		return "Unknown"
-	}
-}
+// Helper functions are now provided by the shared package:
+// - shared.BoolToYesNo() for boolean formatting
+// - shared.GetPrincipalType() for IAM member type extraction
 
 // ------------------------------
 // Output Generation
@@ -400,15 +367,15 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 		if len(bucket.IAMBindings) > 0 {
 			for _, binding := range bucket.IAMBindings {
 				for _, member := range binding.Members {
-					memberType := getMemberType(member)
+					memberType := shared.GetPrincipalType(member)
 					body = append(body, []string{
 						bucket.ProjectID,
 						m.GetProjectName(bucket.ProjectID),
 						bucket.Name,
 						bucket.Location,
 						publicDisplay,
-						boolToYesNo(bucket.VersioningEnabled),
-						boolToYesNo(bucket.UniformBucketLevelAccess),
+						shared.BoolToYesNo(bucket.VersioningEnabled),
+						shared.BoolToYesNo(bucket.UniformBucketLevelAccess),
 						bucket.EncryptionType,
 						binding.Role,
 						memberType,
@@ -424,8 +391,8 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 				bucket.Name,
 				bucket.Location,
 				publicDisplay,
-				boolToYesNo(bucket.VersioningEnabled),
-				boolToYesNo(bucket.UniformBucketLevelAccess),
+				shared.BoolToYesNo(bucket.VersioningEnabled),
+				shared.BoolToYesNo(bucket.UniformBucketLevelAccess),
 				bucket.EncryptionType,
 				"-",
 				"-",

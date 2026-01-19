@@ -8,6 +8,7 @@ import (
 
 	ComputeEngineService "github.com/BishopFox/cloudfox/gcp/services/computeEngineService"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	"google.golang.org/api/compute/v1"
 )
 
@@ -71,17 +72,18 @@ func NewWithSession(session *gcpinternal.SafeSession) *NetwworkService {
 	return &NetwworkService{session: session}
 }
 
+// getService returns a compute service, using cached wrapper if session is available
+func (ns *NetwworkService) getService(ctx context.Context) (*compute.Service, error) {
+	if ns.session != nil {
+		return sdk.CachedGetComputeService(ctx, ns.session)
+	}
+	return compute.NewService(ctx)
+}
+
 // Returns firewall rules for a project.
 func (ns *NetwworkService) FirewallRules(projectID string) ([]*compute.Firewall, error) {
 	ctx := context.Background()
-	var computeService *compute.Service
-	var err error
-
-	if ns.session != nil {
-		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
-	} else {
-		computeService, err = compute.NewService(ctx)
-	}
+	computeService, err := ns.getService(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -339,14 +341,7 @@ type FirewallRuleInfo struct {
 // Networks retrieves all VPC networks in a project
 func (ns *NetwworkService) Networks(projectID string) ([]VPCInfo, error) {
 	ctx := context.Background()
-	var computeService *compute.Service
-	var err error
-
-	if ns.session != nil {
-		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
-	} else {
-		computeService, err = compute.NewService(ctx)
-	}
+	computeService, err := ns.getService(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -391,14 +386,7 @@ func (ns *NetwworkService) Networks(projectID string) ([]VPCInfo, error) {
 // Subnets retrieves all subnets in a project
 func (ns *NetwworkService) Subnets(projectID string) ([]SubnetInfo, error) {
 	ctx := context.Background()
-	var computeService *compute.Service
-	var err error
-
-	if ns.session != nil {
-		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
-	} else {
-		computeService, err = compute.NewService(ctx)
-	}
+	computeService, err := ns.getService(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -435,14 +423,7 @@ func (ns *NetwworkService) Subnets(projectID string) ([]SubnetInfo, error) {
 // FirewallRulesEnhanced retrieves firewall rules with security analysis
 func (ns *NetwworkService) FirewallRulesEnhanced(projectID string) ([]FirewallRuleInfo, error) {
 	ctx := context.Background()
-	var computeService *compute.Service
-	var err error
-
-	if ns.session != nil {
-		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
-	} else {
-		computeService, err = compute.NewService(ctx)
-	}
+	computeService, err := ns.getService(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -530,16 +511,5 @@ func extractRegionFromURL(url string) string {
 
 // GetComputeService returns a compute.Service instance for external use
 func (ns *NetwworkService) GetComputeService(ctx context.Context) (*compute.Service, error) {
-	var computeService *compute.Service
-	var err error
-
-	if ns.session != nil {
-		computeService, err = compute.NewService(ctx, ns.session.GetClientOption())
-	} else {
-		computeService, err = compute.NewService(ctx)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return computeService, nil
+	return ns.getService(ctx)
 }

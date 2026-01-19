@@ -6,13 +6,30 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	container "google.golang.org/api/container/v1"
 )
 
-type GKEService struct{}
+type GKEService struct {
+	session *gcpinternal.SafeSession
+}
 
+// New creates a new GKEService (legacy - uses ADC directly)
 func New() *GKEService {
 	return &GKEService{}
+}
+
+// NewWithSession creates a GKEService with a SafeSession for managed authentication
+func NewWithSession(session *gcpinternal.SafeSession) *GKEService {
+	return &GKEService{session: session}
+}
+
+// getService returns a container service, using session if available
+func (gs *GKEService) getService(ctx context.Context) (*container.Service, error) {
+	if gs.session != nil {
+		return sdk.CachedGetContainerService(ctx, gs.session)
+	}
+	return container.NewService(ctx)
 }
 
 // ClusterInfo holds GKE cluster details with security-relevant information
@@ -110,7 +127,7 @@ type NodePoolInfo struct {
 func (gs *GKEService) Clusters(projectID string) ([]ClusterInfo, []NodePoolInfo, error) {
 	ctx := context.Background()
 
-	service, err := container.NewService(ctx)
+	service, err := gs.getService(ctx)
 	if err != nil {
 		return nil, nil, gcpinternal.ParseGCPError(err, "container.googleapis.com")
 	}

@@ -6,13 +6,22 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	dns "google.golang.org/api/dns/v1"
 )
 
-type DNSService struct{}
+type DNSService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *DNSService {
 	return &DNSService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *DNSService {
+	return &DNSService{
+		session: session,
+	}
 }
 
 // ZoneInfo holds Cloud DNS managed zone details
@@ -144,11 +153,19 @@ var takeoverPatterns = map[string]struct {
 	".proposify.com":              {"Proposify", "HIGH", "Proposify may be deleted"},
 }
 
+// getService returns a DNS service client using cached session if available
+func (ds *DNSService) getService(ctx context.Context) (*dns.Service, error) {
+	if ds.session != nil {
+		return sdk.CachedGetDNSService(ctx, ds.session)
+	}
+	return dns.NewService(ctx)
+}
+
 // Zones retrieves all DNS managed zones in a project
 func (ds *DNSService) Zones(projectID string) ([]ZoneInfo, error) {
 	ctx := context.Background()
 
-	service, err := dns.NewService(ctx)
+	service, err := ds.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "dns.googleapis.com")
 	}
@@ -177,7 +194,7 @@ func (ds *DNSService) Zones(projectID string) ([]ZoneInfo, error) {
 func (ds *DNSService) Records(projectID, zoneName string) ([]RecordInfo, error) {
 	ctx := context.Background()
 
-	service, err := dns.NewService(ctx)
+	service, err := ds.getService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "dns.googleapis.com")
 	}

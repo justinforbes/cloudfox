@@ -6,13 +6,22 @@ import (
 	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	iam "google.golang.org/api/iam/v1"
 )
 
-type DomainWideDelegationService struct{}
+type DomainWideDelegationService struct{
+	session *gcpinternal.SafeSession
+}
 
 func New() *DomainWideDelegationService {
 	return &DomainWideDelegationService{}
+}
+
+func NewWithSession(session *gcpinternal.SafeSession) *DomainWideDelegationService {
+	return &DomainWideDelegationService{
+		session: session,
+	}
 }
 
 // DWDServiceAccount represents a service account with domain-wide delegation
@@ -56,10 +65,18 @@ var CommonWorkspaceScopes = []string{
 	"https://mail.google.com/",
 }
 
+// getIAMService returns an IAM service client using cached session if available
+func (s *DomainWideDelegationService) getIAMService(ctx context.Context) (*iam.Service, error) {
+	if s.session != nil {
+		return sdk.CachedGetIAMService(ctx, s.session)
+	}
+	return iam.NewService(ctx)
+}
+
 // GetDWDServiceAccounts finds service accounts that may have domain-wide delegation
 func (s *DomainWideDelegationService) GetDWDServiceAccounts(projectID string) ([]DWDServiceAccount, error) {
 	ctx := context.Background()
-	service, err := iam.NewService(ctx)
+	service, err := s.getIAMService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "iam.googleapis.com")
 	}

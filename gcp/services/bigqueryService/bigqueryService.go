@@ -8,6 +8,7 @@ import (
 
 	"cloud.google.com/go/bigquery"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
+	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	"google.golang.org/api/iterator"
 	bqapi "google.golang.org/api/bigquery/v2"
 )
@@ -117,6 +118,14 @@ func New() *BigQueryService {
 // NewWithSession creates a BigQueryService with a SafeSession for managed authentication
 func NewWithSession(session *gcpinternal.SafeSession) *BigQueryService {
 	return &BigQueryService{session: session}
+}
+
+// getService returns a BigQuery REST API service client using cached session if available
+func (bq *BigQueryService) getService(ctx context.Context) (*bqapi.Service, error) {
+	if bq.session != nil {
+		return sdk.CachedGetBigQueryService(ctx, bq.session)
+	}
+	return bqapi.NewService(ctx)
 }
 
 // gcloud alpha bq datasets list
@@ -314,13 +323,8 @@ func (bq *BigQueryService) BigqueryTables(projectID string, datasetID string) ([
 	}
 	defer client.Close()
 
-	// Create API service for IAM calls
-	var apiService *bqapi.Service
-	if bq.session != nil {
-		apiService, err = bqapi.NewService(ctx, bq.session.GetClientOption())
-	} else {
-		apiService, err = bqapi.NewService(ctx)
-	}
+	// Create API service for IAM calls using cached wrapper
+	apiService, err := bq.getService(ctx)
 	if err != nil {
 		// Continue without IAM if service creation fails
 		apiService = nil

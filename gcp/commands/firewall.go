@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
@@ -361,8 +362,8 @@ func (m *FirewallModule) rulesToTableBody(rules []NetworkService.FirewallRuleInf
 			sources,
 			allowed,
 			targets,
-			boolToYesNo(rule.Disabled),
-			boolToYesNo(rule.LoggingEnabled),
+			shared.BoolToYesNo(rule.Disabled),
+			shared.BoolToYesNo(rule.LoggingEnabled),
 		})
 	}
 	return body
@@ -390,7 +391,7 @@ func (m *FirewallModule) networksToTableBody(networks []NetworkService.VPCInfo) 
 			network.RoutingMode,
 			fmt.Sprintf("%d", subnetCount),
 			peerings,
-			boolToYesNo(network.AutoCreateSubnetworks),
+			shared.BoolToYesNo(network.AutoCreateSubnetworks),
 		})
 	}
 	return body
@@ -407,7 +408,7 @@ func (m *FirewallModule) subnetsToTableBody(subnets []NetworkService.SubnetInfo)
 			subnet.Name,
 			subnet.Region,
 			subnet.IPCidrRange,
-			boolToYesNo(subnet.PrivateIPGoogleAccess),
+			shared.BoolToYesNo(subnet.PrivateIPGoogleAccess),
 		})
 	}
 	return body
