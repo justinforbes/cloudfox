@@ -332,8 +332,8 @@ type SensitiveItem struct {
 	Key         string `json:"key"`
 	Value       string `json:"value"`
 	Type        string `json:"type"`        // password, api-key, token, credential, connection-string, secret, env-var
-	Source      string `json:"source"`      // instance or project
-	Truncated   bool   `json:"truncated"`   // Whether value was truncated for display
+	Source      string `json:"source"`      // instance, project, or specific like "instance:user-data"
+	MetadataKey string `json:"metadataKey"` // The metadata key where this was found (e.g., user-data, startup-script)
 }
 
 // MetadataParseResult contains all parsed metadata fields
@@ -360,39 +360,54 @@ func parseMetadata(metadata *compute.Metadata) (hasStartupScript, hasSSHKeys, bl
 }
 
 // sensitivePatterns maps key name patterns to secret types
+// These are checked with contains matching, so they should be specific enough to avoid false positives
 var sensitivePatterns = map[string]string{
-	"PASSWORD":          "password",
-	"PASSWD":            "password",
-	"SECRET":            "secret",
-	"API_KEY":           "api-key",
-	"APIKEY":            "api-key",
-	"API-KEY":           "api-key",
-	"TOKEN":             "token",
-	"ACCESS_TOKEN":      "token",
-	"AUTH_TOKEN":        "token",
-	"BEARER":            "token",
-	"CREDENTIAL":        "credential",
-	"PRIVATE_KEY":       "credential",
-	"PRIVATEKEY":        "credential",
+	// Passwords - high confidence patterns that end with PASSWORD/PASSWD/PWD
+	"_PASSWORD": "password",
+	"_PASSWD":   "password",
+	"_PWD":      "password",
+	"_PASS":     "password",
+
+	// Secrets - patterns that explicitly contain SECRET
+	"_SECRET":     "secret",
+	"SECRET_KEY":  "secret",
+	"APP_SECRET":  "secret",
+	"JWT_SECRET":  "secret",
+
+	// API Keys - explicit API key patterns
+	"API_KEY":    "api-key",
+	"APIKEY":     "api-key",
+	"_APIKEY":    "api-key",
+	"API_SECRET": "api-key",
+
+	// Tokens - explicit token patterns (must have _TOKEN suffix or TOKEN_ prefix to be specific)
+	"_TOKEN":       "token",
+	"TOKEN_":       "token",
+	"ACCESS_TOKEN": "token",
+	"AUTH_TOKEN":   "token",
+	"BEARER_":      "token",
+
+	// Private keys
+	"PRIVATE_KEY": "credential",
+	"PRIVATEKEY":  "credential",
+	"_PRIVKEY":    "credential",
+
+	// Connection strings - explicit patterns
 	"CONNECTION_STRING": "connection-string",
-	"CONN_STR":          "connection-string",
 	"DATABASE_URL":      "connection-string",
-	"DB_PASSWORD":       "password",
-	"DB_PASS":           "password",
-	"MYSQL_PASSWORD":    "password",
-	"POSTGRES_PASSWORD": "password",
-	"REDIS_PASSWORD":    "password",
 	"MONGODB_URI":       "connection-string",
-	"AWS_ACCESS_KEY":    "credential",
-	"AWS_SECRET":        "credential",
-	"AZURE_KEY":         "credential",
-	"GCP_KEY":           "credential",
-	"ENCRYPTION_KEY":    "credential",
-	"SIGNING_KEY":       "credential",
-	"JWT_SECRET":        "credential",
-	"SESSION_SECRET":    "credential",
-	"OAUTH":             "credential",
-	"CLIENT_SECRET":     "credential",
+	"_CONN_STR":         "connection-string",
+
+	// Cloud provider credentials - very specific patterns
+	"AWS_SECRET_ACCESS_KEY": "credential",
+	"AWS_SESSION_TOKEN":     "credential",
+	"AZURE_CLIENT_SECRET":   "credential",
+	"GOOGLE_CREDENTIALS":    "credential",
+
+	// OAuth - specific patterns
+	"CLIENT_SECRET":   "credential",
+	"CONSUMER_SECRET": "credential",
+	"OAUTH_SECRET":    "credential",
 }
 
 // detectSensitiveType checks if a key name matches sensitive patterns
@@ -434,9 +449,24 @@ func parseMetadataFull(metadata *compute.Metadata) MetadataParseResult {
 			continue
 		}
 
-		// Store all raw metadata
-		if item.Value != nil {
+		// Store all raw metadata (except ssh-keys which go to separate loot)
+		if item.Value != nil && item.Key != "ssh-keys" && item.Key != "sshKeys" {
 			result.RawMetadata[item.Key] = *item.Value
+		}
+
+		// Check ALL metadata keys for sensitive patterns (not just custom ones)
+		if item.Value != nil {
+			if sensitiveType := detectSensitiveType(item.Key); sensitiveType != "" {
+				result.SensitiveItems = append(result.SensitiveItems, SensitiveItem{
+					Key:         item.Key,
+					Value:       *item.Value,
+					Type:        sensitiveType,
+					MetadataKey: item.Key, // The key itself is the metadata key
+				})
+			}
+			// Also scan metadata VALUES for embedded env vars (e.g., VAR=value patterns)
+			valueItems := extractSensitiveFromScript(*item.Value, "metadata-value:"+item.Key)
+			result.SensitiveItems = append(result.SensitiveItems, valueItems...)
 		}
 
 		switch item.Key {
@@ -444,7 +474,7 @@ func parseMetadataFull(metadata *compute.Metadata) MetadataParseResult {
 			result.HasStartupScript = true
 			if item.Value != nil {
 				result.StartupScriptContent = *item.Value
-				// Check startup script for sensitive patterns
+				// Check startup script for sensitive patterns (env vars inside script)
 				sensitiveItems := extractSensitiveFromScript(*item.Value, "startup-script")
 				result.SensitiveItems = append(result.SensitiveItems, sensitiveItems...)
 			}
@@ -482,20 +512,9 @@ func parseMetadataFull(metadata *compute.Metadata) MetadataParseResult {
 				result.SerialPortEnabled = true
 			}
 		default:
-			// Track custom metadata keys (may contain secrets)
+			// Track custom metadata keys
 			if !knownKeys[item.Key] {
 				result.CustomMetadata = append(result.CustomMetadata, item.Key)
-
-				// Check if key name suggests sensitive content
-				if item.Value != nil {
-					if sensitiveType := detectSensitiveType(item.Key); sensitiveType != "" {
-						result.SensitiveItems = append(result.SensitiveItems, SensitiveItem{
-							Key:   item.Key,
-							Value: *item.Value,
-							Type:  sensitiveType,
-						})
-					}
-				}
 			}
 		}
 	}
@@ -503,43 +522,166 @@ func parseMetadataFull(metadata *compute.Metadata) MetadataParseResult {
 	return result
 }
 
-// extractSensitiveFromScript extracts potential sensitive values from scripts
-func extractSensitiveFromScript(script, source string) []SensitiveItem {
+// extractSensitiveFromScript scans content for sensitive variable assignments
+// Focuses on explicit VAR=value patterns to minimize false positives
+// source format: "metadata-value:KEY_NAME" or "startup-script" or "project-startup-script"
+func extractSensitiveFromScript(content, source string) []SensitiveItem {
 	var items []SensitiveItem
-	lines := strings.Split(script, "\n")
+	seen := make(map[string]bool) // Deduplicate findings
+
+	// Parse the metadata key from the source
+	metadataKey := source
+	if strings.HasPrefix(source, "metadata-value:") {
+		metadataKey = strings.TrimPrefix(source, "metadata-value:")
+	}
+
+	lines := strings.Split(content, "\n")
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// Skip comments and empty lines
+
+		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		// Look for export VAR=value or VAR=value patterns
+		// Pattern 1: Shell style - export VAR=value or VAR=value
 		if strings.Contains(line, "=") {
-			// Handle export statements
-			line = strings.TrimPrefix(line, "export ")
+			// Handle export statements and YAML list items
+			testLine := strings.TrimPrefix(line, "export ")
+			testLine = strings.TrimPrefix(testLine, "- ")
+			testLine = strings.TrimPrefix(testLine, "| ")
+			testLine = strings.TrimSpace(testLine)
 
-			parts := strings.SplitN(line, "=", 2)
+			parts := strings.SplitN(testLine, "=", 2)
 			if len(parts) == 2 {
 				key := strings.TrimSpace(parts[0])
 				value := strings.TrimSpace(parts[1])
 				// Remove quotes from value
-				value = strings.Trim(value, "\"'")
+				value = strings.Trim(value, "\"'`")
+				// Clean up key
+				key = strings.TrimLeft(key, "- |>")
+				key = strings.TrimSpace(key)
 
-				if sensitiveType := detectSensitiveType(key); sensitiveType != "" && value != "" {
-					items = append(items, SensitiveItem{
-						Key:    key,
-						Value:  value,
-						Type:   sensitiveType,
-						Source: source,
-					})
+				// Only consider valid variable names with actual values
+				if isValidVarName(key) && len(value) >= 3 && !isPlaceholderValue(value) {
+					if sensitiveType := detectSensitiveType(key); sensitiveType != "" {
+						dedupeKey := key + ":" + value
+						if !seen[dedupeKey] {
+							seen[dedupeKey] = true
+							items = append(items, SensitiveItem{
+								Key:         key,
+								Value:       value,
+								Type:        sensitiveType,
+								MetadataKey: metadataKey,
+							})
+						}
+					}
+				}
+			}
+		}
+
+		// Pattern 2: YAML style "key: value" - only for direct assignments
+		if strings.Contains(line, ": ") && !strings.HasPrefix(line, "#") && !strings.Contains(line, "=") {
+			parts := strings.SplitN(line, ": ", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				// Clean up key
+				key = strings.TrimLeft(key, "- ")
+				key = strings.TrimSpace(key)
+				// Remove quotes from value
+				value = strings.Trim(value, "\"'`")
+
+				// Skip YAML block indicators and empty values
+				if value != "" && value != "|" && value != ">" && len(value) >= 3 && !isPlaceholderValue(value) {
+					if sensitiveType := detectSensitiveType(key); sensitiveType != "" {
+						dedupeKey := key + ":" + value
+						if !seen[dedupeKey] {
+							seen[dedupeKey] = true
+							items = append(items, SensitiveItem{
+								Key:         key,
+								Value:       value,
+								Type:        sensitiveType,
+								MetadataKey: metadataKey,
+							})
+						}
+					}
+				}
+			}
+		}
+
+		// Pattern 3: JSON style "key": "value"
+		if strings.Contains(line, "\":") {
+			parts := strings.SplitN(line, "\":", 2)
+			if len(parts) == 2 {
+				keyPart := parts[0]
+				if idx := strings.LastIndex(keyPart, "\""); idx >= 0 {
+					key := keyPart[idx+1:]
+					value := strings.TrimSpace(parts[1])
+					value = strings.Trim(value, " ,\"'`")
+
+					if len(value) >= 3 && !isPlaceholderValue(value) {
+						if sensitiveType := detectSensitiveType(key); sensitiveType != "" {
+							dedupeKey := key + ":" + value
+							if !seen[dedupeKey] {
+								seen[dedupeKey] = true
+								items = append(items, SensitiveItem{
+									Key:         key,
+									Value:       value,
+									Type:        sensitiveType,
+									MetadataKey: metadataKey,
+								})
+							}
+						}
+					}
 				}
 			}
 		}
 	}
 
 	return items
+}
+
+// isPlaceholderValue checks if a value looks like a placeholder rather than a real secret
+func isPlaceholderValue(value string) bool {
+	valueLower := strings.ToLower(value)
+	placeholders := []string{
+		"xxx", "your_", "your-", "<your", "changeme", "replace", "example",
+		"${", "$(",  // Variable references
+		"todo", "fixme", "placeholder",
+		"none", "null", "nil", "empty",
+		"true", "false",
+	}
+	for _, p := range placeholders {
+		if strings.Contains(valueLower, p) {
+			return true
+		}
+	}
+	// Also skip if it's just a simple word without special chars (likely not a real secret)
+	if len(value) < 8 && !strings.ContainsAny(value, "0123456789!@#$%^&*()-_=+[]{}|;:,.<>?/~`") {
+		return true
+	}
+	return false
+}
+
+// isValidVarName checks if a string looks like a valid variable name
+func isValidVarName(s string) bool {
+	if s == "" {
+		return false
+	}
+	// Variable names typically start with letter or underscore
+	first := s[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+		return false
+	}
+	// Rest can be alphanumeric or underscore
+	for _, c := range s[1:] {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // parseBootDiskEncryption checks the boot disk encryption type
@@ -607,9 +749,28 @@ func (ces *ComputeEngineService) GetProjectMetadata(projectID string) (*ProjectM
 				continue
 			}
 
-			// Store all raw metadata
-			if item.Value != nil {
+			// Store all raw metadata (except ssh-keys which go to separate loot)
+			if item.Value != nil && item.Key != "ssh-keys" && item.Key != "sshKeys" {
 				info.RawMetadata[item.Key] = *item.Value
+			}
+
+			// Check ALL metadata keys for sensitive patterns
+			if item.Value != nil {
+				if sensitiveType := detectSensitiveType(item.Key); sensitiveType != "" {
+					info.SensitiveMetadata = append(info.SensitiveMetadata, SensitiveItem{
+						Key:         item.Key,
+						Value:       *item.Value,
+						Type:        sensitiveType,
+						Source:      "project",
+						MetadataKey: item.Key,
+					})
+				}
+				// Also scan metadata VALUES for embedded env vars (e.g., VAR=value patterns)
+				valueItems := extractSensitiveFromScript(*item.Value, "metadata-value:"+item.Key)
+				for i := range valueItems {
+					valueItems[i].Source = "project"
+				}
+				info.SensitiveMetadata = append(info.SensitiveMetadata, valueItems...)
 			}
 
 			switch item.Key {
@@ -628,7 +789,7 @@ func (ces *ComputeEngineService) GetProjectMetadata(projectID string) (*ProjectM
 				info.HasProjectStartupScript = true
 				if item.Value != nil {
 					info.ProjectStartupScript = *item.Value
-					// Check startup script for sensitive patterns
+					// Check startup script for sensitive patterns (env vars inside script)
 					sensitiveItems := extractSensitiveFromScript(*item.Value, "project-startup-script")
 					for i := range sensitiveItems {
 						sensitiveItems[i].Source = "project"
@@ -648,21 +809,9 @@ func (ces *ComputeEngineService) GetProjectMetadata(projectID string) (*ProjectM
 					info.SerialPortEnabled = true
 				}
 			default:
-				// Track other custom metadata that might contain secrets
+				// Track other custom metadata keys
 				if !isKnownMetadataKey(item.Key) {
 					info.CustomMetadataKeys = append(info.CustomMetadataKeys, item.Key)
-
-					// Check if key name suggests sensitive content
-					if item.Value != nil {
-						if sensitiveType := detectSensitiveType(item.Key); sensitiveType != "" {
-							info.SensitiveMetadata = append(info.SensitiveMetadata, SensitiveItem{
-								Key:    item.Key,
-								Value:  *item.Value,
-								Type:   sensitiveType,
-								Source: "project",
-							})
-						}
-					}
 				}
 			}
 		}
