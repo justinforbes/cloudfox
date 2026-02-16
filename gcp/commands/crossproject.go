@@ -33,27 +33,27 @@ Features:
 - Discovers Pub/Sub subscriptions exporting to other projects (BQ, GCS, push)
 - Generates exploitation commands for lateral movement
 - Highlights service accounts spanning trust boundaries
-- Shows impersonation targets when --attack-paths flag is used
+- Shows impersonation targets (run foxmapper first for attack path analysis)
 
-RECOMMENDED: For comprehensive cross-project analysis, use with -A and --org-cache
-to automatically discover all accessible projects in your organization:
+RECOMMENDED: For comprehensive cross-project analysis, use -A to analyze all accessible projects:
 
-  cloudfox gcp crossproject -A --org-cache --attack-paths
+  cloudfox gcp crossproject -A
 
 This will:
-- Discover all projects you have access to (--org-cache)
-- Analyze cross-project patterns across all of them (-A)
-- Include impersonation targets and attack paths (--attack-paths)
+- Use cached org/folder/project data (auto-populated, refreshes every 24h)
+- Analyze cross-project patterns across all accessible projects
 - Show "Trust Boundary" column indicating if target is Internal, External, or Unknown
 
-TRUST BOUNDARY COLUMN (requires --org-cache):
+TRUST BOUNDARY COLUMN:
 - "Internal" - Target project is within your organization
 - "External" - Target project is outside your organization (trust boundary crossing!)
-- "Unknown"  - Org cache not available, cannot determine boundary
+- "Unknown"  - Cannot determine boundary
 
 ALTERNATIVE: Specify projects manually with -l for a project list file:
 
-  cloudfox gcp crossproject -l projects.txt --attack-paths
+  cloudfox gcp crossproject -l projects.txt
+
+TIP: Run foxmapper first to populate the Attack Paths column.
 
 WARNING: Requires multiple projects to be specified for effective analysis.
 Single project analysis (-p) will have limited results.`,
@@ -124,7 +124,7 @@ func (m *CrossProjectModule) Execute(ctx context.Context, logger internal.Logger
 		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_CROSSPROJECT_MODULE_NAME)
 	}
 
-	// Get org cache from context (populated by --org-cache flag or all-checks)
+	// Get org cache from context (auto-loaded at startup)
 	m.OrgCache = gcpinternal.GetOrgCacheFromContext(ctx)
 
 	// If no context cache, try loading from disk cache
@@ -234,11 +234,13 @@ func (m *CrossProjectModule) initializeLootFiles() {
 }
 
 func (m *CrossProjectModule) addBindingToLoot(binding crossprojectservice.CrossProjectBinding) {
-	// Add exploitation commands
+	// Only add if there are exploitation commands
 	if len(binding.ExploitCommands) > 0 {
 		m.LootMap["crossproject-commands"].Contents += fmt.Sprintf(
-			"# IAM Binding: %s -> %s\n# Principal: %s\n# Role: %s\n",
-			binding.SourceProject, binding.TargetProject, binding.Principal, binding.Role,
+			"### %s -> %s (%s)\n",
+			m.GetProjectName(binding.SourceProject),
+			m.GetProjectName(binding.TargetProject),
+			cleanRole(binding.Role),
 		)
 		for _, cmd := range binding.ExploitCommands {
 			m.LootMap["crossproject-commands"].Contents += cmd + "\n"
@@ -248,66 +250,40 @@ func (m *CrossProjectModule) addBindingToLoot(binding crossprojectservice.CrossP
 }
 
 func (m *CrossProjectModule) addServiceAccountToLoot(sa crossprojectservice.CrossProjectServiceAccount) {
-	// Add impersonation commands for cross-project SAs
-	m.LootMap["crossproject-commands"].Contents += fmt.Sprintf(
-		"# Cross-project SA: %s (Home: %s)\n"+
-			"gcloud auth print-access-token --impersonate-service-account=%s\n\n",
-		sa.Email, sa.ProjectID, sa.Email,
-	)
+	// Skip - service account cross-project access is covered by bindings and lateral movement paths
+	// Adding separate impersonation commands would be redundant
 }
 
 func (m *CrossProjectModule) addLateralMovementToLoot(path crossprojectservice.LateralMovementPath) {
-	// Add lateral movement exploitation commands
-	m.LootMap["crossproject-commands"].Contents += fmt.Sprintf(
-		"# Lateral Movement: %s -> %s\n"+
-			"# Principal: %s\n"+
-			"# Method: %s\n"+
-			"# Target Roles: %s\n",
-		path.SourceProject, path.TargetProject,
-		path.SourcePrincipal,
-		path.AccessMethod,
-		strings.Join(path.TargetRoles, ", "),
-	)
-
+	// Only add if there are exploitation commands
 	if len(path.ExploitCommands) > 0 {
+		// Clean up role names for display
+		var cleanedRoles []string
+		for _, r := range path.TargetRoles {
+			cleanedRoles = append(cleanedRoles, cleanRole(r))
+		}
+
+		m.LootMap["crossproject-commands"].Contents += fmt.Sprintf(
+			"### %s -> %s (%s)\n",
+			m.GetProjectName(path.SourceProject),
+			m.GetProjectName(path.TargetProject),
+			strings.Join(cleanedRoles, ", "),
+		)
 		for _, cmd := range path.ExploitCommands {
 			m.LootMap["crossproject-commands"].Contents += cmd + "\n"
 		}
+		m.LootMap["crossproject-commands"].Contents += "\n"
 	}
-	m.LootMap["crossproject-commands"].Contents += "\n"
 }
 
 func (m *CrossProjectModule) addLoggingSinkToLoot(sink crossprojectservice.CrossProjectLoggingSink) {
-	m.LootMap["crossproject-commands"].Contents += fmt.Sprintf(
-		"# Cross-Project Logging Sink: %s\n"+
-			"# Source Project: %s -> Target Project: %s\n"+
-			"# Destination: %s (%s)\n",
-		sink.SinkName,
-		sink.SourceProject, sink.TargetProject,
-		sink.Destination, sink.DestinationType,
-	)
-	m.LootMap["crossproject-commands"].Contents += fmt.Sprintf(
-		"gcloud logging sinks describe %s --project=%s\n\n",
-		sink.SinkName, sink.SourceProject,
-	)
+	// Logging sinks are data exports, not direct exploitation paths
+	// Skip adding to loot - the table output is sufficient
 }
 
 func (m *CrossProjectModule) addPubSubExportToLoot(export crossprojectservice.CrossProjectPubSubExport) {
-	m.LootMap["crossproject-commands"].Contents += fmt.Sprintf(
-		"# Cross-Project Pub/Sub Export: %s\n"+
-			"# Subscription: %s (Source: %s)\n"+
-			"# Topic: %s (Project: %s)\n"+
-			"# Export Type: %s -> Destination: %s\n",
-		export.SubscriptionName,
-		export.SubscriptionName, export.SourceProject,
-		export.TopicName, export.TopicProject,
-		export.ExportType,
-		export.ExportDest,
-	)
-	m.LootMap["crossproject-commands"].Contents += fmt.Sprintf(
-		"gcloud pubsub subscriptions describe %s --project=%s\n\n",
-		export.SubscriptionName, export.SourceProject,
-	)
+	// Pub/Sub exports are data exports, not direct exploitation paths
+	// Skip adding to loot - the table output is sufficient
 }
 
 // ------------------------------
@@ -634,6 +610,7 @@ func (m *CrossProjectModule) writeFlatOutput(ctx context.Context, logger interna
 	lootFiles := m.collectLootFiles()
 
 	// Write output for each target project separately
+	isFirstProject := true
 	for targetProject, body := range bodyByProject {
 		if len(body) == 0 {
 			continue
@@ -647,9 +624,16 @@ func (m *CrossProjectModule) writeFlatOutput(ctx context.Context, logger interna
 			},
 		}
 
+		// Only include loot files on the first project to avoid duplicate writes
+		var projectLoot []internal.LootFile
+		if isFirstProject {
+			projectLoot = lootFiles
+			isFirstProject = false
+		}
+
 		output := CrossProjectOutput{
 			Table: tables,
-			Loot:  lootFiles,
+			Loot:  projectLoot,
 		}
 
 		err := internal.HandleOutputSmart(

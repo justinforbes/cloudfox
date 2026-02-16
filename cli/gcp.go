@@ -32,12 +32,6 @@ var (
 	GCPWrapTable       bool
 	GCPFlatOutput      bool
 
-	// Attack path analysis flag
-	GCPAttackPaths bool
-
-	// Organization cache flag - enumerates all orgs/folders/projects for cross-project analysis
-	GCPOrgCache bool
-
 	// Refresh cache flag - force re-enumeration even if cache exists
 	GCPRefreshCache bool
 
@@ -125,11 +119,9 @@ var (
 			// Get account for cache operations
 			account, _ := ctx.Value("account").(string)
 
-			// If --attack-paths flag is set, try to load FoxMapper data
+			// Always try to load FoxMapper data for attack path analysis
 			// This allows individual modules to show the Attack Paths column
-			if GCPAttackPaths && len(GCPProjectIDs) > 0 {
-				GCPLogger.InfoM("Looking for FoxMapper graph data...", "gcp")
-
+			if len(GCPProjectIDs) > 0 {
 				// Get org ID from hierarchy if available (GCPOrganization flag may be empty)
 				orgID := GCPOrganization
 				if orgID == "" {
@@ -144,21 +136,22 @@ var (
 				if foxMapperCache != nil && foxMapperCache.IsPopulated() {
 					ctx = gcpinternal.SetFoxMapperCacheInContext(ctx, foxMapperCache)
 					totalNodes, adminNodes, nodesWithPrivesc := foxMapperCache.GetStats()
-					GCPLogger.SuccessM(fmt.Sprintf("FoxMapper data loaded: %d principals, %d admins, %d with privesc - modules will show Attack Paths column",
-						totalNodes, adminNodes, nodesWithPrivesc), "gcp")
-				} else {
-					GCPLogger.InfoM("No FoxMapper data found. Run 'foxmapper gcp graph create' to generate graph data for attack path analysis.", "gcp")
+					ageDays := foxMapperCache.GetDataAgeDays()
+
+					if ageDays >= 7 {
+						GCPLogger.WarnM(fmt.Sprintf("FoxMapper data is %d days old - consider running 'foxmapper gcp graph create' to refresh",
+							ageDays), "gcp")
+					}
+					GCPLogger.SuccessM(fmt.Sprintf("FoxMapper data loaded: %d principals, %d admins, %d with privesc (data age: %d days)",
+						totalNodes, adminNodes, nodesWithPrivesc, ageDays), "gcp")
 				}
 			}
 
-			// If --org-cache flag is set, load or enumerate all orgs/folders/projects
-			// This is useful for cross-project analysis modules
-			if GCPOrgCache {
-				GCPLogger.InfoM("Loading/enumerating organization data...", "gcp")
-				orgCache := loadOrPopulateOrgCache(account, GCPRefreshCache)
-				if orgCache != nil && orgCache.IsPopulated() {
-					ctx = gcpinternal.SetOrgCacheInContext(ctx, orgCache)
-				}
+			// Always try to load org cache for cross-project analysis
+			// Cache auto-refreshes after 24 hours
+			orgCache := loadOrPopulateOrgCache(account, GCPRefreshCache)
+			if orgCache != nil && orgCache.IsPopulated() {
+				ctx = gcpinternal.SetOrgCacheInContext(ctx, orgCache)
 			}
 
 			cmd.SetContext(ctx)
@@ -487,8 +480,6 @@ func init() {
 	// GCPCommands.PersistentFlags().IntVarP(&Goroutines, "max-goroutines", "g", 30, "Maximum number of concurrent goroutines")
 	GCPCommands.PersistentFlags().BoolVarP(&GCPWrapTable, "wrap", "w", false, "Wrap table to fit in terminal (complicates grepping)")
 	GCPCommands.PersistentFlags().BoolVar(&GCPFlatOutput, "flat-output", false, "Use legacy flat output structure instead of hierarchical per-project directories")
-	GCPCommands.PersistentFlags().BoolVar(&GCPAttackPaths, "attack-paths", false, "Run attack path analysis (privesc/exfil/lateral) and add Attack Paths column to module output")
-	GCPCommands.PersistentFlags().BoolVar(&GCPOrgCache, "org-cache", false, "Enumerate all accessible orgs/folders/projects and cache for cross-project analysis")
 	GCPCommands.PersistentFlags().BoolVar(&GCPRefreshCache, "refresh-cache", false, "Force re-enumeration of cached data (cache auto-expires after 24 hours)")
 
 	// Available commands

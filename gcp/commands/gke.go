@@ -391,7 +391,7 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "run --attack-paths"
+		attackPaths := "run foxmapper"
 		if saDisplay != "-" {
 			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, saDisplay)
 		} else if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {

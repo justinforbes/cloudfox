@@ -237,7 +237,7 @@ func (m *NotebooksModule) instancesToTableBody(instances []notebooksservice.Note
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "run --attack-paths"
+		attackPaths := "run foxmapper"
 		if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
 				attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sa)
@@ -292,7 +292,7 @@ func (m *NotebooksModule) runtimesToTableBody(runtimes []notebooksservice.Runtim
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "run --attack-paths"
+		attackPaths := "run foxmapper"
 		if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 			if sa != "-" && sa != "" {
 				attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sa)

@@ -265,7 +265,7 @@ func (m *SchedulerModule) jobsToTableBody(jobs []SchedulerService.JobInfo) [][]s
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "run --attack-paths"
+		attackPaths := "run foxmapper"
 		if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 			if sa != "-" {
 				attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sa)

@@ -39,8 +39,7 @@ Security Considerations:
 - Cloud Build SA is a common privilege escalation vector
 - Default compute SA often has Editor role
 
-TIP: Use the --attack-paths flag to analyze privesc/exfil/lateral movement potential:
-  cloudfox gcp service-agents -p PROJECT_ID --attack-paths`,
+TIP: Run foxmapper first to populate the Attack Paths column with privesc/exfil/lateral movement analysis.`,
 	Run: runGCPServiceAgentsCommand,
 }
 
@@ -457,7 +456,7 @@ func (m *ServiceAgentsModule) agentsToTableBody(agents []serviceagentsservice.Se
 		}
 
 		// Check attack paths for this service agent
-		attackPaths := "run --attack-paths"
+		attackPaths := "run foxmapper"
 		if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, agent.Email)
 		}

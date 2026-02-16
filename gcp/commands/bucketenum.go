@@ -14,10 +14,10 @@ import (
 )
 
 var (
-	bucketEnumMaxObjects  int
-	bucketEnumAllObjects  bool
-	bucketEnumNoLimit     bool
-	maxObjectsWasSet      bool // tracks if --max-objects was explicitly set
+	bucketEnumMaxObjects int
+	bucketEnumAllObjects bool
+	bucketEnumNoLimit    bool
+	maxObjectsWasSet     bool // tracks if --max-objects was explicitly set
 )
 
 var GCPBucketEnumCommand = &cobra.Command{
@@ -42,16 +42,20 @@ File categories detected:
 - Source: Git repositories
 - Cloud: Cloud Functions source, build artifacts
 
-Use --all-objects to enumerate ALL bucket contents (not just sensitive files).
-WARNING: Full enumeration may take a long time for buckets with many objects.
-Use --max-objects to limit the scan, or --no-limit for unlimited.`,
+Flags:
+  --all-objects   Report ALL bucket objects (not just sensitive files)
+  --no-limit      Remove the 1000 object-per-bucket scan limit
+  --max-objects   Set a custom object-per-bucket scan limit
+
+By default, only sensitive files are reported with a 1000 object scan limit.
+WARNING: --all-objects and --no-limit may take a long time for large buckets.`,
 	Run: runGCPBucketEnumCommand,
 }
 
 func init() {
-	GCPBucketEnumCommand.Flags().IntVar(&bucketEnumMaxObjects, "max-objects", 1000, "Maximum objects to scan per bucket (default 1000)")
-	GCPBucketEnumCommand.Flags().BoolVar(&bucketEnumAllObjects, "all-objects", false, "Enumerate ALL bucket contents, not just sensitive files (implies --no-limit unless --max-objects is set)")
-	GCPBucketEnumCommand.Flags().BoolVar(&bucketEnumNoLimit, "no-limit", false, "Remove the object limit (enumerate all objects in each bucket)")
+	GCPBucketEnumCommand.Flags().IntVar(&bucketEnumMaxObjects, "max-objects", 1000, "Maximum objects to scan per bucket")
+	GCPBucketEnumCommand.Flags().BoolVar(&bucketEnumAllObjects, "all-objects", false, "Report ALL objects, not just sensitive files (implies --no-limit unless --max-objects is set)")
+	GCPBucketEnumCommand.Flags().BoolVar(&bucketEnumNoLimit, "no-limit", false, "Remove the 1000 object-per-bucket scan limit (still only reports sensitive files)")
 }
 
 type BucketEnumModule struct {
@@ -290,14 +294,14 @@ func (m *BucketEnumModule) addFileToLoot(projectID string, file bucketenumservic
 	localDir := fmt.Sprintf("bucket/%s/%s", file.BucketName, getObjectDir(file.ObjectName))
 	localCpCmd := fmt.Sprintf("gsutil cp gs://%s/%s %s", file.BucketName, file.ObjectName, localDir)
 
-	// All files go to the general commands file
+	// All files go to the general commands file (without risk ranking)
 	if lootFile := m.LootMap[projectID]["bucket-enum-commands"]; lootFile != nil {
 		lootFile.Contents += fmt.Sprintf(
-			"# [%s] %s - gs://%s/%s\n"+
-				"# Category: %s, Size: %d bytes\n"+
+			"# %s - gs://%s/%s\n"+
+				"# %s, Size: %d bytes\n"+
 				"mkdir -p %s\n"+
 				"%s\n\n",
-			file.RiskLevel, file.Category,
+			file.Category,
 			file.BucketName, file.ObjectName,
 			file.Description, file.Size,
 			localDir,

@@ -534,7 +534,7 @@ func (m *AppEngineModule) buildTablesForProject(projectID string, apps []AppEngi
 			}
 
 			// Check attack paths (privesc/exfil/lateral) for the service account
-			attackPaths := "run --attack-paths"
+			attackPaths := "run foxmapper"
 			if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 				if ver.ServiceAccount != "" {
 					attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, ver.ServiceAccount)

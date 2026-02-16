@@ -864,7 +864,7 @@ func (m *InstancesModule) instancesToTableBody(instances []ComputeEngineService.
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
 		// FoxMapper takes priority if available (graph-based analysis)
-		attackPaths := "run --attack-paths"
+		attackPaths := "run foxmapper"
 		if saEmail != "-" {
 			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, saEmail)
 		} else if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {

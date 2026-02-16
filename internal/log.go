@@ -67,6 +67,18 @@ func (l *Logger) SuccessM(text string, module string) {
 	fmt.Printf(clearln+"[%s][%s] %s\n", green(emoji.Sprintf(":fox:cloudfox %s :fox:", l.version)), green(module), text)
 }
 
+func (l *Logger) Warn(text string) {
+	l.WarnM(text, "config")
+}
+
+func (l *Logger) WarnM(text string, module string) {
+	var yellow = color.New(color.FgYellow).SprintFunc()
+	fmt.Printf(clearln+"[%s][%s] ⚠️  %s\n", yellow(emoji.Sprintf(":fox:cloudfox %s :fox:", l.version)), yellow(module), text)
+	if l.txtLog != nil {
+		l.txtLog.Printf("[%s] WARNING: %s", module, text)
+	}
+}
+
 func (l *Logger) Error(text string) {
 	l.ErrorM(text, "config")
 }

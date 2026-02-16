@@ -356,36 +356,46 @@ func (s *CrossProjectService) analyzeBindingRisk(role, member string, isFromKnow
 func (s *CrossProjectService) generateExploitCommands(binding CrossProjectBinding) []string {
 	var commands []string
 
+	// Build impersonation flag if service account
+	impersonateFlag := ""
 	if binding.PrincipalType == "serviceAccount" {
 		email := strings.TrimPrefix(binding.Principal, "serviceAccount:")
-
-		commands = append(commands,
-			fmt.Sprintf("# Impersonate SA from %s to access %s:", binding.SourceProject, binding.TargetProject),
-			fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=%s", email),
-			fmt.Sprintf("# Then use token to access target project:"),
-			fmt.Sprintf("gcloud projects describe %s --impersonate-service-account=%s", binding.TargetProject, email),
-		)
+		impersonateFlag = fmt.Sprintf(" --impersonate-service-account=%s", email)
 	}
 
-	// Role-specific exploitation
-	if strings.Contains(binding.Role, "storage") {
+	roleLower := strings.ToLower(binding.Role)
+
+	// Role-specific exploitation commands
+	if strings.Contains(roleLower, "owner") || strings.Contains(roleLower, "editor") {
 		commands = append(commands,
-			fmt.Sprintf("# List buckets in target project:"),
+			fmt.Sprintf("gcloud compute instances list --project=%s%s", binding.TargetProject, impersonateFlag),
+			fmt.Sprintf("gcloud secrets list --project=%s%s", binding.TargetProject, impersonateFlag),
 			fmt.Sprintf("gsutil ls -p %s", binding.TargetProject),
 		)
-	}
-
-	if strings.Contains(binding.Role, "compute") {
+	} else if strings.Contains(roleLower, "storage") {
 		commands = append(commands,
-			fmt.Sprintf("# List instances in target project:"),
-			fmt.Sprintf("gcloud compute instances list --project=%s", binding.TargetProject),
+			fmt.Sprintf("gsutil ls -p %s", binding.TargetProject),
 		)
-	}
-
-	if strings.Contains(binding.Role, "secretmanager") {
+	} else if strings.Contains(roleLower, "compute") {
 		commands = append(commands,
-			fmt.Sprintf("# List secrets in target project:"),
-			fmt.Sprintf("gcloud secrets list --project=%s", binding.TargetProject),
+			fmt.Sprintf("gcloud compute instances list --project=%s%s", binding.TargetProject, impersonateFlag),
+		)
+	} else if strings.Contains(roleLower, "secretmanager") {
+		commands = append(commands,
+			fmt.Sprintf("gcloud secrets list --project=%s%s", binding.TargetProject, impersonateFlag),
+		)
+	} else if strings.Contains(roleLower, "bigquery") {
+		commands = append(commands,
+			fmt.Sprintf("bq ls --project_id=%s", binding.TargetProject),
+			fmt.Sprintf("bq query --project_id=%s 'SELECT * FROM INFORMATION_SCHEMA.TABLES'", binding.TargetProject),
+		)
+	} else if strings.Contains(roleLower, "cloudsql") {
+		commands = append(commands,
+			fmt.Sprintf("gcloud sql instances list --project=%s%s", binding.TargetProject, impersonateFlag),
+		)
+	} else if strings.Contains(roleLower, "serviceaccounttokencreator") || strings.Contains(roleLower, "serviceaccountkeyadmin") {
+		commands = append(commands,
+			fmt.Sprintf("gcloud iam service-accounts list --project=%s%s", binding.TargetProject, impersonateFlag),
 		)
 	}
 
@@ -396,24 +406,39 @@ func (s *CrossProjectService) generateExploitCommands(binding CrossProjectBindin
 func (s *CrossProjectService) generateLateralMovementCommands(path LateralMovementPath) []string {
 	var commands []string
 
+	// Build impersonation flag if service account
+	impersonateFlag := ""
 	if strings.HasPrefix(path.SourcePrincipal, "serviceAccount:") {
 		email := strings.TrimPrefix(path.SourcePrincipal, "serviceAccount:")
+		impersonateFlag = fmt.Sprintf(" --impersonate-service-account=%s", email)
+	}
 
-		commands = append(commands,
-			fmt.Sprintf("# Lateral movement from %s to %s via SA impersonation:", path.SourceProject, path.TargetProject),
-			fmt.Sprintf("# 1. Get access token for the cross-project SA:"),
-			fmt.Sprintf("gcloud auth print-access-token --impersonate-service-account=%s", email),
-			fmt.Sprintf("# 2. Use the SA to access target project:"),
-		)
-
-		// Add role-specific commands
-		for _, role := range path.TargetRoles {
-			if strings.Contains(role, "owner") || strings.Contains(role, "editor") {
-				commands = append(commands,
-					fmt.Sprintf("# Full project access with %s:", role),
-					fmt.Sprintf("gcloud projects describe %s --impersonate-service-account=%s", path.TargetProject, email),
-				)
-			}
+	// Add role-specific commands based on the most powerful role
+	for _, role := range path.TargetRoles {
+		roleLower := strings.ToLower(role)
+		if strings.Contains(roleLower, "owner") || strings.Contains(roleLower, "editor") {
+			commands = append(commands,
+				fmt.Sprintf("gcloud compute instances list --project=%s%s", path.TargetProject, impersonateFlag),
+				fmt.Sprintf("gcloud secrets list --project=%s%s", path.TargetProject, impersonateFlag),
+				fmt.Sprintf("gsutil ls -p %s", path.TargetProject),
+			)
+			break // owner/editor covers everything, no need for more specific commands
+		} else if strings.Contains(roleLower, "storage") {
+			commands = append(commands,
+				fmt.Sprintf("gsutil ls -p %s", path.TargetProject),
+			)
+		} else if strings.Contains(roleLower, "compute") {
+			commands = append(commands,
+				fmt.Sprintf("gcloud compute instances list --project=%s%s", path.TargetProject, impersonateFlag),
+			)
+		} else if strings.Contains(roleLower, "secretmanager") {
+			commands = append(commands,
+				fmt.Sprintf("gcloud secrets list --project=%s%s", path.TargetProject, impersonateFlag),
+			)
+		} else if strings.Contains(roleLower, "bigquery") {
+			commands = append(commands,
+				fmt.Sprintf("bq ls --project_id=%s", path.TargetProject),
+			)
 		}
 	}
 

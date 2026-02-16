@@ -31,7 +31,7 @@ Security Columns:
 - Ingress: INGRESS_TRAFFIC_ALL (public), INTERNAL_ONLY, or INTERNAL_LOAD_BALANCER
 - Public: Whether allUsers or allAuthenticatedUsers can invoke the service
 - Service Account: The identity the service runs as
-- SA Attack Paths: Privesc/exfil/lateral movement potential (requires --attack-paths)
+- SA Attack Paths: Privesc/exfil/lateral movement potential (run foxmapper first)
 - VPC Access: Network connectivity to VPC resources
 - Env Vars: Count of plain environment variables
 - Secret Mgr: Count of env vars referencing Secret Manager (secure storage)
@@ -44,10 +44,7 @@ Attack Surface:
 - Container images may contain vulnerabilities or secrets
 - Hardcoded secrets in env vars are a critical security risk
 
-TIP: To see service account attack paths (privesc, exfil, lateral movement),
-use the global --attack-paths flag:
-
-  cloudfox gcp cloudrun -p PROJECT_ID --attack-paths`,
+TIP: Run foxmapper first to populate the SA Attack Paths column.`,
 	Run: runGCPCloudRunCommand,
 }
 
@@ -469,7 +466,7 @@ func (m *CloudRunModule) buildTablesForProject(projectID string, services []Clou
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "run --attack-paths"
+		attackPaths := "run foxmapper"
 		if svc.ServiceAccount != "" {
 			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, svc.ServiceAccount)
 		} else if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
@@ -537,7 +534,7 @@ func (m *CloudRunModule) buildTablesForProject(projectID string, services []Clou
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		jobAttackPaths := "run --attack-paths"
+		jobAttackPaths := "run foxmapper"
 		if job.ServiceAccount != "" {
 			jobAttackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, job.ServiceAccount)
 		} else if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {

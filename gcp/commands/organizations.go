@@ -85,7 +85,7 @@ func runGCPOrganizationsCommand(cmd *cobra.Command, args []string) {
 func (m *OrganizationsModule) Execute(ctx context.Context, logger internal.Logger) {
 	orgsSvc := orgsservice.New()
 
-	// Check if org cache is available (from all-checks or --org-cache flag)
+	// Check if org cache is available (auto-loaded at startup)
 	if orgCache := gcpinternal.GetOrgCacheFromContext(ctx); orgCache != nil && orgCache.IsPopulated() {
 		logger.InfoM("Using cached organization data", globals.GCP_ORGANIZATIONS_MODULE_NAME)
 

@@ -301,21 +301,22 @@ For detailed documentation on each GCP command, see the [GCP Commands Wiki](http
 
 CloudFox GCP uses a **unified attack path analysis** system that combines privilege escalation, lateral movement, and data exfiltration analysis. The three attack path modules share a common backend (`attackpathService`) that analyzes IAM policies across all 4 hierarchy levels: Organization → Folder → Project → Resource.
 
-### `--attack-paths` Global Flag
+### Attack Path Column
 
-When running compute/service modules, add `--attack-paths` to see attack path capabilities for service accounts:
+CloudFox automatically loads FoxMapper graph data when available and shows attack path capabilities in module output. Run foxmapper first to populate the Attack Paths column:
 
 ```bash
-# Run instances module with attack path analysis
-cloudfox gcp instances -p my-project --attack-paths
+# First, generate the attack path graph
+foxmapper gcp graph create -p my-project
 
-# Run service accounts with attack paths
-cloudfox gcp serviceaccounts --all-projects --attack-paths
+# Then run cloudfox modules - Attack Paths column will be populated automatically
+cloudfox gcp instances -p my-project
+cloudfox gcp serviceaccounts --all-projects
 ```
 
-This adds an **"Attack Paths"** column showing: `Yes (P:3 E:2 L:1)` where P=Privesc, E=Exfil, L=Lateral counts.
+The **"Attack Paths"** column shows: `Yes (P:3 E:2 L:1)` where P=Privesc, E=Exfil, L=Lateral counts. If foxmapper hasn't been run, the column shows "run foxmapper".
 
-**Modules supporting `--attack-paths`**: instances, serviceaccounts, functions, cloudrun, gke, composer, dataproc, dataflow, notebooks, cloudbuild, scheduler, appengine
+**Modules with Attack Paths column**: instances, serviceaccounts, functions, cloudrun, gke, composer, dataproc, dataflow, notebooks, cloudbuild, scheduler, appengine, service-agents
 
 | Provider | Command Name | Description |
 | - | - | - |

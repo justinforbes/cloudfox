@@ -3,7 +3,10 @@ package gcpinternal
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	foxmapperservice "github.com/BishopFox/cloudfox/gcp/services/foxmapperService"
 )
@@ -14,6 +17,8 @@ type FoxMapperCache struct {
 	service    *foxmapperservice.FoxMapperService
 	populated  bool
 	identifier string
+	loadedPath string
+	dataAge    time.Duration
 }
 
 // NewFoxMapperCache creates a new FoxMapper cache
@@ -132,6 +137,26 @@ func (c *FoxMapperCache) GetIdentifier() string {
 	return c.identifier
 }
 
+// GetDataAge returns how old the FoxMapper data is
+func (c *FoxMapperCache) GetDataAge() time.Duration {
+	return c.dataAge
+}
+
+// GetDataAgeDays returns the age of FoxMapper data in days
+func (c *FoxMapperCache) GetDataAgeDays() int {
+	return int(c.dataAge.Hours() / 24)
+}
+
+// SetLoadedPath sets the path and calculates data age from file modification time
+func (c *FoxMapperCache) SetLoadedPath(path string) {
+	c.loadedPath = path
+	// Try to get the modification time of the nodes.json file
+	nodesPath := filepath.Join(path, "graph", "nodes.json")
+	if info, err := os.Stat(nodesPath); err == nil {
+		c.dataAge = time.Since(info.ModTime())
+	}
+}
+
 // HasPrivesc checks if a service account has privilege escalation potential
 func (c *FoxMapperCache) HasPrivesc(serviceAccount string) (bool, string) {
 	if !c.populated {
@@ -182,18 +207,25 @@ func TryLoadFoxMapper(orgID string, projectIDs []string) *FoxMapperCache {
 
 	// Try org first - if it exists, it should contain all projects
 	if orgID != "" {
-		if err := cache.LoadFromOrg(orgID); err == nil {
-			return cache
+		if path, err := foxmapperservice.FindFoxMapperData(orgID, true); err == nil {
+			if err := cache.LoadFromOrg(orgID); err == nil {
+				cache.SetLoadedPath(path)
+				return cache
+			}
 		}
 	}
 
 	// No org-level graph - try to load and merge all project graphs
 	loadedCount := 0
+	var firstPath string
 	for _, projectID := range projectIDs {
 		if loadedCount == 0 {
 			// First project - load normally
-			if err := cache.LoadFromProject(projectID); err == nil {
-				loadedCount++
+			if path, err := foxmapperservice.FindFoxMapperData(projectID, false); err == nil {
+				if err := cache.LoadFromProject(projectID); err == nil {
+					firstPath = path
+					loadedCount++
+				}
 			}
 		} else {
 			// Subsequent projects - merge into existing graph
@@ -213,6 +245,9 @@ func TryLoadFoxMapper(orgID string, projectIDs []string) *FoxMapperCache {
 	}
 
 	if loadedCount > 0 {
+		if firstPath != "" {
+			cache.SetLoadedPath(firstPath)
+		}
 		return cache
 	}
 

@@ -191,7 +191,7 @@ func (m *DataflowModule) jobsToTableBody(jobs []dataflowservice.JobInfo) [][]str
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "run --attack-paths"
+		attackPaths := "run foxmapper"
 		if job.ServiceAccount != "" && m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, job.ServiceAccount)
 		} else {

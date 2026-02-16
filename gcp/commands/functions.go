@@ -45,10 +45,7 @@ Attack Surface:
 - Functions with VPC connectors can access internal resources
 - Event triggers reveal integration points (Pub/Sub, Storage, etc.)
 
-TIP: To see service account attack paths (privesc, exfil, lateral movement),
-use the global --attack-paths flag:
-
-  cloudfox gcp functions -p PROJECT_ID --attack-paths`,
+TIP: Run foxmapper first to populate the Attack Paths column with privesc/exfil/lateral movement analysis.`,
 	Run: runGCPFunctionsCommand,
 }
 
@@ -551,7 +548,7 @@ func (m *FunctionsModule) functionsToTableBody(functions []FunctionsService.Func
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
-		attackPaths := "run --attack-paths"
+		attackPaths := "run foxmapper"
 		if serviceAccount != "-" {
 			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, serviceAccount)
 		} else if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
