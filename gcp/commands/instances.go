@@ -58,7 +58,7 @@ type InstancesModule struct {
 	ProjectInstances map[string][]ComputeEngineService.ComputeEngineInfo    // projectID -> instances
 	ProjectMetadata  map[string]*ComputeEngineService.ProjectMetadataInfo   // projectID -> metadata
 	LootMap          map[string]map[string]*internal.LootFile               // projectID -> loot files
-	AttackPathCache  *gcpinternal.AttackPathCache                           // Cached attack path analysis results
+	FoxMapperCache   *gcpinternal.FoxMapperCache                            // FoxMapper graph data (preferred)
 	mu               sync.Mutex
 }
 
@@ -99,17 +99,10 @@ func runGCPInstancesCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *InstancesModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_INSTANCES_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
+	// Try to get FoxMapper cache (preferred - graph-based analysis)
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_INSTANCES_MODULE_NAME)
 	}
 
 	// Run enumeration with concurrency
@@ -679,43 +672,116 @@ func (m *InstancesModule) writeFlatOutput(ctx context.Context, logger internal.L
 }
 
 // getInstancesTableHeader returns the instances table header
+// Columns are grouped logically:
+// - Identity: Project, Name, Type, Zone, State, Machine Type
+// - Network: External IP, Internal IP, IP Forward
+// - Service Account: Service Account, SA Attack Paths, Scopes, Default SA, Broad Scopes
+// - Access Control: OS Login, OS Login 2FA, Block Proj Keys, Serial Port
+// - Protection: Delete Protect, Last Snapshot
+// - Hardware Security: Shielded VM, Secure Boot, vTPM, Integrity, Confidential
+// - Disk Encryption: Encryption, KMS Key
+// - IAM: IAM Binding Role, IAM Binding Principal
 func (m *InstancesModule) getInstancesTableHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		// Identity
+		"Project",
 		"Name",
+		"Type",
 		"Zone",
 		"State",
 		"Machine Type",
+		// Network
 		"External IP",
 		"Internal IP",
+		"IP Forward",
+		// Service Account
 		"Service Account",
 		"SA Attack Paths",
 		"Scopes",
 		"Default SA",
 		"Broad Scopes",
+		// Access Control
 		"OS Login",
 		"OS Login 2FA",
 		"Block Proj Keys",
 		"Serial Port",
-		"IP Forward",
+		// Protection
+		"Delete Protect",
+		"Last Snapshot",
+		// Hardware Security
 		"Shielded VM",
 		"Secure Boot",
 		"vTPM",
 		"Integrity",
 		"Confidential",
+		// Disk Encryption
 		"Encryption",
 		"KMS Key",
+		// IAM
 		"IAM Binding Role",
 		"IAM Binding Principal",
 	}
 }
 
+// isManagedInstance returns true if the instance is managed by a GCP service (GKE, Dataproc, etc.)
+func isManagedInstance(instanceType ComputeEngineService.InstanceType) bool {
+	switch instanceType {
+	case ComputeEngineService.InstanceTypeGKE,
+		ComputeEngineService.InstanceTypeMIG,
+		ComputeEngineService.InstanceTypeDataproc,
+		ComputeEngineService.InstanceTypeDataflow,
+		ComputeEngineService.InstanceTypeComposer,
+		ComputeEngineService.InstanceTypeBatchJob,
+		ComputeEngineService.InstanceTypeAppEngine:
+		return true
+	default:
+		return false
+	}
+}
+
+// formatManagedBool formats a boolean value with context for managed instances
+// For managed instances, values that match expected behavior are annotated with (TYPE) to indicate this is expected
+// Example: Delete Protection "No" on a GKE node shows "No (GKE)" because GKE nodes are ephemeral
+func formatManagedBool(value bool, instanceType ComputeEngineService.InstanceType, expectedForManaged bool) string {
+	if !isManagedInstance(instanceType) {
+		return shared.BoolToYesNo(value)
+	}
+
+	// For managed instances, add context when the value matches expected behavior
+	// This indicates "this looks like a finding but it's expected for this instance type"
+	shortType := string(instanceType)
+	if value == expectedForManaged {
+		if value {
+			return fmt.Sprintf("Yes (%s)", shortType)
+		}
+		return fmt.Sprintf("No (%s)", shortType)
+	}
+
+	// Value differs from expected - no annotation needed
+	return shared.BoolToYesNo(value)
+}
+
+// formatManagedSnapshot formats the last snapshot date with context for managed instances
+func formatManagedSnapshot(lastSnapshot string, instanceType ComputeEngineService.InstanceType) string {
+	// For ephemeral/managed instances, "Never" is expected
+	if lastSnapshot == "" || lastSnapshot == "Never" {
+		if isManagedInstance(instanceType) {
+			return fmt.Sprintf("Never (%s)", string(instanceType))
+		}
+		return "Never"
+	}
+
+	// Truncate to just the date portion if it's a full timestamp
+	if len(lastSnapshot) > 10 {
+		lastSnapshot = lastSnapshot[:10]
+	}
+	return lastSnapshot
+}
+
 // getSensitiveMetadataTableHeader returns the sensitive metadata table header
 func (m *InstancesModule) getSensitiveMetadataTableHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Source",
 		"Zone",
 		"Metadata Key",
@@ -728,8 +794,7 @@ func (m *InstancesModule) getSensitiveMetadataTableHeader() []string {
 // getSSHKeysTableHeader returns the SSH keys table header
 func (m *InstancesModule) getSSHKeysTableHeader() []string {
 	return []string{
-		"Project Name",
-		"Project ID",
+		"Project",
 		"Source",
 		"Zone",
 		"SSH Key",
@@ -745,7 +810,6 @@ func (m *InstancesModule) buildSSHKeysTableForProject(projectID string, instance
 		for _, key := range meta.ProjectSSHKeys {
 			body = append(body, []string{
 				m.GetProjectName(projectID),
-				projectID,
 				"PROJECT",
 				"-",
 				truncateSSHKeyMiddle(key, 100),
@@ -759,7 +823,6 @@ func (m *InstancesModule) buildSSHKeysTableForProject(projectID string, instance
 			for _, key := range instance.SSHKeys {
 				body = append(body, []string{
 					m.GetProjectName(instance.ProjectID),
-					instance.ProjectID,
 					instance.Name,
 					instance.Zone,
 					truncateSSHKeyMiddle(key, 100),
@@ -800,13 +863,12 @@ func (m *InstancesModule) instancesToTableBody(instances []ComputeEngineService.
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
+		// FoxMapper takes priority if available (graph-based analysis)
 		attackPaths := "run --attack-paths"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-			if saEmail != "-" {
-				attackPaths = m.AttackPathCache.GetAttackSummary(saEmail)
-			} else {
-				attackPaths = "No"
-			}
+		if saEmail != "-" {
+			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, saEmail)
+		} else if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+			attackPaths = "No SA"
 		}
 
 		// External IP display
@@ -827,31 +889,50 @@ func (m *InstancesModule) instancesToTableBody(instances []ComputeEngineService.
 			kmsKey = "-"
 		}
 
+		// Instance type for contextual display
+		instType := instance.InstanceType
+		if instType == "" {
+			instType = ComputeEngineService.InstanceTypeStandalone
+		}
+
 		// Base row data (reused for each IAM binding)
+		// Order matches header groups: Identity, Network, Service Account, Access Control, Protection, Hardware Security, Disk Encryption
 		baseRow := []string{
+			// Identity
 			m.GetProjectName(instance.ProjectID),
-			instance.ProjectID,
 			instance.Name,
+			string(instType),
 			instance.Zone,
 			instance.State,
 			instance.MachineType,
+			// Network
 			externalIP,
 			instance.InternalIP,
+			shared.BoolToYesNo(instance.CanIPForward),
+			// Service Account
 			saEmail,
 			attackPaths,
 			scopes,
-			shared.BoolToYesNo(instance.HasDefaultSA),
-			shared.BoolToYesNo(instance.HasCloudScopes),
+			// Default SA is expected for GKE/managed instances
+			formatManagedBool(instance.HasDefaultSA, instType, true),
+			// Broad scopes are expected for GKE/managed instances
+			formatManagedBool(instance.HasCloudScopes, instType, true),
+			// Access Control
 			shared.BoolToYesNo(instance.OSLoginEnabled),
 			shared.BoolToYesNo(instance.OSLogin2FAEnabled),
 			shared.BoolToYesNo(instance.BlockProjectSSHKeys),
 			shared.BoolToYesNo(instance.SerialPortEnabled),
-			shared.BoolToYesNo(instance.CanIPForward),
+			// Protection - Delete protection is NOT expected for managed instances (they're ephemeral)
+			formatManagedBool(instance.DeletionProtection, instType, false),
+			// Snapshots are not expected for ephemeral/managed instances
+			formatManagedSnapshot(instance.LastSnapshotDate, instType),
+			// Hardware Security
 			shared.BoolToYesNo(instance.ShieldedVM),
 			shared.BoolToYesNo(instance.SecureBoot),
 			shared.BoolToYesNo(instance.VTPMEnabled),
 			shared.BoolToYesNo(instance.IntegrityMonitoring),
 			shared.BoolToYesNo(instance.ConfidentialVM),
+			// Disk Encryption
 			encryption,
 			kmsKey,
 		}
@@ -886,7 +967,6 @@ func (m *InstancesModule) buildSensitiveMetadataTableForProject(projectID string
 		for _, item := range meta.SensitiveMetadata {
 			body = append(body, []string{
 				m.GetProjectName(projectID),
-				projectID,
 				"PROJECT",
 				"-",
 				item.MetadataKey,
@@ -903,7 +983,6 @@ func (m *InstancesModule) buildSensitiveMetadataTableForProject(projectID string
 			for _, item := range instance.SensitiveMetadata {
 				body = append(body, []string{
 					m.GetProjectName(instance.ProjectID),
-					instance.ProjectID,
 					instance.Name,
 					instance.Zone,
 					item.MetadataKey,

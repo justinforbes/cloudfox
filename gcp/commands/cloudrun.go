@@ -61,7 +61,7 @@ type CloudRunModule struct {
 	ProjectServices map[string][]CloudRunService.ServiceInfo // projectID -> services
 	ProjectJobs     map[string][]CloudRunService.JobInfo     // projectID -> jobs
 	LootMap         map[string]map[string]*internal.LootFile // projectID -> loot files
-	AttackPathCache *gcpinternal.AttackPathCache             // Cached attack path analysis results
+	FoxMapperCache  *gcpinternal.FoxMapperCache              // FoxMapper graph data (preferred)
 	mu              sync.Mutex
 }
 
@@ -99,17 +99,10 @@ func runGCPCloudRunCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *CloudRunModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_CLOUDRUN_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
+	// Try to get FoxMapper cache (preferred - graph-based analysis)
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_CLOUDRUN_MODULE_NAME)
 	}
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_CLOUDRUN_MODULE_NAME, m.processProject)
@@ -477,12 +470,10 @@ func (m *CloudRunModule) buildTablesForProject(projectID string, services []Clou
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
 		attackPaths := "run --attack-paths"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-			if svc.ServiceAccount != "" {
-				attackPaths = m.AttackPathCache.GetAttackSummary(svc.ServiceAccount)
-			} else {
-				attackPaths = "No"
-			}
+		if svc.ServiceAccount != "" {
+			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, svc.ServiceAccount)
+		} else if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+			attackPaths = "No SA"
 		}
 
 		// If service has IAM bindings, create one row per binding
@@ -547,12 +538,10 @@ func (m *CloudRunModule) buildTablesForProject(projectID string, services []Clou
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
 		jobAttackPaths := "run --attack-paths"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-			if job.ServiceAccount != "" {
-				jobAttackPaths = m.AttackPathCache.GetAttackSummary(job.ServiceAccount)
-			} else {
-				jobAttackPaths = "No"
-			}
+		if job.ServiceAccount != "" {
+			jobAttackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, job.ServiceAccount)
+		} else if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+			jobAttackPaths = "No SA"
 		}
 
 		// If job has IAM bindings, create one row per binding

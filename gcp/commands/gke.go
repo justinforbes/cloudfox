@@ -63,7 +63,7 @@ type GKEModule struct {
 	ProjectClusters  map[string][]GKEService.ClusterInfo       // projectID -> clusters
 	ProjectNodePools map[string][]GKEService.NodePoolInfo      // projectID -> node pools
 	LootMap          map[string]map[string]*internal.LootFile  // projectID -> loot files
-	AttackPathCache  *gcpinternal.AttackPathCache              // Cached attack path analysis results
+	FoxMapperCache   *gcpinternal.FoxMapperCache               // FoxMapper graph data (preferred)
 	mu               sync.Mutex
 }
 
@@ -101,17 +101,10 @@ func runGCPGKECommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *GKEModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_GKE_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
+	// Try to get FoxMapper cache (preferred - graph-based analysis)
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_GKE_MODULE_NAME)
 	}
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_GKE_MODULE_NAME, m.processProject)
@@ -399,12 +392,10 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
 		attackPaths := "run --attack-paths"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-			if saDisplay != "-" {
-				attackPaths = m.AttackPathCache.GetAttackSummary(saDisplay)
-			} else {
-				attackPaths = "No"
-			}
+		if saDisplay != "-" {
+			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, saDisplay)
+		} else if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+			attackPaths = "No SA"
 		}
 
 		// Format actual scopes for display

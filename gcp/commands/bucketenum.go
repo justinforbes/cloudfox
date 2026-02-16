@@ -332,15 +332,15 @@ func (m *BucketEnumModule) writeOutput(ctx context.Context, logger internal.Logg
 }
 
 func (m *BucketEnumModule) getFilesHeader() []string {
-	return []string{"Project", "Bucket", "Object Name", "Category", "Size", "Public", "Description"}
+	return []string{"Project", "Bucket", "Object Name", "Category", "Size", "Public", "Encryption", "Description"}
 }
 
 func (m *BucketEnumModule) getSensitiveFilesHeader() []string {
-	return []string{"Project", "Bucket", "Object Name", "Category", "Size", "Public"}
+	return []string{"Project", "Bucket", "Object Name", "Category", "Size", "Public", "Encryption"}
 }
 
 func (m *BucketEnumModule) getAllObjectsHeader() []string {
-	return []string{"Project", "Bucket", "Object Name", "Content Type", "Size", "Public", "Updated"}
+	return []string{"Project", "Bucket", "Object Name", "Content Type", "Size", "Public", "Encryption", "Updated"}
 }
 
 func (m *BucketEnumModule) filesToTableBody(files []bucketenumservice.SensitiveFileInfo) [][]string {
@@ -357,6 +357,7 @@ func (m *BucketEnumModule) filesToTableBody(files []bucketenumservice.SensitiveF
 			file.Category,
 			formatFileSize(file.Size),
 			publicStatus,
+			file.Encryption,
 			file.Description,
 		})
 	}
@@ -378,6 +379,7 @@ func (m *BucketEnumModule) sensitiveFilesToTableBody(files []bucketenumservice.S
 				file.Category,
 				formatFileSize(file.Size),
 				publicStatus,
+				file.Encryption,
 			})
 		}
 	}
@@ -398,6 +400,7 @@ func (m *BucketEnumModule) allObjectsToTableBody(objects []bucketenumservice.Obj
 			obj.ContentType,
 			formatFileSize(obj.Size),
 			publicStatus,
+			obj.Encryption,
 			obj.Updated,
 		})
 	}

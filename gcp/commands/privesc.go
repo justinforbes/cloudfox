@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
+	foxmapperservice "github.com/BishopFox/cloudfox/gcp/services/foxmapperService"
 	"github.com/BishopFox/cloudfox/globals"
 	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
@@ -17,74 +17,38 @@ var GCPPrivescCommand = &cobra.Command{
 	Use:     globals.GCP_PRIVESC_MODULE_NAME,
 	Aliases: []string{"pe", "escalate", "priv"},
 	Short:   "Identify privilege escalation paths in GCP organizations, folders, and projects",
-	Long: `Analyze GCP IAM policies to identify privilege escalation opportunities.
+	Long: `Analyze FoxMapper graph data to identify privilege escalation opportunities.
 
-This module examines IAM bindings at organization, folder, project, and resource levels
-to find principals with dangerous permissions that could be used to escalate
-privileges within the GCP environment.
+This module uses FoxMapper's graph-based analysis to find principals with paths
+to admin-level access within the GCP environment.
 
-Detected privilege escalation methods (60+) include:
+Prerequisites:
+- Run 'foxmapper gcp graph create' first to generate the graph data
 
-Service Account Abuse:
-- Token Creation (getAccessToken, getOpenIdToken)
-- Key Creation (serviceAccountKeys.create, hmacKeys.create)
-- Implicit Delegation, SignBlob, SignJwt
-- Workload Identity Federation (external identity impersonation)
+Features:
+- Identifies principals with privilege escalation paths to admin
+- Shows shortest paths to organization, folder, and project admins
+- Detects scope-limited paths (OAuth scope restrictions)
+- Generates exploitation playbooks
 
-IAM Policy Modification:
-- Project/Folder/Org IAM Policy Modification
-- Service Account IAM Policy + SA Creation combo
-- Custom Role Create/Update (iam.roles.create/update)
-- Org Policy Modification (orgpolicy.policy.set)
-- Resource-specific IAM (Pub/Sub, BigQuery, Artifact Registry, Compute, KMS, Source Repos)
+Detected privilege escalation vectors include:
+- Service Account Token Creation (getAccessToken, getOpenIdToken)
+- Service Account Key Creation (serviceAccountKeys.create)
+- IAM Policy Modification (setIamPolicy)
+- Compute Instance Creation with privileged SA
+- Cloud Functions/Run deployment with SA
+- And 60+ more techniques
 
-Compute & Serverless:
-- Compute Instance Metadata Injection (SSH keys, startup scripts)
-- Create GCE Instance with privileged SA
-- Cloud Functions Create/Update with SA Identity
-- Cloud Run Services/Jobs Create/Update with SA Identity
-- App Engine Deploy with SA Identity
-- Cloud Build SA Abuse
-
-AI/ML:
-- Vertex AI Custom Jobs with SA
-- Vertex AI Notebooks with SA
-- AI Platform Jobs with SA
-
-Data Processing & Orchestration:
-- Dataproc Cluster Create / Job Submit
-- Cloud Composer Environment Create/Update
-- Dataflow Job Create
-- Cloud Workflows with SA
-- Eventarc Triggers with SA
-
-Scheduling & Tasks:
-- Cloud Scheduler HTTP Request with SA
-- Cloud Tasks with SA
-
-Other:
-- Deployment Manager Deployment
-- GKE Cluster Access, Pod Exec, Secrets
-- Secret Manager Access
-- KMS Key Access / Decrypt
-- API Key Creation/Listing`,
+Run 'foxmapper gcp graph create' to generate the graph, then use this module.`,
 	Run: runGCPPrivescCommand,
 }
 
 type PrivescModule struct {
 	gcpinternal.BaseGCPModule
 
-	// All paths from combined analysis
-	AllPaths      []attackpathservice.AttackPath
-	OrgPaths      []attackpathservice.AttackPath
-	FolderPaths   []attackpathservice.AttackPath
-	ProjectPaths  map[string][]attackpathservice.AttackPath // projectID -> paths
-	ResourcePaths []attackpathservice.AttackPath
-
-	// Org/folder info
-	OrgIDs      []string
-	OrgNames    map[string]string
-	FolderNames map[string]string
+	// FoxMapper data
+	FoxMapperCache *gcpinternal.FoxMapperCache
+	Findings       []foxmapperservice.PrivescFinding
 
 	// Loot
 	LootMap map[string]*internal.LootFile
@@ -107,99 +71,75 @@ func runGCPPrivescCommand(cmd *cobra.Command, args []string) {
 
 	module := &PrivescModule{
 		BaseGCPModule: gcpinternal.NewBaseGCPModule(cmdCtx),
-		AllPaths:      []attackpathservice.AttackPath{},
-		OrgPaths:      []attackpathservice.AttackPath{},
-		FolderPaths:   []attackpathservice.AttackPath{},
-		ProjectPaths:  make(map[string][]attackpathservice.AttackPath),
-		ResourcePaths: []attackpathservice.AttackPath{},
-		OrgIDs:        []string{},
-		OrgNames:      make(map[string]string),
-		FolderNames:   make(map[string]string),
+		Findings:      []foxmapperservice.PrivescFinding{},
 		LootMap:       make(map[string]*internal.LootFile),
 	}
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
 }
 
 func (m *PrivescModule) Execute(ctx context.Context, logger internal.Logger) {
-	logger.InfoM("Analyzing privilege escalation paths across organizations, folders, projects, and resources...", globals.GCP_PRIVESC_MODULE_NAME)
+	logger.InfoM("Analyzing privilege escalation paths using FoxMapper...", globals.GCP_PRIVESC_MODULE_NAME)
 
-	var result *attackpathservice.CombinedAttackPathData
-
-	// Check if attack path analysis was already run (via --attack-paths flag)
-	// to avoid duplicate enumeration
-	if cache := gcpinternal.GetAttackPathCacheFromContext(ctx); cache != nil && cache.HasRawData() {
-		if cachedResult, ok := cache.GetRawData().(*attackpathservice.CombinedAttackPathData); ok {
-			logger.InfoM("Using cached attack path analysis results", globals.GCP_PRIVESC_MODULE_NAME)
-			// Filter to only include privesc paths (cache has all types)
-			result = filterPrivescPaths(cachedResult)
+	// Get FoxMapper cache from context or try to load it
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache == nil || !m.FoxMapperCache.IsPopulated() {
+		// Try to load FoxMapper data (org from hierarchy if available)
+		orgID := ""
+		if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
+			orgID = m.Hierarchy.Organizations[0].ID
 		}
+		m.FoxMapperCache = gcpinternal.TryLoadFoxMapper(orgID, m.ProjectIDs)
 	}
 
-	// If no context cache, try loading from disk cache
-	if result == nil {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.HasRawData() {
-			if cachedResult, ok := diskCache.GetRawData().(*attackpathservice.CombinedAttackPathData); ok {
-				logger.InfoM(fmt.Sprintf("Using disk cache (created: %s, projects: %v)",
-					metadata.CreatedAt.Format("2006-01-02 15:04:05"), metadata.ProjectsIn), globals.GCP_PRIVESC_MODULE_NAME)
-				// Filter to only include privesc paths
-				result = filterPrivescPaths(cachedResult)
-			}
-		}
+	if m.FoxMapperCache == nil || !m.FoxMapperCache.IsPopulated() {
+		logger.ErrorM("No FoxMapper data found. Run 'foxmapper gcp graph create' first.", globals.GCP_PRIVESC_MODULE_NAME)
+		logger.InfoM("FoxMapper creates a graph of IAM relationships for accurate privesc analysis.", globals.GCP_PRIVESC_MODULE_NAME)
+		return
 	}
 
-	// If no cached data, run the analysis and save to disk
-	if result == nil {
-		logger.InfoM("Running privilege escalation analysis...", globals.GCP_PRIVESC_MODULE_NAME)
-		svc := attackpathservice.New()
-		var err error
-		// Run full analysis (all types) so we can cache for other modules
-		fullResult, err := svc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, m.ProjectNames, "all")
-		if err != nil {
-			m.CommandCounter.Error++
-			gcpinternal.HandleGCPError(err, logger, globals.GCP_PRIVESC_MODULE_NAME, "Failed to analyze privilege escalation")
-			return
-		}
-
-		// Save to disk cache for future use (skip if running under all-checks)
-		m.saveToAttackPathCache(ctx, fullResult, logger)
-
-		// Filter to only include privesc paths for this module
-		result = filterPrivescPaths(fullResult)
-	}
-
-	// Store results
-	m.AllPaths = result.AllPaths
-	m.OrgPaths = result.OrgPaths
-	m.FolderPaths = result.FolderPaths
-	m.ResourcePaths = result.ResourcePaths
-	m.OrgIDs = result.OrgIDs
-	m.OrgNames = result.OrgNames
-	m.FolderNames = result.FolderNames
-
-	// Organize project paths by project ID
-	for _, path := range result.ProjectPaths {
-		if path.ScopeType == "project" && path.ScopeID != "" {
-			m.ProjectPaths[path.ScopeID] = append(m.ProjectPaths[path.ScopeID], path)
-		}
-	}
+	// Get the FoxMapper service and analyze privesc
+	svc := m.FoxMapperCache.GetService()
+	m.Findings = svc.AnalyzePrivesc()
 
 	// Generate loot
 	m.generateLoot()
 
-	if len(m.AllPaths) == 0 {
+	if len(m.Findings) == 0 {
 		logger.InfoM("No privilege escalation paths found", globals.GCP_PRIVESC_MODULE_NAME)
 		return
 	}
 
-	// Count by scope type
-	orgCount := len(m.OrgPaths)
-	folderCount := len(m.FolderPaths)
-	projectCount := len(result.ProjectPaths)
-	resourceCount := len(m.ResourcePaths)
+	// Count statistics
+	adminCount := 0
+	privescCount := 0
+	orgReachable := 0
+	folderReachable := 0
+	projectReachable := 0
 
-	logger.SuccessM(fmt.Sprintf("Found %d privilege escalation path(s): %d org-level, %d folder-level, %d project-level, %d resource-level",
-		len(m.AllPaths), orgCount, folderCount, projectCount, resourceCount), globals.GCP_PRIVESC_MODULE_NAME)
+	for _, f := range m.Findings {
+		if f.IsAdmin {
+			adminCount++
+		} else if f.CanEscalate {
+			privescCount++
+			if f.PathsToOrgAdmin > 0 {
+				orgReachable++
+			}
+			if f.PathsToFolderAdmin > 0 {
+				folderReachable++
+			}
+			if f.PathsToProjectAdmin > 0 {
+				projectReachable++
+			}
+		}
+	}
+
+	logger.SuccessM(fmt.Sprintf("Found %d admin(s) and %d principal(s) with privilege escalation paths",
+		adminCount, privescCount), globals.GCP_PRIVESC_MODULE_NAME)
+
+	if privescCount > 0 {
+		logger.InfoM(fmt.Sprintf("  → %d can reach org admin, %d folder admin, %d project admin",
+			orgReachable, folderReachable, projectReachable), globals.GCP_PRIVESC_MODULE_NAME)
+	}
 
 	m.writeOutput(ctx, logger)
 }
@@ -207,11 +147,7 @@ func (m *PrivescModule) Execute(ctx context.Context, logger internal.Logger) {
 func (m *PrivescModule) generateLoot() {
 	m.LootMap["privesc-exploit-commands"] = &internal.LootFile{
 		Name:     "privesc-exploit-commands",
-		Contents: "# GCP Privilege Escalation Exploit Commands\n# Generated by CloudFox\n\n",
-	}
-
-	for _, path := range m.AllPaths {
-		m.addPathToLoot(path)
+		Contents: "# GCP Privilege Escalation Exploit Commands\n# Generated by CloudFox using FoxMapper graph data\n\n",
 	}
 
 	// Generate playbook
@@ -219,37 +155,139 @@ func (m *PrivescModule) generateLoot() {
 }
 
 func (m *PrivescModule) generatePlaybook() {
+	var sb strings.Builder
+	sb.WriteString("# GCP Privilege Escalation Playbook\n")
+	sb.WriteString("# Generated by CloudFox using FoxMapper graph data\n\n")
+
+	// Group findings by admin level reachable
+	orgPaths := []foxmapperservice.PrivescFinding{}
+	folderPaths := []foxmapperservice.PrivescFinding{}
+	projectPaths := []foxmapperservice.PrivescFinding{}
+
+	for _, f := range m.Findings {
+		if f.IsAdmin {
+			continue // Skip admins in playbook
+		}
+		if !f.CanEscalate {
+			continue
+		}
+
+		switch f.HighestAdminLevel {
+		case "org":
+			orgPaths = append(orgPaths, f)
+		case "folder":
+			folderPaths = append(folderPaths, f)
+		case "project":
+			projectPaths = append(projectPaths, f)
+		}
+	}
+
+	// Organization-level privesc (highest priority)
+	if len(orgPaths) > 0 {
+		sb.WriteString("## CRITICAL: Organization Admin Reachable\n\n")
+		for _, f := range orgPaths {
+			m.writePrivescFindingToPlaybook(&sb, f)
+		}
+	}
+
+	// Folder-level privesc
+	if len(folderPaths) > 0 {
+		sb.WriteString("## HIGH: Folder Admin Reachable\n\n")
+		for _, f := range folderPaths {
+			m.writePrivescFindingToPlaybook(&sb, f)
+		}
+	}
+
+	// Project-level privesc
+	if len(projectPaths) > 0 {
+		sb.WriteString("## MEDIUM: Project Admin Reachable\n\n")
+		for _, f := range projectPaths {
+			m.writePrivescFindingToPlaybook(&sb, f)
+		}
+	}
+
 	m.LootMap["privesc-playbook"] = &internal.LootFile{
 		Name:     "privesc-playbook",
-		Contents: attackpathservice.GeneratePrivescPlaybook(m.AllPaths, ""),
+		Contents: sb.String(),
 	}
 }
 
-func (m *PrivescModule) addPathToLoot(path attackpathservice.AttackPath) {
-	lootFile := m.LootMap["privesc-exploit-commands"]
-	if lootFile == nil {
-		return
+// writePrivescFindingToPlaybook writes a detailed privesc finding to the playbook
+func (m *PrivescModule) writePrivescFindingToPlaybook(sb *strings.Builder, f foxmapperservice.PrivescFinding) {
+	sb.WriteString(fmt.Sprintf("### %s\n", f.Principal))
+	sb.WriteString(fmt.Sprintf("- **Type**: %s\n", f.MemberType))
+	sb.WriteString(fmt.Sprintf("- **Shortest path**: %d hops\n", f.ShortestPathHops))
+	sb.WriteString(fmt.Sprintf("- **Viable paths**: %d\n", f.ViablePathCount))
+	if f.ScopeBlockedCount > 0 {
+		sb.WriteString(fmt.Sprintf("- **Scope-blocked paths**: %d (OAuth scope restrictions)\n", f.ScopeBlockedCount))
 	}
+	sb.WriteString("\n")
 
-	scopeInfo := fmt.Sprintf("%s: %s", path.ScopeType, path.ScopeName)
-	if path.ScopeName == "" {
-		scopeInfo = fmt.Sprintf("%s: %s", path.ScopeType, path.ScopeID)
+	// Show all paths with detailed steps
+	if len(f.Paths) > 0 {
+		sb.WriteString("#### Attack Paths\n\n")
+		for pathIdx, path := range f.Paths {
+			// Limit to top 5 paths per principal to avoid excessive output
+			if pathIdx >= 5 {
+				sb.WriteString(fmt.Sprintf("*... and %d more paths*\n\n", len(f.Paths)-5))
+				break
+			}
+
+			scopeStatus := ""
+			if path.ScopeBlocked {
+				scopeStatus = " ⚠️ SCOPE-BLOCKED"
+			}
+
+			sb.WriteString(fmt.Sprintf("**Path %d** → %s (%s admin, %d hops)%s\n",
+				pathIdx+1, path.Destination, path.AdminLevel, path.HopCount, scopeStatus))
+			sb.WriteString("```\n")
+			sb.WriteString(fmt.Sprintf("%s\n", f.Principal))
+
+			for i, edge := range path.Edges {
+				// Show the hop number and technique
+				prefix := "  │"
+				if i == len(path.Edges)-1 {
+					prefix = "  └"
+				}
+
+				scopeWarning := ""
+				if edge.ScopeBlocksEscalation {
+					scopeWarning = " [BLOCKED BY SCOPE]"
+				} else if edge.ScopeLimited {
+					scopeWarning = " [scope-limited]"
+				}
+
+				sb.WriteString(fmt.Sprintf("%s── (%d) %s%s\n", prefix, i+1, edge.ShortReason, scopeWarning))
+
+				// Show destination after each hop
+				if edge.Destination != "" {
+					destDisplay := edge.Destination
+					// Clean up member ID format for display
+					if strings.HasPrefix(destDisplay, "serviceAccount:") {
+						destDisplay = strings.TrimPrefix(destDisplay, "serviceAccount:")
+					} else if strings.HasPrefix(destDisplay, "user:") {
+						destDisplay = strings.TrimPrefix(destDisplay, "user:")
+					}
+					if i == len(path.Edges)-1 {
+						sb.WriteString(fmt.Sprintf("      → %s (ADMIN)\n", destDisplay))
+					} else {
+						sb.WriteString(fmt.Sprintf("  │   → %s\n", destDisplay))
+					}
+				}
+			}
+			sb.WriteString("```\n\n")
+
+			// Show detailed exploitation steps
+			if !path.ScopeBlocked && len(path.Edges) > 0 {
+				sb.WriteString("**Exploitation steps:**\n")
+				for i, edge := range path.Edges {
+					sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, edge.Reason))
+				}
+				sb.WriteString("\n")
+			}
+		}
 	}
-
-	lootFile.Contents += fmt.Sprintf(
-		"# Method: %s\n"+
-			"# Principal: %s (%s)\n"+
-			"# Scope: %s\n"+
-			"# Target: %s\n"+
-			"# Permissions: %s\n"+
-			"%s\n\n",
-		path.Method,
-		path.Principal, path.PrincipalType,
-		scopeInfo,
-		path.TargetResource,
-		strings.Join(path.Permissions, ", "),
-		path.ExploitCommand,
-	)
+	sb.WriteString("---\n\n")
 }
 
 func (m *PrivescModule) writeOutput(ctx context.Context, logger internal.Logger) {
@@ -262,84 +300,162 @@ func (m *PrivescModule) writeOutput(ctx context.Context, logger internal.Logger)
 
 func (m *PrivescModule) getHeader() []string {
 	return []string{
-		"Project",
-		"Source",
-		"Principal Type",
 		"Principal",
-		"Method",
-		"Target Resource",
-		"Category",
-		"Binding Scope",
-		"Permissions",
+		"Type",
+		"Is Admin",
+		"Admin Level",
+		"Can Escalate",
+		"Highest Reachable",
+		"Path Summary",
+		"Hops",
+		"Viable Paths",
+		"Scope Blocked",
 	}
 }
 
-func (m *PrivescModule) pathsToTableBody(paths []attackpathservice.AttackPath) [][]string {
+func (m *PrivescModule) findingsToTableBody() [][]string {
 	var body [][]string
-	for _, path := range paths {
-		scopeName := path.ScopeName
-		if scopeName == "" {
-			scopeName = path.ScopeID
+	for _, f := range m.Findings {
+		isAdmin := "No"
+		if f.IsAdmin {
+			isAdmin = "Yes"
 		}
 
-		// Format binding scope (where the IAM binding is defined)
-		bindingScope := "Project"
-		if path.ScopeType == "organization" {
-			bindingScope = "Organization"
-		} else if path.ScopeType == "folder" {
-			bindingScope = "Folder"
-		} else if path.ScopeType == "resource" {
-			bindingScope = "Resource"
+		adminLevel := f.HighestAdminLevel
+		if adminLevel == "" {
+			adminLevel = "-"
 		}
 
-		// Format target resource
-		targetResource := path.TargetResource
-		if targetResource == "" || targetResource == "*" {
-			targetResource = "*"
+		canEscalate := "No"
+		if f.CanEscalate {
+			canEscalate = "Yes"
 		}
 
-		// Format permissions
-		permissions := strings.Join(path.Permissions, ", ")
-		if permissions == "" {
-			permissions = "-"
+		highestReachable := "-"
+		if f.CanEscalate || f.IsAdmin {
+			highestReachable = f.HighestAdminLevel
+		}
+
+		// Build path summary showing cross-project or internal escalation
+		pathSummary := "-"
+		if f.CanEscalate && len(f.Paths) > 0 {
+			pathSummary = m.buildPathSummary(f)
+		}
+
+		hops := "-"
+		if f.ShortestPathHops > 0 {
+			hops = fmt.Sprintf("%d", f.ShortestPathHops)
+		}
+
+		viablePaths := "-"
+		if f.ViablePathCount > 0 {
+			viablePaths = fmt.Sprintf("%d", f.ViablePathCount)
+		}
+
+		scopeBlocked := "-"
+		if f.ScopeBlockedCount > 0 {
+			scopeBlocked = fmt.Sprintf("%d", f.ScopeBlockedCount)
 		}
 
 		body = append(body, []string{
-			scopeName,
-			path.ScopeType,
-			path.PrincipalType,
-			path.Principal,
-			path.Method,
-			targetResource,
-			path.Category,
-			bindingScope,
-			permissions,
+			f.Principal,
+			f.MemberType,
+			isAdmin,
+			adminLevel,
+			canEscalate,
+			highestReachable,
+			pathSummary,
+			hops,
+			viablePaths,
+			scopeBlocked,
 		})
 	}
 	return body
 }
 
-func (m *PrivescModule) buildTablesForProject(projectID string) []internal.TableFile {
-	var tableFiles []internal.TableFile
-	if paths, ok := m.ProjectPaths[projectID]; ok && len(paths) > 0 {
-		tableFiles = append(tableFiles, internal.TableFile{
-			Name:   "privesc",
-			Header: m.getHeader(),
-			Body:   m.pathsToTableBody(paths),
-		})
+// buildPathSummary creates a summary showing the escalation path type
+// e.g., "proj-a → proj-b (cross-project)" or "proj-a (internal)"
+func (m *PrivescModule) buildPathSummary(f foxmapperservice.PrivescFinding) string {
+	// Extract source project from principal email
+	sourceProject := extractProjectFromPrincipal(f.Principal)
+
+	// Get destination project from the best path
+	destProject := f.HighestReachableProject
+
+	// If we couldn't determine projects, show a simple summary
+	if sourceProject == "" && destProject == "" {
+		return fmt.Sprintf("→ %s admin", f.HighestAdminLevel)
 	}
-	return tableFiles
+
+	// Handle org/folder level escalation
+	if f.HighestAdminLevel == "org" {
+		if sourceProject != "" {
+			return fmt.Sprintf("%s → org", sourceProject)
+		}
+		return "→ org"
+	}
+
+	if f.HighestAdminLevel == "folder" {
+		if sourceProject != "" {
+			return fmt.Sprintf("%s → folder", sourceProject)
+		}
+		return "→ folder"
+	}
+
+	// Project-level escalation
+	if sourceProject == "" {
+		sourceProject = "?"
+	}
+	if destProject == "" {
+		destProject = "?"
+	}
+
+	if sourceProject == destProject {
+		return fmt.Sprintf("%s (internal)", sourceProject)
+	}
+
+	return fmt.Sprintf("%s → %s", sourceProject, destProject)
+}
+
+// extractProjectFromPrincipal extracts project ID from a service account email
+// e.g., "sa@my-project.iam.gserviceaccount.com" -> "my-project"
+func extractProjectFromPrincipal(principal string) string {
+	// Handle service account format: name@project.iam.gserviceaccount.com
+	if strings.Contains(principal, ".iam.gserviceaccount.com") {
+		parts := strings.Split(principal, "@")
+		if len(parts) == 2 {
+			domain := parts[1]
+			projectPart := strings.TrimSuffix(domain, ".iam.gserviceaccount.com")
+			return projectPart
+		}
+	}
+
+	// Handle compute default SA: project-number-compute@developer.gserviceaccount.com
+	if strings.Contains(principal, "-compute@developer.gserviceaccount.com") {
+		// Can't easily get project name from number, return empty
+		return ""
+	}
+
+	// Handle App Engine default SA: project@appspot.gserviceaccount.com
+	if strings.Contains(principal, "@appspot.gserviceaccount.com") {
+		parts := strings.Split(principal, "@")
+		if len(parts) == 2 {
+			return strings.TrimSuffix(parts[0], "")
+		}
+	}
+
+	return ""
 }
 
 func (m *PrivescModule) buildAllTables() []internal.TableFile {
-	if len(m.AllPaths) == 0 {
+	if len(m.Findings) == 0 {
 		return nil
 	}
 	return []internal.TableFile{
 		{
 			Name:   "privesc",
 			Header: m.getHeader(),
-			Body:   m.pathsToTableBody(m.AllPaths),
+			Body:   m.findingsToTableBody(),
 		},
 	}
 }
@@ -347,7 +463,7 @@ func (m *PrivescModule) buildAllTables() []internal.TableFile {
 func (m *PrivescModule) collectLootFiles() []internal.LootFile {
 	var lootFiles []internal.LootFile
 	for _, loot := range m.LootMap {
-		if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
+		if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox using FoxMapper graph data\n\n") {
 			lootFiles = append(lootFiles, *loot)
 		}
 	}
@@ -360,33 +476,24 @@ func (m *PrivescModule) writeHierarchicalOutput(ctx context.Context, logger inte
 		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
 	}
 
-	// Determine org ID - prefer hierarchy (for consistent output paths across modules),
-	// fall back to discovered orgs if hierarchy doesn't have org info
-	orgID := ""
+	// Determine scope - use org if available, otherwise first project
+	scopeID := ""
 	if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
-		orgID = m.Hierarchy.Organizations[0].ID
-	} else if len(m.OrgIDs) > 0 {
-		orgID = m.OrgIDs[0]
+		scopeID = m.Hierarchy.Organizations[0].ID
+	} else if len(m.ProjectIDs) > 0 {
+		scopeID = m.ProjectIDs[0]
 	}
 
-	if orgID != "" {
-		// DUAL OUTPUT: Complete aggregated output at org level
+	if scopeID != "" {
 		tables := m.buildAllTables()
 		lootFiles := m.collectLootFiles()
-		outputData.OrgLevelData[orgID] = PrivescOutput{Table: tables, Loot: lootFiles}
 
-		// DUAL OUTPUT: Filtered per-project output
-		for _, projectID := range m.ProjectIDs {
-			projectTables := m.buildTablesForProject(projectID)
-			if len(projectTables) > 0 && len(projectTables[0].Body) > 0 {
-				outputData.ProjectLevelData[projectID] = PrivescOutput{Table: projectTables, Loot: nil}
-			}
+		// Use org level data if we have org scope
+		if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
+			outputData.OrgLevelData[scopeID] = PrivescOutput{Table: tables, Loot: lootFiles}
+		} else {
+			outputData.ProjectLevelData[scopeID] = PrivescOutput{Table: tables, Loot: lootFiles}
 		}
-	} else if len(m.ProjectIDs) > 0 {
-		// FALLBACK: No org discovered, output complete data to first project
-		tables := m.buildAllTables()
-		lootFiles := m.collectLootFiles()
-		outputData.ProjectLevelData[m.ProjectIDs[0]] = PrivescOutput{Table: tables, Loot: lootFiles}
 	}
 
 	pathBuilder := m.BuildPathBuilder()
@@ -403,24 +510,16 @@ func (m *PrivescModule) writeFlatOutput(ctx context.Context, logger internal.Log
 
 	output := PrivescOutput{Table: tables, Loot: lootFiles}
 
-	// Determine output scope - use org if available, otherwise fall back to project
+	// Determine output scope
 	var scopeType string
 	var scopeIdentifiers []string
 	var scopeNames []string
 
-	if len(m.OrgIDs) > 0 {
-		// Use organization scope with [O] prefix format
+	if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
 		scopeType = "organization"
-		for _, orgID := range m.OrgIDs {
-			scopeIdentifiers = append(scopeIdentifiers, orgID)
-			if name, ok := m.OrgNames[orgID]; ok && name != "" {
-				scopeNames = append(scopeNames, name)
-			} else {
-				scopeNames = append(scopeNames, orgID)
-			}
-		}
+		scopeIdentifiers = []string{m.Hierarchy.Organizations[0].ID}
+		scopeNames = []string{m.Hierarchy.Organizations[0].DisplayName}
 	} else {
-		// Fall back to project scope
 		scopeType = "project"
 		scopeIdentifiers = m.ProjectIDs
 		for _, id := range m.ProjectIDs {
@@ -443,88 +542,4 @@ func (m *PrivescModule) writeFlatOutput(ctx context.Context, logger internal.Log
 	if err != nil {
 		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_PRIVESC_MODULE_NAME)
 	}
-}
-
-// saveToAttackPathCache saves attack path data to disk cache
-func (m *PrivescModule) saveToAttackPathCache(ctx context.Context, data *attackpathservice.CombinedAttackPathData, logger internal.Logger) {
-	// Skip saving if running under all-checks (consolidated save happens at the end)
-	if gcpinternal.IsAllChecksMode(ctx) {
-		logger.InfoM("Skipping individual cache save (all-checks mode)", globals.GCP_PRIVESC_MODULE_NAME)
-		return
-	}
-
-	cache := gcpinternal.NewAttackPathCache()
-
-	// Populate cache with paths from all scopes
-	var pathInfos []gcpinternal.AttackPathInfo
-	for _, path := range data.AllPaths {
-		pathInfos = append(pathInfos, gcpinternal.AttackPathInfo{
-			Principal:     path.Principal,
-			PrincipalType: path.PrincipalType,
-			Method:        path.Method,
-			PathType:      gcpinternal.AttackPathType(path.PathType),
-			Category:      path.Category,
-			RiskLevel:     path.RiskLevel,
-			Target:        path.TargetResource,
-			Permissions:   path.Permissions,
-			ScopeType:     path.ScopeType,
-			ScopeID:       path.ScopeID,
-		})
-	}
-	cache.PopulateFromPaths(pathInfos)
-	cache.SetRawData(data)
-
-	// Save to disk
-	err := gcpinternal.SaveAttackPathCacheToFile(cache, m.ProjectIDs, m.OutputDirectory, m.Account, "1.0")
-	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not save attack path cache: %v", err), globals.GCP_PRIVESC_MODULE_NAME)
-	} else {
-		privesc, exfil, lateral := cache.GetStats()
-		logger.InfoM(fmt.Sprintf("Saved attack path cache to disk (%d privesc, %d exfil, %d lateral)",
-			privesc, exfil, lateral), globals.GCP_PRIVESC_MODULE_NAME)
-	}
-}
-
-// filterPrivescPaths filters a CombinedAttackPathData to only include privesc paths
-// This is used when the cache contains all attack path types but privesc only needs privesc
-func filterPrivescPaths(data *attackpathservice.CombinedAttackPathData) *attackpathservice.CombinedAttackPathData {
-	result := &attackpathservice.CombinedAttackPathData{
-		OrgPaths:      []attackpathservice.AttackPath{},
-		FolderPaths:   []attackpathservice.AttackPath{},
-		ProjectPaths:  []attackpathservice.AttackPath{},
-		ResourcePaths: []attackpathservice.AttackPath{},
-		AllPaths:      []attackpathservice.AttackPath{},
-		OrgNames:      data.OrgNames,
-		FolderNames:   data.FolderNames,
-		OrgIDs:        data.OrgIDs,
-	}
-
-	// Filter each path slice to only include privesc paths
-	for _, path := range data.OrgPaths {
-		if path.PathType == "privesc" {
-			result.OrgPaths = append(result.OrgPaths, path)
-		}
-	}
-	for _, path := range data.FolderPaths {
-		if path.PathType == "privesc" {
-			result.FolderPaths = append(result.FolderPaths, path)
-		}
-	}
-	for _, path := range data.ProjectPaths {
-		if path.PathType == "privesc" {
-			result.ProjectPaths = append(result.ProjectPaths, path)
-		}
-	}
-	for _, path := range data.ResourcePaths {
-		if path.PathType == "privesc" {
-			result.ResourcePaths = append(result.ResourcePaths, path)
-		}
-	}
-	for _, path := range data.AllPaths {
-		if path.PathType == "privesc" {
-			result.AllPaths = append(result.AllPaths, path)
-		}
-	}
-
-	return result
 }

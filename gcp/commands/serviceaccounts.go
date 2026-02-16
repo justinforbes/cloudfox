@@ -57,7 +57,8 @@ type ServiceAccountsModule struct {
 	// Module-specific fields - per-project for hierarchical output
 	ProjectServiceAccounts map[string][]ServiceAccountAnalysis      // projectID -> service accounts
 	LootMap                map[string]map[string]*internal.LootFile // projectID -> loot files
-	AttackPathCache        *gcpinternal.AttackPathCache             // Cached attack path analysis results
+	FoxMapperCache         *gcpinternal.FoxMapperCache              // FoxMapper graph data (preferred)
+	SARolesCache           map[string]map[string][]string           // projectID -> saEmail -> roles
 	mu                     sync.Mutex
 }
 
@@ -87,6 +88,7 @@ func runGCPServiceAccountsCommand(cmd *cobra.Command, args []string) {
 		BaseGCPModule:          gcpinternal.NewBaseGCPModule(cmdCtx),
 		ProjectServiceAccounts: make(map[string][]ServiceAccountAnalysis),
 		LootMap:                make(map[string]map[string]*internal.LootFile),
+		SARolesCache:           make(map[string]map[string][]string),
 	}
 
 	// Execute enumeration
@@ -97,17 +99,10 @@ func runGCPServiceAccountsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *ServiceAccountsModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_SERVICEACCOUNTS_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
+	// Try to get FoxMapper cache (preferred - graph-based analysis)
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_SERVICEACCOUNTS_MODULE_NAME)
 	}
 
 	// Run enumeration with concurrency
@@ -185,6 +180,16 @@ func (m *ServiceAccountsModule) processProject(ctx context.Context, projectID st
 		}
 	}
 
+	// Get roles for each service account (best effort)
+	saRoles := make(map[string][]string)
+	for _, sa := range serviceAccounts {
+		roles, err := iamService.GetRolesForServiceAccount(projectID, sa.Email)
+		if err == nil {
+			saRoles[sa.Email] = roles
+		}
+		// Silently skip if we can't get roles - user may not have IAM permissions
+	}
+
 	// Analyze each service account
 	var analyzedSAs []ServiceAccountAnalysis
 	for _, sa := range serviceAccounts {
@@ -193,12 +198,17 @@ func (m *ServiceAccountsModule) processProject(ctx context.Context, projectID st
 		if info, ok := impersonationMap[sa.Email]; ok {
 			analyzed.ImpersonationInfo = info
 		}
+		// Attach roles if available
+		if roles, ok := saRoles[sa.Email]; ok {
+			analyzed.Roles = roles
+		}
 		analyzedSAs = append(analyzedSAs, analyzed)
 	}
 
 	// Thread-safe store per-project
 	m.mu.Lock()
 	m.ProjectServiceAccounts[projectID] = analyzedSAs
+	m.SARolesCache[projectID] = saRoles
 
 	// Initialize loot for this project
 	if m.LootMap[projectID] == nil {
@@ -482,18 +492,28 @@ func (m *ServiceAccountsModule) writeOutput(ctx context.Context, logger internal
 }
 
 // getTableHeader returns the header for service accounts table
+// Columns are grouped logically:
+// - Identity: Project, Email, Display Name, Disabled, Default SA
+// - Keys: User Managed Keys, Google Managed Keys, Oldest Key Age
+// - Permissions: DWD, Roles, SA Attack Paths
+// - Impersonation: IAM Binding Role, IAM Binding Principal
 func (m *ServiceAccountsModule) getTableHeader() []string {
 	return []string{
+		// Identity
 		"Project",
 		"Email",
-		"SA Attack Paths",
 		"Display Name",
 		"Disabled",
 		"Default SA",
-		"DWD",
+		// Keys
 		"User Managed Keys",
 		"Google Managed Keys",
 		"Oldest Key Age",
+		// Permissions
+		"DWD",
+		"Roles",
+		"SA Attack Paths",
+		// Impersonation
 		"IAM Binding Role",
 		"IAM Binding Principal",
 	}
@@ -508,7 +528,7 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 			disabled = "Yes"
 		}
 
-		defaultSA := "-"
+		defaultSA := "No"
 		if sa.IsDefaultSA {
 			defaultSA = sa.DefaultSAType
 		}
@@ -520,10 +540,8 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 		}
 
 		// Check attack paths (privesc/exfil/lateral) for this service account
-		attackPaths := "run --attack-paths"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-			attackPaths = m.AttackPathCache.GetAttackSummary(sa.Email)
-		}
+		// FoxMapper takes priority if available (graph-based analysis)
+		attackPaths := gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sa.Email)
 
 		// Count keys by type and find oldest key age
 		userKeyCount := 0
@@ -558,7 +576,14 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 			}
 		}
 
+		// Format roles for display
+		rolesDisplay := IAMService.FormatRolesShort(sa.Roles)
+
 		// Build IAM bindings from impersonation info
+		// Row order: Identity (Project, Email, Display Name, Disabled, Default SA),
+		//            Keys (User Managed Keys, Google Managed Keys, Oldest Key Age),
+		//            Permissions (DWD, Roles, SA Attack Paths),
+		//            Impersonation (IAM Binding Role, IAM Binding Principal)
 		hasBindings := false
 		if sa.ImpersonationInfo != nil {
 			for _, member := range sa.ImpersonationInfo.TokenCreators {
@@ -566,8 +591,10 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "TokenCreator", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, sa.DisplayName, disabled, defaultSA,
+						userKeys, googleKeys, oldestKeyAge,
+						dwd, rolesDisplay, attackPaths,
+						"TokenCreator", member,
 					})
 				}
 			}
@@ -576,8 +603,10 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "KeyAdmin", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, sa.DisplayName, disabled, defaultSA,
+						userKeys, googleKeys, oldestKeyAge,
+						dwd, rolesDisplay, attackPaths,
+						"KeyAdmin", member,
 					})
 				}
 			}
@@ -586,8 +615,10 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "ActAs", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, sa.DisplayName, disabled, defaultSA,
+						userKeys, googleKeys, oldestKeyAge,
+						dwd, rolesDisplay, attackPaths,
+						"ActAs", member,
 					})
 				}
 			}
@@ -596,8 +627,10 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "SAAdmin", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, sa.DisplayName, disabled, defaultSA,
+						userKeys, googleKeys, oldestKeyAge,
+						dwd, rolesDisplay, attackPaths,
+						"SAAdmin", member,
 					})
 				}
 			}
@@ -606,8 +639,10 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "SignBlob", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, sa.DisplayName, disabled, defaultSA,
+						userKeys, googleKeys, oldestKeyAge,
+						dwd, rolesDisplay, attackPaths,
+						"SignBlob", member,
 					})
 				}
 			}
@@ -616,8 +651,10 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 				if email != sa.Email {
 					hasBindings = true
 					body = append(body, []string{
-						m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
-						disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "SignJwt", member,
+						m.GetProjectName(sa.ProjectID), sa.Email, sa.DisplayName, disabled, defaultSA,
+						userKeys, googleKeys, oldestKeyAge,
+						dwd, rolesDisplay, attackPaths,
+						"SignJwt", member,
 					})
 				}
 			}
@@ -625,8 +662,10 @@ func (m *ServiceAccountsModule) serviceAccountsToTableBody(serviceAccounts []Ser
 
 		if !hasBindings {
 			body = append(body, []string{
-				m.GetProjectName(sa.ProjectID), sa.Email, attackPaths, sa.DisplayName,
-				disabled, defaultSA, dwd, userKeys, googleKeys, oldestKeyAge, "-", "-",
+				m.GetProjectName(sa.ProjectID), sa.Email, sa.DisplayName, disabled, defaultSA,
+				userKeys, googleKeys, oldestKeyAge,
+				dwd, rolesDisplay, attackPaths,
+				"-", "-",
 			})
 		}
 	}

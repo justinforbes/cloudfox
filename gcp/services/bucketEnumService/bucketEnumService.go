@@ -46,6 +46,7 @@ type SensitiveFileInfo struct {
 	Updated      string `json:"updated"`
 	StorageClass string `json:"storageClass"`
 	IsPublic     bool   `json:"isPublic"`     // Whether the object has public access
+	Encryption   string `json:"encryption"`   // Encryption type (Google-managed or CMEK key name)
 }
 
 // SensitivePatterns defines patterns to search for sensitive files
@@ -211,6 +212,7 @@ func (s *BucketEnumService) checkObjectSensitivity(obj *storage.Object, bucketNa
 				Updated:      obj.Updated,
 				StorageClass: obj.StorageClass,
 				IsPublic:     isPublic,
+				Encryption:   s.getObjectEncryption(obj),
 			}
 		}
 	}
@@ -232,6 +234,30 @@ func (s *BucketEnumService) isObjectPublic(obj *storage.Object) bool {
 	}
 
 	return false
+}
+
+// getObjectEncryption returns the encryption type for an object
+// Returns "CMEK (key-name)" if using customer-managed key, or "Google-managed" otherwise
+func (s *BucketEnumService) getObjectEncryption(obj *storage.Object) string {
+	if obj == nil {
+		return "Google-managed"
+	}
+
+	// Check if the object uses a customer-managed encryption key (CMEK)
+	if obj.KmsKeyName != "" {
+		// Extract just the key name from the full resource path
+		// Format: projects/{project}/locations/{location}/keyRings/{keyRing}/cryptoKeys/{key}/cryptoKeyVersions/{version}
+		keyParts := strings.Split(obj.KmsKeyName, "/")
+		if len(keyParts) >= 8 {
+			// Get the key name (index 7 is cryptoKeys/{key})
+			keyName := keyParts[7]
+			return fmt.Sprintf("CMEK (%s)", keyName)
+		}
+		return "CMEK"
+	}
+
+	// Default is Google-managed encryption
+	return "Google-managed"
 }
 
 func (s *BucketEnumService) isFalsePositive(objectName string, pattern SensitivePattern) bool {
@@ -283,6 +309,7 @@ type ObjectInfo struct {
 	StorageClass string `json:"storageClass"`
 	IsPublic     bool   `json:"isPublic"`
 	DownloadCmd  string `json:"downloadCmd"`
+	Encryption   string `json:"encryption"` // Encryption type (Google-managed or CMEK key name)
 }
 
 // EnumerateAllBucketObjects lists ALL objects in a bucket (no filtering)
@@ -318,6 +345,7 @@ func (s *BucketEnumService) EnumerateAllBucketObjects(bucketName, projectID stri
 				StorageClass: obj.StorageClass,
 				IsPublic:     isPublic,
 				DownloadCmd:  fmt.Sprintf("gsutil cp gs://%s/%s .", bucketName, obj.Name),
+				Encryption:   s.getObjectEncryption(obj),
 			})
 			objectCount++
 		}

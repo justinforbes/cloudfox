@@ -102,28 +102,19 @@ func atomicWriteFile(filename string, data []byte, perm os.FileMode) error {
 
 // CacheMetadata holds information about when the cache was created
 type CacheMetadata struct {
-	CreatedAt   time.Time `json:"created_at"`
-	Account     string    `json:"account"`
-	Version     string    `json:"version"`
-	ProjectsIn  []string  `json:"projects_in,omitempty"`  // Projects used when creating cache (for attack paths)
-	TotalProjects int     `json:"total_projects,omitempty"` // Total projects in org (for org cache)
+	CreatedAt     time.Time `json:"created_at"`
+	Account       string    `json:"account"`
+	Version       string    `json:"version"`
+	ProjectsIn    []string  `json:"projects_in,omitempty"`    // Projects used when creating cache
+	TotalProjects int       `json:"total_projects,omitempty"` // Total projects in org (for org cache)
 }
 
 // PersistentOrgCache is the serializable version of OrgCache
 type PersistentOrgCache struct {
-	Metadata      CacheMetadata          `json:"metadata"`
-	Organizations []CachedOrganization   `json:"organizations"`
-	Folders       []CachedFolder         `json:"folders"`
-	AllProjects   []CachedProject        `json:"all_projects"`
-}
-
-// PersistentAttackPathCache is the serializable version of attack path data
-// Note: RawData is NOT saved to disk as it contains complex types that require gob registration
-// and can be very large. The PathInfos are sufficient to reconstruct the cache.
-type PersistentAttackPathCache struct {
-	Metadata    CacheMetadata     `json:"metadata"`
-	PathInfos   []AttackPathInfo  `json:"path_infos"`
-	// RawData is intentionally excluded from persistence - it's only used during runtime
+	Metadata      CacheMetadata        `json:"metadata"`
+	Organizations []CachedOrganization `json:"organizations"`
+	Folders       []CachedFolder       `json:"folders"`
+	AllProjects   []CachedProject      `json:"all_projects"`
 }
 
 // GetCacheDirectory returns the cache directory for a given account
@@ -151,11 +142,6 @@ func sanitizeForPath(s string) string {
 // OrgCacheFilename returns the filename for org cache
 func OrgCacheFilename() string {
 	return "org-cache.gob"
-}
-
-// AttackPathCacheFilename returns the filename for attack path cache
-func AttackPathCacheFilename() string {
-	return "attack-paths.gob"
 }
 
 // SaveOrgCacheToFile saves the org cache to a gob file using atomic write
@@ -238,110 +224,6 @@ func OrgCacheExists(baseDir, account string) bool {
 	return err == nil
 }
 
-// SaveAttackPathCacheToFile saves attack path data to a gob file using atomic write
-func SaveAttackPathCacheToFile(cache *AttackPathCache, projectIDs []string, baseDir, account, version string) error {
-	cacheDir := GetCacheDirectory(baseDir, account)
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return fmt.Errorf("failed to create cache directory: %w", err)
-	}
-
-	// Extract path infos from cache
-	var pathInfos []AttackPathInfo
-	for principal, pathMap := range cache.PrincipalPaths {
-		for pathType, methods := range pathMap {
-			for _, method := range methods {
-				pathInfos = append(pathInfos, AttackPathInfo{
-					Principal:   principal,
-					Method:      method.Method,
-					PathType:    pathType,
-					Category:    method.Category,
-					RiskLevel:   method.RiskLevel,
-					Target:      method.Target,
-					Permissions: method.Permissions,
-					ScopeType:   method.ScopeType,
-					ScopeID:     method.ScopeID,
-				})
-			}
-		}
-	}
-
-	persistent := PersistentAttackPathCache{
-		Metadata: CacheMetadata{
-			CreatedAt:  time.Now(),
-			Account:    account,
-			Version:    version,
-			ProjectsIn: projectIDs,
-		},
-		PathInfos: pathInfos,
-		// Note: RawData is not saved - it contains complex types and is only needed at runtime
-	}
-
-	filename := filepath.Join(cacheDir, AttackPathCacheFilename())
-
-	// Use atomic write: write to temp file, then rename
-	if err := atomicWriteGob(filename, persistent); err != nil {
-		return fmt.Errorf("failed to write cache file: %w", err)
-	}
-
-	// Also save JSON metadata for debugging (without raw data which can be huge)
-	metaFilename := filepath.Join(cacheDir, "attack-paths-meta.json")
-	metaData := struct {
-		Metadata     CacheMetadata `json:"metadata"`
-		PathCount    int           `json:"path_count"`
-		PrivescCount int           `json:"privesc_count"`
-		ExfilCount   int           `json:"exfil_count"`
-		LateralCount int           `json:"lateral_count"`
-	}{
-		Metadata:     persistent.Metadata,
-		PathCount:    len(pathInfos),
-		PrivescCount: cache.PrivescCount,
-		ExfilCount:   cache.ExfilCount,
-		LateralCount: cache.LateralCount,
-	}
-	jsonData, err := json.MarshalIndent(metaData, "", "  ")
-	if err == nil {
-		atomicWriteFile(metaFilename, jsonData, 0644)
-	}
-
-	return nil
-}
-
-// LoadAttackPathCacheFromFile loads attack path data from a gob file
-func LoadAttackPathCacheFromFile(baseDir, account string) (*AttackPathCache, *CacheMetadata, error) {
-	cacheDir := GetCacheDirectory(baseDir, account)
-	filename := filepath.Join(cacheDir, AttackPathCacheFilename())
-
-	file, err := os.Open(filename)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil, nil // Cache doesn't exist, not an error
-		}
-		return nil, nil, fmt.Errorf("failed to open cache file: %w", err)
-	}
-	defer file.Close()
-
-	var persistent PersistentAttackPathCache
-	decoder := gob.NewDecoder(file)
-	if err := decoder.Decode(&persistent); err != nil {
-		return nil, nil, fmt.Errorf("failed to decode cache: %w", err)
-	}
-
-	// Convert to in-memory cache
-	cache := NewAttackPathCache()
-	cache.PopulateFromPaths(persistent.PathInfos)
-	// Note: RawData is not loaded from disk - it's populated at runtime when needed
-
-	return cache, &persistent.Metadata, nil
-}
-
-// AttackPathCacheExists checks if an attack path cache file exists
-func AttackPathCacheExists(baseDir, account string) bool {
-	cacheDir := GetCacheDirectory(baseDir, account)
-	filename := filepath.Join(cacheDir, AttackPathCacheFilename())
-	_, err := os.Stat(filename)
-	return err == nil
-}
-
 // GetCacheAge returns how old a cache file is
 func GetCacheAge(baseDir, account, cacheType string) (time.Duration, error) {
 	cacheDir := GetCacheDirectory(baseDir, account)
@@ -349,8 +231,6 @@ func GetCacheAge(baseDir, account, cacheType string) (time.Duration, error) {
 	switch cacheType {
 	case "org":
 		filename = filepath.Join(cacheDir, OrgCacheFilename())
-	case "attack-paths":
-		filename = filepath.Join(cacheDir, AttackPathCacheFilename())
 	default:
 		return 0, fmt.Errorf("unknown cache type: %s", cacheType)
 	}
@@ -381,10 +261,6 @@ func DeleteCache(baseDir, account, cacheType string) error {
 		filename = filepath.Join(cacheDir, OrgCacheFilename())
 		// Also remove JSON
 		os.Remove(filepath.Join(cacheDir, "org-cache.json"))
-	case "attack-paths":
-		filename = filepath.Join(cacheDir, AttackPathCacheFilename())
-		// Also remove JSON meta
-		os.Remove(filepath.Join(cacheDir, "attack-paths-meta.json"))
 	default:
 		return fmt.Errorf("unknown cache type: %s", cacheType)
 	}

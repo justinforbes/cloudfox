@@ -36,14 +36,33 @@ type IAMBinding struct {
 	Member string `json:"member"`
 }
 
+// InstanceType represents the type/manager of an instance
+type InstanceType string
+
+const (
+	InstanceTypeStandalone  InstanceType = "Standalone"  // Regular VM
+	InstanceTypeGKE         InstanceType = "GKE"         // GKE node
+	InstanceTypeMIG         InstanceType = "MIG"         // Managed Instance Group
+	InstanceTypeDataproc    InstanceType = "Dataproc"    // Dataproc cluster node
+	InstanceTypeDataflow    InstanceType = "Dataflow"    // Dataflow worker
+	InstanceTypeComposer    InstanceType = "Composer"    // Cloud Composer worker
+	InstanceTypeNotebooks   InstanceType = "Notebooks"   // Vertex AI Workbench / AI Platform Notebooks
+	InstanceTypeBatchJob    InstanceType = "Batch"       // Cloud Batch job
+	InstanceTypeCloudRun    InstanceType = "CloudRun"    // Cloud Run (Jobs) execution environment
+	InstanceTypeFilestore   InstanceType = "Filestore"   // Filestore instance
+	InstanceTypeSQLProxy    InstanceType = "CloudSQL"    // Cloud SQL Proxy
+	InstanceTypeAppEngine   InstanceType = "AppEngine"   // App Engine Flex
+)
+
 // ComputeEngineInfo contains instance metadata and security-relevant configuration
 type ComputeEngineInfo struct {
 	// Basic info
-	Name      string `json:"name"`
-	ID        string `json:"id"`
-	Zone      string `json:"zone"`
-	State     string `json:"state"`
-	ProjectID string `json:"projectID"`
+	Name         string       `json:"name"`
+	ID           string       `json:"id"`
+	Zone         string       `json:"zone"`
+	State        string       `json:"state"`
+	ProjectID    string       `json:"projectID"`
+	InstanceType InstanceType `json:"instanceType"` // Type of instance (GKE, MIG, Dataproc, etc.)
 
 	// Network configuration
 	ExternalIP        string                      `json:"externalIP"`
@@ -92,6 +111,7 @@ type ComputeEngineInfo struct {
 	// Timestamps
 	CreationTimestamp  string `json:"creationTimestamp"`
 	LastStartTimestamp string `json:"lastStartTimestamp"`
+	LastSnapshotDate   string `json:"lastSnapshotDate"` // Most recent snapshot date for any attached disk
 
 	// IAM bindings
 	IAMBindings []IAMBinding `json:"iamBindings"`
@@ -186,6 +206,7 @@ func (ces *ComputeEngineService) Instances(projectID string) ([]ComputeEngineInf
 					ID:                 fmt.Sprintf("%v", instance.Id),
 					Zone:               zone,
 					State:              instance.Status,
+					InstanceType:       detectInstanceType(instance),
 					ExternalIP:         getExternalIP(instance),
 					InternalIP:         getInternalIP(instance),
 					NetworkInterfaces:  instance.NetworkInterfaces,
@@ -240,6 +261,9 @@ func (ces *ComputeEngineService) Instances(projectID string) ([]ComputeEngineInf
 
 				// Parse boot disk encryption
 				info.BootDiskEncryption, info.BootDiskKMSKey = parseBootDiskEncryption(instance.Disks)
+
+				// Get last snapshot date for this instance's disks
+				info.LastSnapshotDate = ces.getLastSnapshotForDisks(computeService, projectID, instance.Disks)
 
 				// Fetch IAM bindings for this instance (may fail silently if no permission)
 				info.IAMBindings = ces.getInstanceIAMBindings(computeService, projectID, zone, instance.Name)
@@ -684,6 +708,89 @@ func isValidVarName(s string) bool {
 	return true
 }
 
+// detectInstanceType determines the type of instance based on labels and name patterns
+func detectInstanceType(instance *compute.Instance) InstanceType {
+	if instance == nil {
+		return InstanceTypeStandalone
+	}
+
+	labels := instance.Labels
+	name := instance.Name
+
+	// Check labels first (most reliable)
+	if labels != nil {
+		// GKE nodes have goog-gke-node label
+		if _, ok := labels["goog-gke-node"]; ok {
+			return InstanceTypeGKE
+		}
+		// Also check for gke-cluster label
+		if _, ok := labels["gke-cluster"]; ok {
+			return InstanceTypeGKE
+		}
+
+		// Dataproc nodes have goog-dataproc-cluster-name label
+		if _, ok := labels["goog-dataproc-cluster-name"]; ok {
+			return InstanceTypeDataproc
+		}
+
+		// Dataflow workers have goog-dataflow-job-id label
+		if _, ok := labels["goog-dataflow-job-id"]; ok {
+			return InstanceTypeDataflow
+		}
+
+		// Cloud Composer workers have goog-composer-environment label
+		if _, ok := labels["goog-composer-environment"]; ok {
+			return InstanceTypeComposer
+		}
+
+		// Vertex AI Workbench / AI Platform Notebooks
+		if _, ok := labels["goog-notebooks-instance"]; ok {
+			return InstanceTypeNotebooks
+		}
+		// Also check for workbench label
+		if _, ok := labels["goog-workbench-instance"]; ok {
+			return InstanceTypeNotebooks
+		}
+
+		// Cloud Batch jobs have goog-batch-job-uid label
+		if _, ok := labels["goog-batch-job-uid"]; ok {
+			return InstanceTypeBatchJob
+		}
+
+		// App Engine Flex instances
+		if _, ok := labels["goog-appengine-version"]; ok {
+			return InstanceTypeAppEngine
+		}
+		if _, ok := labels["gae_app"]; ok {
+			return InstanceTypeAppEngine
+		}
+	}
+
+	// Check name patterns as fallback
+	// GKE node names typically follow pattern: gke-{cluster}-{pool}-{hash}
+	if strings.HasPrefix(name, "gke-") {
+		return InstanceTypeGKE
+	}
+
+	// Dataproc nodes: {cluster}-m (master) or {cluster}-w-{n} (worker)
+	if strings.Contains(name, "-m") || strings.Contains(name, "-w-") {
+		// This is too generic, rely on labels instead
+	}
+
+	// Check for created-by metadata which indicates MIG
+	if instance.Metadata != nil {
+		for _, item := range instance.Metadata.Items {
+			if item != nil && item.Key == "created-by" && item.Value != nil {
+				if strings.Contains(*item.Value, "instanceGroupManagers") {
+					return InstanceTypeMIG
+				}
+			}
+		}
+	}
+
+	return InstanceTypeStandalone
+}
+
 // parseBootDiskEncryption checks the boot disk encryption type
 func parseBootDiskEncryption(disks []*compute.AttachedDisk) (encryptionType, kmsKey string) {
 	encryptionType = "Google-managed"
@@ -705,6 +812,59 @@ func parseBootDiskEncryption(disks []*compute.AttachedDisk) (encryptionType, kms
 	}
 
 	return
+}
+
+// getLastSnapshotForDisks gets the most recent snapshot date for any of the given disks
+func (ces *ComputeEngineService) getLastSnapshotForDisks(service *compute.Service, projectID string, disks []*compute.AttachedDisk) string {
+	ctx := context.Background()
+
+	// Collect all disk names from the instance
+	diskNames := make(map[string]bool)
+	for _, disk := range disks {
+		if disk == nil || disk.Source == "" {
+			continue
+		}
+		// Extract disk name from source URL
+		// Format: projects/{project}/zones/{zone}/disks/{diskName}
+		parts := strings.Split(disk.Source, "/")
+		if len(parts) > 0 {
+			diskNames[parts[len(parts)-1]] = true
+		}
+	}
+
+	if len(diskNames) == 0 {
+		return ""
+	}
+
+	// List all snapshots in the project and find ones matching our disks
+	var latestSnapshot string
+	req := service.Snapshots.List(projectID)
+	err := req.Pages(ctx, func(page *compute.SnapshotList) error {
+		for _, snapshot := range page.Items {
+			if snapshot == nil || snapshot.SourceDisk == "" {
+				continue
+			}
+			// Extract disk name from source disk URL
+			parts := strings.Split(snapshot.SourceDisk, "/")
+			if len(parts) > 0 {
+				diskName := parts[len(parts)-1]
+				if diskNames[diskName] {
+					// Compare timestamps - keep the most recent
+					if latestSnapshot == "" || snapshot.CreationTimestamp > latestSnapshot {
+						latestSnapshot = snapshot.CreationTimestamp
+					}
+				}
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		// Silently fail - user may not have permission to list snapshots
+		return ""
+	}
+
+	return latestSnapshot
 }
 
 // FormatScopes formats service account scopes for display

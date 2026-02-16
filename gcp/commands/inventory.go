@@ -111,11 +111,11 @@ type AssetTypeSummary struct {
 type InventoryModule struct {
 	gcpinternal.BaseGCPModule
 
-	// Resource tracking (from dedicated enumeration)
-	resourceCounts map[string]map[string]int      // resourceType -> region -> count
-	resourceIDs    map[string]map[string][]string // resourceType -> region -> []resourceID
-	regions        map[string]bool                // Track all regions with resources
-	mu             sync.Mutex
+	// Resource tracking (from dedicated enumeration) - NOW PER PROJECT
+	projectResourceCounts map[string]map[string]map[string]int      // projectID -> resourceType -> region -> count
+	projectResourceIDs    map[string]map[string]map[string][]string // projectID -> resourceType -> region -> []resourceID
+	projectRegions        map[string]map[string]bool                // projectID -> regions with resources
+	mu                    sync.Mutex
 
 	// Asset Inventory tracking (complete coverage)
 	assetCounts         map[string]map[string]int // projectID -> assetType -> count
@@ -125,10 +125,13 @@ type InventoryModule struct {
 	// Service Usage tracking (fallback when Asset API not available)
 	enabledServices map[string][]string // projectID -> list of enabled services
 
-	// Totals
-	totalByType   map[string]int
-	totalByRegion map[string]int
-	grandTotal    int
+	// Totals (per project)
+	projectTotalByType   map[string]map[string]int // projectID -> resourceType -> count
+	projectTotalByRegion map[string]map[string]int // projectID -> region -> count
+	projectGrandTotal    map[string]int            // projectID -> total count
+
+	// Global totals
+	grandTotal int
 
 	// Asset totals
 	assetGrandTotal int
@@ -150,14 +153,15 @@ func runGCPInventoryCommand(cmd *cobra.Command, args []string) {
 	}
 
 	module := &InventoryModule{
-		BaseGCPModule:   gcpinternal.NewBaseGCPModule(cmdCtx),
-		resourceCounts:  make(map[string]map[string]int),
-		resourceIDs:     make(map[string]map[string][]string),
-		regions:         make(map[string]bool),
-		totalByType:     make(map[string]int),
-		totalByRegion:   make(map[string]int),
-		assetCounts:     make(map[string]map[string]int),
-		enabledServices: make(map[string][]string),
+		BaseGCPModule:         gcpinternal.NewBaseGCPModule(cmdCtx),
+		projectResourceCounts: make(map[string]map[string]map[string]int),
+		projectResourceIDs:    make(map[string]map[string]map[string][]string),
+		projectRegions:        make(map[string]map[string]bool),
+		projectTotalByType:    make(map[string]map[string]int),
+		projectTotalByRegion:  make(map[string]map[string]int),
+		projectGrandTotal:     make(map[string]int),
+		assetCounts:           make(map[string]map[string]int),
+		enabledServices:       make(map[string][]string),
 	}
 
 	module.Execute(cmdCtx.Ctx, cmdCtx.Logger)
@@ -166,8 +170,10 @@ func runGCPInventoryCommand(cmd *cobra.Command, args []string) {
 func (m *InventoryModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Starting resource inventory enumeration...", GCP_INVENTORY_MODULE_NAME)
 
-	// Initialize resource type maps
-	m.initializeResourceTypes()
+	// Initialize resource type maps for each project
+	for _, projectID := range m.ProjectIDs {
+		m.initializeResourceTypesForProject(projectID)
+	}
 
 	// First, get complete asset counts from Cloud Asset Inventory API
 	// This provides comprehensive coverage of ALL resources
@@ -206,69 +212,27 @@ func (m *InventoryModule) Execute(ctx context.Context, logger internal.Logger) {
 		logger.SuccessM(fmt.Sprintf("Service Usage API: %d enabled services detected (may contain resources CloudFox doesn't enumerate)",
 			totalServices), GCP_INVENTORY_MODULE_NAME)
 	}
-	logger.SuccessM(fmt.Sprintf("CloudFox enumeration: %d resources across %d types (with security metadata)",
-		m.grandTotal, len(m.totalByType)), GCP_INVENTORY_MODULE_NAME)
+	logger.SuccessM(fmt.Sprintf("CloudFox enumeration: %d resources across %d project(s) (with security metadata)",
+		m.grandTotal, len(m.projectGrandTotal)), GCP_INVENTORY_MODULE_NAME)
 
 	// Write output
 	m.writeOutput(ctx, logger)
 }
 
-// initializeResourceTypes sets up the resource type maps
-func (m *InventoryModule) initializeResourceTypes() {
-	resourceTypes := []string{
-		// Compute
-		"Compute Instances",
-		"Compute Disks",
-		"Compute Snapshots",
-		"Compute Images",
-		// Containers
-		"GKE Clusters",
-		"Cloud Run Services",
-		"Cloud Run Jobs",
-		// Serverless
-		"Cloud Functions",
-		"Composer Environments",
-		// Storage
-		"Cloud Storage Buckets",
-		"Filestore Instances",
-		"BigQuery Datasets",
-		// Databases
-		"Cloud SQL Instances",
-		"Spanner Instances",
-		"Bigtable Instances",
-		"Memorystore Redis",
-		// Networking
-		"DNS Zones",
-		// Security
-		"Service Accounts",
-		"KMS Key Rings",
-		"Secrets",
-		"API Keys",
-		// DevOps
-		"Cloud Build Triggers",
-		"Source Repositories",
-		"Artifact Registries",
-		// Data
-		"Pub/Sub Topics",
-		"Pub/Sub Subscriptions",
-		"Dataflow Jobs",
-		"Dataproc Clusters",
-		// AI/ML
-		"Notebook Instances",
-		// Scheduling
-		"Scheduler Jobs",
-		// Logging
-		"Log Sinks",
-		// Security Policies
-		"Cloud Armor Policies",
-		// Certificates
-		"SSL Certificates",
+// initializeResourceTypes sets up the resource type maps for a project
+func (m *InventoryModule) initializeResourceTypesForProject(projectID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.projectResourceCounts[projectID] != nil {
+		return // Already initialized
 	}
 
-	for _, rt := range resourceTypes {
-		m.resourceCounts[rt] = make(map[string]int)
-		m.resourceIDs[rt] = make(map[string][]string)
-	}
+	m.projectResourceCounts[projectID] = make(map[string]map[string]int)
+	m.projectResourceIDs[projectID] = make(map[string]map[string][]string)
+	m.projectRegions[projectID] = make(map[string]bool)
+	m.projectTotalByType[projectID] = make(map[string]int)
+	m.projectTotalByRegion[projectID] = make(map[string]int)
 }
 
 // processProject enumerates all resources in a single project
@@ -410,7 +374,7 @@ func (m *InventoryModule) enumComputeInstances(ctx context.Context, projectID st
 
 	for _, inst := range instances {
 		region := extractRegionFromZone(inst.Zone)
-		m.addResource("Compute Instances", region, fmt.Sprintf("projects/%s/zones/%s/instances/%s", projectID, inst.Zone, inst.Name))
+		m.addResource(projectID, "Compute Instances", region, fmt.Sprintf("projects/%s/zones/%s/instances/%s", projectID, inst.Zone, inst.Name))
 	}
 }
 
@@ -426,7 +390,7 @@ func (m *InventoryModule) enumGKEClusters(ctx context.Context, projectID string,
 	}
 
 	for _, cluster := range clusters {
-		m.addResource("GKE Clusters", cluster.Location, fmt.Sprintf("projects/%s/locations/%s/clusters/%s", projectID, cluster.Location, cluster.Name))
+		m.addResource(projectID, "GKE Clusters", cluster.Location, fmt.Sprintf("projects/%s/locations/%s/clusters/%s", projectID, cluster.Location, cluster.Name))
 	}
 }
 
@@ -439,14 +403,14 @@ func (m *InventoryModule) enumCloudRun(ctx context.Context, projectID string, wg
 	services, err := svc.Services(projectID)
 	if err == nil {
 		for _, s := range services {
-			m.addResource("Cloud Run Services", s.Region, fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, s.Region, s.Name))
+			m.addResource(projectID, "Cloud Run Services", s.Region, fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, s.Region, s.Name))
 		}
 	}
 
 	jobs, err := svc.Jobs(projectID)
 	if err == nil {
 		for _, job := range jobs {
-			m.addResource("Cloud Run Jobs", job.Region, fmt.Sprintf("projects/%s/locations/%s/jobs/%s", projectID, job.Region, job.Name))
+			m.addResource(projectID, "Cloud Run Jobs", job.Region, fmt.Sprintf("projects/%s/locations/%s/jobs/%s", projectID, job.Region, job.Name))
 		}
 	}
 }
@@ -463,7 +427,7 @@ func (m *InventoryModule) enumCloudFunctions(ctx context.Context, projectID stri
 	}
 
 	for _, fn := range functions {
-		m.addResource("Cloud Functions", fn.Region, fmt.Sprintf("projects/%s/locations/%s/functions/%s", projectID, fn.Region, fn.Name))
+		m.addResource(projectID, "Cloud Functions", fn.Region, fmt.Sprintf("projects/%s/locations/%s/functions/%s", projectID, fn.Region, fn.Name))
 	}
 }
 
@@ -479,7 +443,7 @@ func (m *InventoryModule) enumBuckets(ctx context.Context, projectID string, wg 
 	}
 
 	for _, bucket := range buckets {
-		m.addResource("Cloud Storage Buckets", bucket.Location, fmt.Sprintf("gs://%s", bucket.Name))
+		m.addResource(projectID, "Cloud Storage Buckets", bucket.Location, fmt.Sprintf("gs://%s", bucket.Name))
 	}
 }
 
@@ -495,7 +459,7 @@ func (m *InventoryModule) enumBigQuery(ctx context.Context, projectID string, wg
 	}
 
 	for _, ds := range datasets {
-		m.addResource("BigQuery Datasets", ds.Location, fmt.Sprintf("projects/%s/datasets/%s", projectID, ds.DatasetID))
+		m.addResource(projectID, "BigQuery Datasets", ds.Location, fmt.Sprintf("projects/%s/datasets/%s", projectID, ds.DatasetID))
 	}
 }
 
@@ -511,7 +475,7 @@ func (m *InventoryModule) enumCloudSQL(ctx context.Context, projectID string, wg
 	}
 
 	for _, inst := range instances {
-		m.addResource("Cloud SQL Instances", inst.Region, fmt.Sprintf("projects/%s/instances/%s", projectID, inst.Name))
+		m.addResource(projectID, "Cloud SQL Instances", inst.Region, fmt.Sprintf("projects/%s/instances/%s", projectID, inst.Name))
 	}
 }
 
@@ -532,7 +496,7 @@ func (m *InventoryModule) enumSpanner(ctx context.Context, projectID string, wg 
 		if inst.Config != "" {
 			region = inst.Config
 		}
-		m.addResource("Spanner Instances", region, fmt.Sprintf("projects/%s/instances/%s", projectID, inst.Name))
+		m.addResource(projectID, "Spanner Instances", region, fmt.Sprintf("projects/%s/instances/%s", projectID, inst.Name))
 	}
 }
 
@@ -553,7 +517,7 @@ func (m *InventoryModule) enumBigtable(ctx context.Context, projectID string, wg
 		if len(inst.Clusters) > 0 {
 			region = inst.Clusters[0].Location
 		}
-		m.addResource("Bigtable Instances", region, fmt.Sprintf("projects/%s/instances/%s", projectID, inst.Name))
+		m.addResource(projectID, "Bigtable Instances", region, fmt.Sprintf("projects/%s/instances/%s", projectID, inst.Name))
 	}
 }
 
@@ -569,7 +533,7 @@ func (m *InventoryModule) enumMemorystore(ctx context.Context, projectID string,
 	}
 
 	for _, inst := range instances {
-		m.addResource("Memorystore Redis", inst.Location, fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, inst.Location, inst.Name))
+		m.addResource(projectID, "Memorystore Redis", inst.Location, fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, inst.Location, inst.Name))
 	}
 }
 
@@ -585,7 +549,7 @@ func (m *InventoryModule) enumFilestore(ctx context.Context, projectID string, w
 	}
 
 	for _, inst := range instances {
-		m.addResource("Filestore Instances", inst.Location, fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, inst.Location, inst.Name))
+		m.addResource(projectID, "Filestore Instances", inst.Location, fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, inst.Location, inst.Name))
 	}
 }
 
@@ -595,13 +559,14 @@ func (m *InventoryModule) enumServiceAccounts(ctx context.Context, projectID str
 	defer func() { <-sem }()
 
 	svc := iamservice.New()
-	accounts, err := svc.ServiceAccounts(projectID)
+	// Use ServiceAccountsBasic to avoid querying keys (faster, fewer permissions needed)
+	accounts, err := svc.ServiceAccountsBasic(projectID)
 	if err != nil {
 		return
 	}
 
 	for _, sa := range accounts {
-		m.addResource("Service Accounts", "global", sa.Email)
+		m.addResource(projectID, "Service Accounts", "global", sa.Email)
 	}
 }
 
@@ -617,7 +582,7 @@ func (m *InventoryModule) enumKMS(ctx context.Context, projectID string, wg *syn
 	}
 
 	for _, kr := range keyRings {
-		m.addResource("KMS Key Rings", kr.Location, fmt.Sprintf("projects/%s/locations/%s/keyRings/%s", projectID, kr.Location, kr.Name))
+		m.addResource(projectID, "KMS Key Rings", kr.Location, fmt.Sprintf("projects/%s/locations/%s/keyRings/%s", projectID, kr.Location, kr.Name))
 	}
 }
 
@@ -641,7 +606,7 @@ func (m *InventoryModule) enumSecrets(ctx context.Context, projectID string, wg 
 		if len(secret.ReplicaLocations) > 0 {
 			region = secret.ReplicaLocations[0]
 		}
-		m.addResource("Secrets", region, secret.Name)
+		m.addResource(projectID, "Secrets", region, secret.Name)
 	}
 }
 
@@ -657,7 +622,7 @@ func (m *InventoryModule) enumAPIKeys(ctx context.Context, projectID string, wg 
 	}
 
 	for _, key := range keys {
-		m.addResource("API Keys", "global", key.Name)
+		m.addResource(projectID, "API Keys", "global", key.Name)
 	}
 }
 
@@ -670,14 +635,14 @@ func (m *InventoryModule) enumPubSub(ctx context.Context, projectID string, wg *
 	topics, err := svc.Topics(projectID)
 	if err == nil {
 		for _, topic := range topics {
-			m.addResource("Pub/Sub Topics", "global", fmt.Sprintf("projects/%s/topics/%s", projectID, topic.Name))
+			m.addResource(projectID, "Pub/Sub Topics", "global", fmt.Sprintf("projects/%s/topics/%s", projectID, topic.Name))
 		}
 	}
 
 	subscriptions, err := svc.Subscriptions(projectID)
 	if err == nil {
 		for _, sub := range subscriptions {
-			m.addResource("Pub/Sub Subscriptions", "global", fmt.Sprintf("projects/%s/subscriptions/%s", projectID, sub.Name))
+			m.addResource(projectID, "Pub/Sub Subscriptions", "global", fmt.Sprintf("projects/%s/subscriptions/%s", projectID, sub.Name))
 		}
 	}
 }
@@ -694,7 +659,7 @@ func (m *InventoryModule) enumDNS(ctx context.Context, projectID string, wg *syn
 	}
 
 	for _, zone := range zones {
-		m.addResource("DNS Zones", "global", fmt.Sprintf("projects/%s/managedZones/%s", projectID, zone.Name))
+		m.addResource(projectID, "DNS Zones", "global", fmt.Sprintf("projects/%s/managedZones/%s", projectID, zone.Name))
 	}
 }
 
@@ -711,7 +676,7 @@ func (m *InventoryModule) enumCloudBuild(ctx context.Context, projectID string, 
 
 	for _, trigger := range triggers {
 		region := "global"
-		m.addResource("Cloud Build Triggers", region, fmt.Sprintf("projects/%s/locations/%s/triggers/%s", projectID, region, trigger.Name))
+		m.addResource(projectID, "Cloud Build Triggers", region, fmt.Sprintf("projects/%s/locations/%s/triggers/%s", projectID, region, trigger.Name))
 	}
 }
 
@@ -727,7 +692,7 @@ func (m *InventoryModule) enumSourceRepos(ctx context.Context, projectID string,
 	}
 
 	for _, repo := range repos {
-		m.addResource("Source Repositories", "global", fmt.Sprintf("projects/%s/repos/%s", projectID, repo.Name))
+		m.addResource(projectID, "Source Repositories", "global", fmt.Sprintf("projects/%s/repos/%s", projectID, repo.Name))
 	}
 }
 
@@ -746,7 +711,7 @@ func (m *InventoryModule) enumArtifactRegistry(ctx context.Context, projectID st
 	}
 
 	for _, repo := range repos {
-		m.addResource("Artifact Registries", repo.Location, fmt.Sprintf("projects/%s/locations/%s/repositories/%s", projectID, repo.Location, repo.Name))
+		m.addResource(projectID, "Artifact Registries", repo.Location, fmt.Sprintf("projects/%s/locations/%s/repositories/%s", projectID, repo.Location, repo.Name))
 	}
 }
 
@@ -762,7 +727,7 @@ func (m *InventoryModule) enumDataflow(ctx context.Context, projectID string, wg
 	}
 
 	for _, job := range jobs {
-		m.addResource("Dataflow Jobs", job.Location, fmt.Sprintf("projects/%s/locations/%s/jobs/%s", projectID, job.Location, job.ID))
+		m.addResource(projectID, "Dataflow Jobs", job.Location, fmt.Sprintf("projects/%s/locations/%s/jobs/%s", projectID, job.Location, job.ID))
 	}
 }
 
@@ -778,7 +743,7 @@ func (m *InventoryModule) enumDataproc(ctx context.Context, projectID string, wg
 	}
 
 	for _, cluster := range clusters {
-		m.addResource("Dataproc Clusters", cluster.Region, fmt.Sprintf("projects/%s/regions/%s/clusters/%s", projectID, cluster.Region, cluster.Name))
+		m.addResource(projectID, "Dataproc Clusters", cluster.Region, fmt.Sprintf("projects/%s/regions/%s/clusters/%s", projectID, cluster.Region, cluster.Name))
 	}
 }
 
@@ -794,7 +759,7 @@ func (m *InventoryModule) enumNotebooks(ctx context.Context, projectID string, w
 	}
 
 	for _, inst := range instances {
-		m.addResource("Notebook Instances", inst.Location, fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, inst.Location, inst.Name))
+		m.addResource(projectID, "Notebook Instances", inst.Location, fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, inst.Location, inst.Name))
 	}
 }
 
@@ -810,7 +775,7 @@ func (m *InventoryModule) enumComposer(ctx context.Context, projectID string, wg
 	}
 
 	for _, env := range envs {
-		m.addResource("Composer Environments", env.Location, fmt.Sprintf("projects/%s/locations/%s/environments/%s", projectID, env.Location, env.Name))
+		m.addResource(projectID, "Composer Environments", env.Location, fmt.Sprintf("projects/%s/locations/%s/environments/%s", projectID, env.Location, env.Name))
 	}
 }
 
@@ -826,7 +791,7 @@ func (m *InventoryModule) enumScheduler(ctx context.Context, projectID string, w
 	}
 
 	for _, job := range jobs {
-		m.addResource("Scheduler Jobs", job.Location, fmt.Sprintf("projects/%s/locations/%s/jobs/%s", projectID, job.Location, job.Name))
+		m.addResource(projectID, "Scheduler Jobs", job.Location, fmt.Sprintf("projects/%s/locations/%s/jobs/%s", projectID, job.Location, job.Name))
 	}
 }
 
@@ -842,7 +807,7 @@ func (m *InventoryModule) enumLoggingSinks(ctx context.Context, projectID string
 	}
 
 	for _, sink := range sinks {
-		m.addResource("Log Sinks", "global", fmt.Sprintf("projects/%s/sinks/%s", projectID, sink.Name))
+		m.addResource(projectID, "Log Sinks", "global", fmt.Sprintf("projects/%s/sinks/%s", projectID, sink.Name))
 	}
 }
 
@@ -858,7 +823,7 @@ func (m *InventoryModule) enumCloudArmor(ctx context.Context, projectID string, 
 	}
 
 	for _, policy := range policies {
-		m.addResource("Cloud Armor Policies", "global", fmt.Sprintf("projects/%s/global/securityPolicies/%s", projectID, policy.Name))
+		m.addResource(projectID, "Cloud Armor Policies", "global", fmt.Sprintf("projects/%s/global/securityPolicies/%s", projectID, policy.Name))
 	}
 }
 
@@ -874,12 +839,12 @@ func (m *InventoryModule) enumSSLCertificates(ctx context.Context, projectID str
 	}
 
 	for _, cert := range certs {
-		m.addResource("SSL Certificates", cert.Location, fmt.Sprintf("projects/%s/locations/%s/certificates/%s", projectID, cert.Location, cert.Name))
+		m.addResource(projectID, "SSL Certificates", cert.Location, fmt.Sprintf("projects/%s/locations/%s/certificates/%s", projectID, cert.Location, cert.Name))
 	}
 }
 
-// addResource safely adds a resource count
-func (m *InventoryModule) addResource(resourceType, region, resourceID string) {
+// addResource safely adds a resource count for a specific project
+func (m *InventoryModule) addResource(projectID, resourceType, region, resourceID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -889,29 +854,48 @@ func (m *InventoryModule) addResource(resourceType, region, resourceID string) {
 	}
 	region = strings.ToLower(region)
 
-	// Track region
-	m.regions[region] = true
+	// Track region for this project
+	if m.projectRegions[projectID] == nil {
+		m.projectRegions[projectID] = make(map[string]bool)
+	}
+	m.projectRegions[projectID][region] = true
 
 	// Increment count
-	if m.resourceCounts[resourceType] == nil {
-		m.resourceCounts[resourceType] = make(map[string]int)
+	if m.projectResourceCounts[projectID] == nil {
+		m.projectResourceCounts[projectID] = make(map[string]map[string]int)
 	}
-	m.resourceCounts[resourceType][region]++
+	if m.projectResourceCounts[projectID][resourceType] == nil {
+		m.projectResourceCounts[projectID][resourceType] = make(map[string]int)
+	}
+	m.projectResourceCounts[projectID][resourceType][region]++
 
 	// Track resource ID
-	if m.resourceIDs[resourceType] == nil {
-		m.resourceIDs[resourceType] = make(map[string][]string)
+	if m.projectResourceIDs[projectID] == nil {
+		m.projectResourceIDs[projectID] = make(map[string]map[string][]string)
 	}
-	m.resourceIDs[resourceType][region] = append(m.resourceIDs[resourceType][region], resourceID)
+	if m.projectResourceIDs[projectID][resourceType] == nil {
+		m.projectResourceIDs[projectID][resourceType] = make(map[string][]string)
+	}
+	m.projectResourceIDs[projectID][resourceType][region] = append(m.projectResourceIDs[projectID][resourceType][region], resourceID)
 }
 
-// calculateTotals computes the total counts
+// calculateTotals computes the total counts per project and globally
 func (m *InventoryModule) calculateTotals() {
-	for resourceType, regionCounts := range m.resourceCounts {
-		for region, count := range regionCounts {
-			m.totalByType[resourceType] += count
-			m.totalByRegion[region] += count
-			m.grandTotal += count
+	for projectID, resourceCounts := range m.projectResourceCounts {
+		if m.projectTotalByType[projectID] == nil {
+			m.projectTotalByType[projectID] = make(map[string]int)
+		}
+		if m.projectTotalByRegion[projectID] == nil {
+			m.projectTotalByRegion[projectID] = make(map[string]int)
+		}
+
+		for resourceType, regionCounts := range resourceCounts {
+			for region, count := range regionCounts {
+				m.projectTotalByType[projectID][resourceType] += count
+				m.projectTotalByRegion[projectID][region] += count
+				m.projectGrandTotal[projectID] += count
+				m.grandTotal += count
+			}
 		}
 	}
 }
@@ -1316,6 +1300,9 @@ func (m *InventoryModule) buildProjectOutput(projectID string) internal.Cloudfox
 		projectAssetTotal += count
 	}
 
+	// Get project-specific detailed resource counts
+	projectResourceTotal := m.projectGrandTotal[projectID]
+
 	// ========================================
 	// Table 1: Complete Asset Inventory (from Cloud Asset API)
 	// ========================================
@@ -1421,11 +1408,10 @@ func (m *InventoryModule) buildProjectOutput(projectID string) internal.Cloudfox
 
 	// ========================================
 	// Table 2: Detailed Enumeration by Region (from dedicated CloudFox modules)
-	// Note: resourceCounts/resourceIDs are currently aggregated, not per-project
-	// This table shows the aggregated view (same for all projects for now)
+	// Now uses per-project resource tracking
 	// ========================================
-	if m.grandTotal > 0 {
-		sortedRegions := m.getSortedRegions()
+	if projectResourceTotal > 0 {
+		sortedRegions := m.getSortedRegionsForProject(projectID)
 
 		// Build header: Resource Type, then regions
 		header := []string{"Resource Type"}
@@ -1438,34 +1424,34 @@ func (m *InventoryModule) buildProjectOutput(projectID string) internal.Cloudfox
 		// Add total row first
 		totalRow := []string{"TOTAL"}
 		for _, region := range sortedRegions {
-			totalRow = append(totalRow, strconv.Itoa(m.totalByRegion[region]))
+			totalRow = append(totalRow, strconv.Itoa(m.projectTotalByRegion[projectID][region]))
 		}
-		totalRow = append(totalRow, strconv.Itoa(m.grandTotal))
+		totalRow = append(totalRow, strconv.Itoa(projectResourceTotal))
 		body = append(body, totalRow)
 
 		// Sort resource types alphabetically
 		var resourceTypes []string
-		for rt := range m.totalByType {
+		for rt := range m.projectTotalByType[projectID] {
 			resourceTypes = append(resourceTypes, rt)
 		}
 		sort.Strings(resourceTypes)
 
 		// Add row for each resource type (only if it has resources)
 		for _, resourceType := range resourceTypes {
-			if m.totalByType[resourceType] == 0 {
+			if m.projectTotalByType[projectID][resourceType] == 0 {
 				continue
 			}
 
 			row := []string{resourceType}
 			for _, region := range sortedRegions {
-				count := m.resourceCounts[resourceType][region]
+				count := m.projectResourceCounts[projectID][resourceType][region]
 				if count > 0 {
 					row = append(row, strconv.Itoa(count))
 				} else {
 					row = append(row, "-")
 				}
 			}
-			row = append(row, strconv.Itoa(m.totalByType[resourceType]))
+			row = append(row, strconv.Itoa(m.projectTotalByType[projectID][resourceType]))
 			body = append(body, row)
 		}
 
@@ -1484,24 +1470,26 @@ func (m *InventoryModule) buildProjectOutput(projectID string) internal.Cloudfox
 	lootContent.WriteString(fmt.Sprintf("# Project: %s\n", projectID))
 	lootContent.WriteString("# Generated by CloudFox\n")
 	lootContent.WriteString(fmt.Sprintf("# Total resources (Asset Inventory): %d\n", projectAssetTotal))
-	lootContent.WriteString(fmt.Sprintf("# Total resources (Detailed): %d\n\n", m.grandTotal))
+	lootContent.WriteString(fmt.Sprintf("# Total resources (Detailed): %d\n\n", projectResourceTotal))
 
 	// Sort resource types
 	var resourceTypes []string
-	for rt := range m.totalByType {
+	for rt := range m.projectTotalByType[projectID] {
 		resourceTypes = append(resourceTypes, rt)
 	}
 	sort.Strings(resourceTypes)
 
-	sortedRegions := m.getSortedRegions()
+	sortedRegions := m.getSortedRegionsForProject(projectID)
 	for _, resourceType := range resourceTypes {
-		if m.totalByType[resourceType] == 0 {
+		if m.projectTotalByType[projectID][resourceType] == 0 {
 			continue
 		}
-		lootContent.WriteString(fmt.Sprintf("## %s (%d)\n", resourceType, m.totalByType[resourceType]))
+		lootContent.WriteString(fmt.Sprintf("## %s (%d)\n", resourceType, m.projectTotalByType[projectID][resourceType]))
 		for _, region := range sortedRegions {
-			for _, resourceID := range m.resourceIDs[resourceType][region] {
-				lootContent.WriteString(fmt.Sprintf("%s\n", resourceID))
+			if m.projectResourceIDs[projectID] != nil && m.projectResourceIDs[projectID][resourceType] != nil {
+				for _, resourceID := range m.projectResourceIDs[projectID][resourceType][region] {
+					lootContent.WriteString(fmt.Sprintf("%s\n", resourceID))
+				}
 			}
 		}
 		lootContent.WriteString("\n")
@@ -1523,10 +1511,13 @@ func (m *InventoryModule) buildProjectOutput(projectID string) internal.Cloudfox
 	}
 }
 
-// getSortedRegions returns regions sorted by count, with "global" first
-func (m *InventoryModule) getSortedRegions() []string {
+// getSortedRegionsForProject returns regions sorted by count for a specific project, with "global" first
+func (m *InventoryModule) getSortedRegionsForProject(projectID string) []string {
 	var regions []string
-	for region := range m.regions {
+	if m.projectRegions[projectID] == nil {
+		return regions
+	}
+	for region := range m.projectRegions[projectID] {
 		regions = append(regions, region)
 	}
 
@@ -1539,7 +1530,7 @@ func (m *InventoryModule) getSortedRegions() []string {
 		if regions[j] == "global" {
 			return false
 		}
-		return m.totalByRegion[regions[i]] > m.totalByRegion[regions[j]]
+		return m.projectTotalByRegion[projectID][regions[i]] > m.projectTotalByRegion[projectID][regions[j]]
 	})
 
 	return regions

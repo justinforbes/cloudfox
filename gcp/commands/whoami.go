@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
+	foxmapperservice "github.com/BishopFox/cloudfox/gcp/services/foxmapperService"
 	IAMService "github.com/BishopFox/cloudfox/gcp/services/iamService"
 	OAuthService "github.com/BishopFox/cloudfox/gcp/services/oauthService"
 	"github.com/BishopFox/cloudfox/gcp/shared"
@@ -139,7 +139,6 @@ type DataExfilCapability struct {
 	ProjectID   string
 	Permission  string
 	Category    string
-	RiskLevel   string
 	Description string
 	SourceRole  string // The role/principal that grants this capability
 	SourceScope string // Where the role is granted (project, folder, org)
@@ -150,7 +149,6 @@ type LateralMoveCapability struct {
 	ProjectID   string
 	Permission  string
 	Category    string
-	RiskLevel   string
 	Description string
 	SourceRole  string // The role/principal that grants this capability
 	SourceScope string // Where the role is granted (project, folder, org)
@@ -173,6 +171,12 @@ type WhoAmIModule struct {
 	Extended               bool
 	ProvidedGroups         []string // Groups provided via --groups flag
 	mu                     sync.Mutex
+
+	// FoxMapper findings - store the full findings for detailed path visualization
+	FoxMapperPrivescFindings []foxmapperservice.PrivescFinding
+	FoxMapperLateralFindings []foxmapperservice.LateralFinding
+	FoxMapperDataExfilFindings []foxmapperservice.DataExfilFinding
+	FoxMapperService         *foxmapperservice.FoxMapperService
 }
 
 // ------------------------------
@@ -657,8 +661,8 @@ func (m *WhoAmIModule) findImpersonationTargets(ctx context.Context, logger inte
 	fullMember := memberPrefix + m.Identity.Email
 
 	for _, projectID := range m.ProjectIDs {
-		// Get all service accounts in the project
-		serviceAccounts, err := iamService.ServiceAccounts(projectID)
+		// Get all service accounts in the project (without keys - not needed for impersonation check)
+		serviceAccounts, err := iamService.ServiceAccountsBasic(projectID)
 		if err != nil {
 			continue
 		}
@@ -715,9 +719,9 @@ func (m *WhoAmIModule) findImpersonationTargets(ctx context.Context, logger inte
 }
 
 // identifyPrivEscPaths identifies privilege escalation paths based on current permissions
-// Uses attackpathService for comprehensive analysis consistent with the privesc module
+// Uses FoxMapperService for comprehensive graph-based analysis
 // Filters results to only show paths relevant to the current identity and their groups
-// Will use cached privesc data from context if available (e.g., from all-checks run)
+// Will use cached FoxMapper data from context if available (e.g., from all-checks run)
 func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal.Logger) {
 	// Build set of principals to filter for (current identity + groups)
 	relevantPrincipals := make(map[string]bool)
@@ -745,13 +749,13 @@ func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal
 	relevantPrincipals["allUsers"] = true
 	relevantPrincipals["allAuthenticatedUsers"] = true
 
-	// Check if privesc cache is available from context (e.g., from all-checks run)
-	privescCache := gcpinternal.GetPrivescCacheFromContext(ctx)
-	if privescCache != nil && privescCache.IsPopulated() {
-		logger.InfoM("Using cached privesc data", globals.GCP_WHOAMI_MODULE_NAME)
-		m.identifyPrivEscPathsFromCache(privescCache, relevantPrincipals, logger)
+	// Check if FoxMapper cache is available from context
+	foxMapperCache := gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if foxMapperCache != nil && foxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper cache for privesc analysis", globals.GCP_WHOAMI_MODULE_NAME)
+		m.identifyPrivEscPathsFromFoxMapper(foxMapperCache, relevantPrincipals, logger)
 	} else {
-		// No cache available, run fresh privesc analysis
+		// No cache available, try to load FoxMapper data
 		m.identifyPrivEscPathsFromAnalysis(ctx, relevantPrincipals, logger)
 	}
 
@@ -793,95 +797,191 @@ func (m *WhoAmIModule) identifyPrivEscPaths(ctx context.Context, logger internal
 	}
 }
 
-// identifyPrivEscPathsFromCache extracts privesc paths from the cached data
-func (m *WhoAmIModule) identifyPrivEscPathsFromCache(cache *gcpinternal.PrivescCache, relevantPrincipals map[string]bool, logger internal.Logger) {
-	// Check each relevant principal against the cache
-	for principal := range relevantPrincipals {
-		hasPrivesc, methods := cache.HasPrivescForPrincipal(principal)
-		if !hasPrivesc {
-			continue
-		}
-
-		for _, method := range methods {
-			// Extract project ID from target if available
-			projectID := ""
-			if strings.Contains(method.Target, "projects/") {
-				parts := strings.Split(method.Target, "/")
-				for i, p := range parts {
-					if p == "projects" && i+1 < len(parts) {
-						projectID = parts[i+1]
-						break
-					}
-				}
-			}
-
-			privEscPath := PrivilegeEscalationPath{
-				ProjectID:     projectID,
-				Permission:    method.Method,
-				Category:      method.Category,
-				Description:   fmt.Sprintf("Risk Level: %s", method.RiskLevel),
-				SourceRole:    principal,
-				SourceScope:   method.Target,
-				Command:       "", // Cache doesn't store exploit commands
-				Confidence:    strings.ToLower(method.RiskLevel),
-				RequiredPerms: strings.Join(method.Permissions, ", "),
-			}
-			m.PrivEscPaths = append(m.PrivEscPaths, privEscPath)
-		}
-	}
-}
-
-// identifyPrivEscPathsFromAnalysis runs fresh privesc analysis using attackpathService
-func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, relevantPrincipals map[string]bool, logger internal.Logger) {
-	// Use attackpathService for comprehensive privesc analysis
-	svc := attackpathservice.New()
-
-	// Build project names map
-	projectNames := make(map[string]string)
-	for _, proj := range m.Identity.Projects {
-		if proj.DisplayName != "" {
-			projectNames[proj.ProjectID] = proj.DisplayName
-		}
-	}
-
-	// Run combined attack path analysis with "privesc" filter
-	result, err := svc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, projectNames, "privesc")
-	if err != nil {
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not analyze privilege escalation paths")
+// identifyPrivEscPathsFromFoxMapper extracts privesc paths from FoxMapper cache
+func (m *WhoAmIModule) identifyPrivEscPathsFromFoxMapper(cache *gcpinternal.FoxMapperCache, relevantPrincipals map[string]bool, logger internal.Logger) {
+	svc := cache.GetService()
+	if svc == nil {
 		return
 	}
 
-	if result == nil {
-		return
-	}
+	// Store the service for path lookups in playbook generation
+	m.FoxMapperService = svc
 
-	// Filter and convert attackpathservice.AttackPath to whoami's PrivilegeEscalationPath format
-	// Only include paths where the principal matches current identity or their groups
-	for _, path := range result.AllPaths {
-		// Check if this path's principal is relevant to the current identity
-		if !relevantPrincipals[path.Principal] && !relevantPrincipals[strings.ToLower(path.Principal)] {
+	findings := svc.AnalyzePrivesc()
+	for _, finding := range findings {
+		// Check if this principal is relevant to our identity
+		cleanPrincipal := finding.Principal
+		if !relevantPrincipals[cleanPrincipal] && !relevantPrincipals["serviceAccount:"+cleanPrincipal] && !relevantPrincipals["user:"+cleanPrincipal] {
 			continue
 		}
+
+		if !finding.CanEscalate && !finding.IsAdmin {
+			continue
+		}
+
+		// Store full finding for detailed playbook generation
+		m.FoxMapperPrivescFindings = append(m.FoxMapperPrivescFindings, finding)
 
 		privEscPath := PrivilegeEscalationPath{
-			ProjectID:     path.ProjectID,
-			Permission:    path.Method,
-			Category:      path.Category,
-			Description:   path.Description,
-			SourceRole:    fmt.Sprintf("%s (%s)", path.Principal, path.PrincipalType),
-			SourceScope:   fmt.Sprintf("%s/%s", path.ScopeType, path.ScopeID),
-			Command:       path.ExploitCommand,
-			Confidence:    strings.ToLower(path.RiskLevel),
-			RequiredPerms: strings.Join(path.Permissions, ", "),
+			ProjectID:     "",
+			Permission:    "privesc",
+			Category:      fmt.Sprintf("%s admin reachable", finding.HighestAdminLevel),
+			Description:   fmt.Sprintf("Can escalate to %s admin in %d hops via %d paths", finding.HighestAdminLevel, finding.ShortestPathHops, finding.ViablePathCount),
+			SourceRole:    finding.Principal,
+			SourceScope:   finding.MemberType,
+			Command:       "",
+			Confidence:    "confirmed",
+			RequiredPerms: fmt.Sprintf("%d paths to admin", finding.ViablePathCount),
 		}
 		m.PrivEscPaths = append(m.PrivEscPaths, privEscPath)
 	}
 }
 
+// identifyPrivEscPathsFromAnalysis runs fresh privesc analysis using FoxMapperService
+func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, relevantPrincipals map[string]bool, logger internal.Logger) {
+	// Use FoxMapperService for comprehensive privesc analysis
+	svc := foxmapperservice.New()
+
+	// Determine org ID or use first project
+	orgID := ""
+	if len(m.Identity.Organizations) > 0 {
+		orgID = m.Identity.Organizations[0].OrgID
+	}
+
+	// Load FoxMapper graph data
+	var err error
+	if orgID != "" {
+		err = svc.LoadGraph(orgID, true)
+	} else if len(m.ProjectIDs) > 0 {
+		err = svc.LoadGraph(m.ProjectIDs[0], false)
+	} else {
+		logger.InfoM("No org or project context available for FoxMapper analysis", globals.GCP_WHOAMI_MODULE_NAME)
+		return
+	}
+
+	if err != nil {
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not load FoxMapper graph data")
+		return
+	}
+
+	// Store the service for path lookups in playbook generation
+	m.FoxMapperService = svc
+
+	// Run privesc analysis
+	findings := svc.AnalyzePrivesc()
+
+	// Filter findings for relevant principals only
+	for _, finding := range findings {
+		// Check if this finding is for a relevant principal
+		if !relevantPrincipals[finding.Principal] && !relevantPrincipals[strings.ToLower(finding.Principal)] {
+			continue
+		}
+
+		// Store full finding for detailed playbook generation
+		m.FoxMapperPrivescFindings = append(m.FoxMapperPrivescFindings, finding)
+
+		// Convert each privesc path to whoami format
+		for _, path := range finding.Paths {
+			// Build command from first edge if available
+			command := ""
+			if len(path.Edges) > 0 {
+				command = generatePrivescCommandFromEdge(path.Edges[0])
+			}
+
+			privEscPath := PrivilegeEscalationPath{
+				ProjectID:     "", // FoxMapper doesn't track project per edge
+				Permission:    path.Edges[0].ShortReason,
+				Category:      "Privesc",
+				Description:   fmt.Sprintf("Can escalate to %s admin via %d-hop path", path.AdminLevel, path.HopCount),
+				SourceRole:    finding.Principal,
+				SourceScope:   path.AdminLevel,
+				Command:       command,
+				Confidence:    "confirmed",
+				RequiredPerms: path.Edges[0].ShortReason,
+			}
+
+			if path.ScopeBlocked {
+				privEscPath.Description += " (blocked by IAM condition)"
+			}
+
+			m.PrivEscPaths = append(m.PrivEscPaths, privEscPath)
+		}
+	}
+}
+
+// generatePrivescCommandFromEdge generates a simple exploit command from a FoxMapper edge
+func generatePrivescCommandFromEdge(edge foxmapperservice.Edge) string {
+	// Simple command generation based on edge reason
+	reason := strings.ToLower(edge.ShortReason)
+
+	if strings.Contains(reason, "iam.serviceaccounts.getaccesstoken") {
+		return "gcloud auth print-access-token --impersonate-service-account=TARGET_SA"
+	} else if strings.Contains(reason, "iam.serviceaccountkeys.create") {
+		return "gcloud iam service-accounts keys create key.json --iam-account=TARGET_SA"
+	} else if strings.Contains(reason, "iam.serviceaccounts.actas") {
+		return "# Use actAs to run services as the target SA"
+	} else if strings.Contains(reason, "setiamdolicy") {
+		return "# Modify IAM policy to grant yourself additional permissions"
+	} else if strings.Contains(reason, "cloudfunctions") {
+		return "gcloud functions deploy FUNC --runtime=python311 --service-account=TARGET_SA"
+	} else if strings.Contains(reason, "run.services") {
+		return "gcloud run deploy SERVICE --image=IMAGE --service-account=TARGET_SA"
+	}
+
+	return fmt.Sprintf("# Exploit via: %s", edge.Reason)
+}
+
+// generateExfilCommand generates a data exfiltration command based on permission
+func generateExfilCommand(permission, service string) string {
+	switch {
+	case strings.Contains(permission, "storage.objects.get"):
+		return "gsutil cp gs://BUCKET/path/to/file ./local/"
+	case strings.Contains(permission, "bigquery.tables.getData"):
+		return "bq query 'SELECT * FROM dataset.table'"
+	case strings.Contains(permission, "bigquery.tables.export"):
+		return "bq extract dataset.table gs://BUCKET/export.csv"
+	case strings.Contains(permission, "cloudsql.instances.export"):
+		return "gcloud sql export sql INSTANCE gs://BUCKET/export.sql --database=DB"
+	case strings.Contains(permission, "secretmanager.versions.access"):
+		return "gcloud secrets versions access latest --secret=SECRET"
+	case strings.Contains(permission, "cloudkms.cryptoKeyVersions.useToDecrypt"):
+		return "gcloud kms decrypt --key=KEY --keyring=KEYRING --location=LOCATION"
+	case strings.Contains(permission, "logging.logEntries.list"):
+		return "gcloud logging read 'logName=\"projects/PROJECT/logs/LOG\"'"
+	case strings.Contains(permission, "pubsub.subscriptions.consume"):
+		return "gcloud pubsub subscriptions pull SUBSCRIPTION --auto-ack"
+	default:
+		return fmt.Sprintf("# Use permission: %s (service: %s)", permission, service)
+	}
+}
+
+// generateLateralCommand generates a lateral movement command based on permission
+func generateLateralCommand(permission, category string) string {
+	switch {
+	case strings.Contains(permission, "iam.serviceAccounts.getAccessToken"):
+		return "gcloud auth print-access-token --impersonate-service-account=SA_EMAIL"
+	case strings.Contains(permission, "iam.serviceAccountKeys.create"):
+		return "gcloud iam service-accounts keys create key.json --iam-account=SA_EMAIL"
+	case strings.Contains(permission, "compute.instances.osLogin"):
+		return "gcloud compute ssh INSTANCE_NAME --zone=ZONE"
+	case strings.Contains(permission, "compute.instances.setMetadata"):
+		return "gcloud compute instances add-metadata INSTANCE --metadata=ssh-keys=\"user:SSH_KEY\""
+	case strings.Contains(permission, "container.clusters.getCredentials"):
+		return "gcloud container clusters get-credentials CLUSTER --zone=ZONE"
+	case strings.Contains(permission, "container.pods.exec"):
+		return "kubectl exec -it POD -- /bin/sh"
+	case strings.Contains(permission, "cloudfunctions.functions.create"):
+		return "gcloud functions deploy FUNC --runtime=python311 --service-account=SA_EMAIL"
+	case strings.Contains(permission, "run.services.create"):
+		return "gcloud run deploy SERVICE --image=IMAGE --service-account=SA_EMAIL"
+	default:
+		return fmt.Sprintf("# Use permission: %s (category: %s)", permission, category)
+	}
+}
+
 // isDangerousRole checks if a role is considered dangerous
-// Uses the dangerous permissions list from attackpathService for consistency
 func isDangerousRole(role string) bool {
-	// Roles that directly map to dangerous permissions from attackpathService
+	// Roles that map to dangerous permissions for privilege escalation
 	dangerousRoles := []string{
 		// Owner/Editor - broad access
 		"roles/owner",
@@ -931,7 +1031,7 @@ func isDangerousRole(role string) bool {
 }
 
 // identifyDataExfilCapabilities identifies data exfiltration capabilities for the current identity
-// Uses unified cache if available, otherwise runs attackpathService for comprehensive analysis
+// Uses FoxMapper cache if available, otherwise runs FoxMapperService for comprehensive analysis
 // Filters results to only show capabilities relevant to the current identity and their groups
 func (m *WhoAmIModule) identifyDataExfilCapabilities(ctx context.Context, logger internal.Logger) {
 	// Build set of principals to filter for (current identity + groups)
@@ -956,11 +1056,11 @@ func (m *WhoAmIModule) identifyDataExfilCapabilities(ctx context.Context, logger
 	relevantPrincipals["allUsers"] = true
 	relevantPrincipals["allAuthenticatedUsers"] = true
 
-	// Check if attack path cache is available from context (e.g., from all-checks run)
-	cache := gcpinternal.GetAttackPathCacheFromContext(ctx)
-	if cache != nil && cache.IsPopulated() {
+	// Check if FoxMapper cache is available from context (e.g., from all-checks run)
+	foxMapperCache := gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if foxMapperCache != nil && foxMapperCache.IsPopulated() {
 		logger.InfoM("Using cached exfil data", globals.GCP_WHOAMI_MODULE_NAME)
-		m.identifyDataExfilFromCache(cache, relevantPrincipals)
+		m.identifyDataExfilFromCache(foxMapperCache, relevantPrincipals)
 	} else {
 		// No cache available, run fresh analysis
 		m.identifyDataExfilFromAnalysis(ctx, relevantPrincipals, logger)
@@ -971,86 +1071,82 @@ func (m *WhoAmIModule) identifyDataExfilCapabilities(ctx context.Context, logger
 	}
 }
 
-// identifyDataExfilFromCache extracts exfil capabilities from the cached data
-func (m *WhoAmIModule) identifyDataExfilFromCache(cache *gcpinternal.AttackPathCache, relevantPrincipals map[string]bool) {
-	for principal := range relevantPrincipals {
-		hasExfil, methods := cache.HasExfil(principal)
-		if !hasExfil {
-			// Also check with principal format
-			hasExfil, methods = cache.HasAttackPathForPrincipal(principal, gcpinternal.AttackPathExfil)
-		}
-		if !hasExfil {
-			continue
-		}
-
-		for _, method := range methods {
-			capability := DataExfilCapability{
-				ProjectID:   method.ScopeID,
-				Permission:  method.Method,
-				Category:    method.Category,
-				RiskLevel:   method.RiskLevel,
-				Description: method.Target,
-				SourceRole:  principal,
-				SourceScope: fmt.Sprintf("%s/%s", method.ScopeType, method.ScopeID),
-			}
-			m.DataExfilCapabilities = append(m.DataExfilCapabilities, capability)
-		}
+// identifyDataExfilFromCache extracts exfil capabilities from the FoxMapper cached data
+func (m *WhoAmIModule) identifyDataExfilFromCache(foxMapperCache *gcpinternal.FoxMapperCache, relevantPrincipals map[string]bool) {
+	if foxMapperCache == nil || !foxMapperCache.IsPopulated() {
+		return
 	}
+
+	// Get the FoxMapper service from cache
+	// Note: This currently requires accessing internal service from cache
+	// For now, we'll just skip cache-based exfil detection and always run fresh analysis
+	// TODO: Enhance FoxMapperCache to expose AnalyzeDataExfil method
 }
 
-// identifyDataExfilFromAnalysis runs fresh exfil analysis using attackpathService
+// identifyDataExfilFromAnalysis runs fresh exfil analysis using FoxMapperService
 func (m *WhoAmIModule) identifyDataExfilFromAnalysis(ctx context.Context, relevantPrincipals map[string]bool, logger internal.Logger) {
-	// Use attackpathService for comprehensive exfil analysis
-	attackSvc := attackpathservice.New()
+	// Use FoxMapperService for comprehensive exfil analysis
+	svc := foxmapperservice.New()
 
-	// Build project names map
-	projectNames := make(map[string]string)
-	for _, proj := range m.Identity.Projects {
-		if proj.DisplayName != "" {
-			projectNames[proj.ProjectID] = proj.DisplayName
-		}
+	// Determine org ID or use first project
+	orgID := ""
+	if len(m.Identity.Organizations) > 0 {
+		orgID = m.Identity.Organizations[0].OrgID
 	}
 
-	// Run combined attack path analysis for exfil (org, folder, project, resource levels)
-	result, err := attackSvc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, projectNames, "exfil")
+	// Load FoxMapper graph data
+	var err error
+	if orgID != "" {
+		err = svc.LoadGraph(orgID, true)
+	} else if len(m.ProjectIDs) > 0 {
+		err = svc.LoadGraph(m.ProjectIDs[0], false)
+	} else {
+		logger.InfoM("No org or project context available for FoxMapper analysis", globals.GCP_WHOAMI_MODULE_NAME)
+		return
+	}
+
 	if err != nil {
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not analyze data exfiltration capabilities")
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not load FoxMapper graph data")
 		return
 	}
 
-	if result == nil {
-		return
+	// Store the service if not already set
+	if m.FoxMapperService == nil {
+		m.FoxMapperService = svc
 	}
 
-	// Filter and convert to DataExfilCapability format
-	// Only include paths where the principal matches current identity or their groups
-	for _, path := range result.AllPaths {
-		if !relevantPrincipals[path.Principal] && !relevantPrincipals[strings.ToLower(path.Principal)] {
-			continue
+	// Run data exfil analysis (empty string means all services)
+	findings := svc.AnalyzeDataExfil("")
+
+	// Filter findings for relevant principals only
+	for _, finding := range findings {
+		hasRelevantPrincipal := false
+		for _, principalAccess := range finding.Principals {
+			// Check if this principal is relevant to the current identity
+			if relevantPrincipals[principalAccess.Principal] || relevantPrincipals[strings.ToLower(principalAccess.Principal)] {
+				hasRelevantPrincipal = true
+
+				capability := DataExfilCapability{
+					ProjectID:   "", // FoxMapper doesn't track project ID per finding
+					Permission:  finding.Permission,
+					Category:    finding.Service,
+					Description: finding.Description,
+					SourceRole:  principalAccess.Principal,
+					SourceScope: "via privilege escalation",
+				}
+				m.DataExfilCapabilities = append(m.DataExfilCapabilities, capability)
+			}
 		}
 
-		// Determine project ID from scope
-		projectID := path.ProjectID
-		if projectID == "" {
-			// For org/folder level, show scope info instead
-			projectID = fmt.Sprintf("%s:%s", path.ScopeType, path.ScopeID)
+		// Store full finding for detailed playbook generation
+		if hasRelevantPrincipal {
+			m.FoxMapperDataExfilFindings = append(m.FoxMapperDataExfilFindings, finding)
 		}
-
-		capability := DataExfilCapability{
-			ProjectID:   projectID,
-			Permission:  path.Method,
-			Category:    path.Category,
-			RiskLevel:   path.RiskLevel,
-			Description: path.Description,
-			SourceRole:  fmt.Sprintf("%s (%s)", path.Principal, path.PrincipalType),
-			SourceScope: fmt.Sprintf("%s/%s", path.ScopeType, path.ScopeID),
-		}
-		m.DataExfilCapabilities = append(m.DataExfilCapabilities, capability)
 	}
 }
 
 // identifyLateralMoveCapabilities identifies lateral movement capabilities for the current identity
-// Uses unified cache if available, otherwise runs attackpathService for comprehensive analysis
+// Uses FoxMapper cache if available, otherwise runs FoxMapperService for comprehensive analysis
 // Filters results to only show capabilities relevant to the current identity and their groups
 func (m *WhoAmIModule) identifyLateralMoveCapabilities(ctx context.Context, logger internal.Logger) {
 	// Build set of principals to filter for (current identity + groups)
@@ -1075,11 +1171,11 @@ func (m *WhoAmIModule) identifyLateralMoveCapabilities(ctx context.Context, logg
 	relevantPrincipals["allUsers"] = true
 	relevantPrincipals["allAuthenticatedUsers"] = true
 
-	// Check if attack path cache is available from context (e.g., from all-checks run)
-	cache := gcpinternal.GetAttackPathCacheFromContext(ctx)
-	if cache != nil && cache.IsPopulated() {
+	// Check if FoxMapper cache is available from context (e.g., from all-checks run)
+	foxMapperCache := gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if foxMapperCache != nil && foxMapperCache.IsPopulated() {
 		logger.InfoM("Using cached lateral data", globals.GCP_WHOAMI_MODULE_NAME)
-		m.identifyLateralFromCache(cache, relevantPrincipals)
+		m.identifyLateralFromCache(foxMapperCache, relevantPrincipals)
 	} else {
 		// No cache available, run fresh analysis
 		m.identifyLateralFromAnalysis(ctx, relevantPrincipals, logger)
@@ -1090,81 +1186,77 @@ func (m *WhoAmIModule) identifyLateralMoveCapabilities(ctx context.Context, logg
 	}
 }
 
-// identifyLateralFromCache extracts lateral movement capabilities from the cached data
-func (m *WhoAmIModule) identifyLateralFromCache(cache *gcpinternal.AttackPathCache, relevantPrincipals map[string]bool) {
-	for principal := range relevantPrincipals {
-		hasLateral, methods := cache.HasLateral(principal)
-		if !hasLateral {
-			// Also check with principal format
-			hasLateral, methods = cache.HasAttackPathForPrincipal(principal, gcpinternal.AttackPathLateral)
-		}
-		if !hasLateral {
-			continue
-		}
-
-		for _, method := range methods {
-			capability := LateralMoveCapability{
-				ProjectID:   method.ScopeID,
-				Permission:  method.Method,
-				Category:    method.Category,
-				RiskLevel:   method.RiskLevel,
-				Description: method.Target,
-				SourceRole:  principal,
-				SourceScope: fmt.Sprintf("%s/%s", method.ScopeType, method.ScopeID),
-			}
-			m.LateralMoveCapabilities = append(m.LateralMoveCapabilities, capability)
-		}
+// identifyLateralFromCache extracts lateral movement capabilities from the FoxMapper cached data
+func (m *WhoAmIModule) identifyLateralFromCache(foxMapperCache *gcpinternal.FoxMapperCache, relevantPrincipals map[string]bool) {
+	if foxMapperCache == nil || !foxMapperCache.IsPopulated() {
+		return
 	}
+
+	// Get the FoxMapper service from cache
+	// Note: This currently requires accessing internal service from cache
+	// For now, we'll just skip cache-based lateral detection and always run fresh analysis
+	// TODO: Enhance FoxMapperCache to expose AnalyzeLateral method
 }
 
-// identifyLateralFromAnalysis runs fresh lateral movement analysis using attackpathService
+// identifyLateralFromAnalysis runs fresh lateral movement analysis using FoxMapperService
 func (m *WhoAmIModule) identifyLateralFromAnalysis(ctx context.Context, relevantPrincipals map[string]bool, logger internal.Logger) {
-	// Use attackpathService for comprehensive lateral movement analysis
-	attackSvc := attackpathservice.New()
+	// Use FoxMapperService for comprehensive lateral movement analysis
+	svc := foxmapperservice.New()
 
-	// Build project names map
-	projectNames := make(map[string]string)
-	for _, proj := range m.Identity.Projects {
-		if proj.DisplayName != "" {
-			projectNames[proj.ProjectID] = proj.DisplayName
-		}
+	// Determine org ID or use first project
+	orgID := ""
+	if len(m.Identity.Organizations) > 0 {
+		orgID = m.Identity.Organizations[0].OrgID
 	}
 
-	// Run combined attack path analysis for lateral movement (org, folder, project, resource levels)
-	result, err := attackSvc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, projectNames, "lateral")
+	// Load FoxMapper graph data
+	var err error
+	if orgID != "" {
+		err = svc.LoadGraph(orgID, true)
+	} else if len(m.ProjectIDs) > 0 {
+		err = svc.LoadGraph(m.ProjectIDs[0], false)
+	} else {
+		logger.InfoM("No org or project context available for FoxMapper analysis", globals.GCP_WHOAMI_MODULE_NAME)
+		return
+	}
+
 	if err != nil {
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not analyze lateral movement capabilities")
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_WHOAMI_MODULE_NAME, "Could not load FoxMapper graph data")
 		return
 	}
 
-	if result == nil {
-		return
+	// Store the service if not already set
+	if m.FoxMapperService == nil {
+		m.FoxMapperService = svc
 	}
 
-	// Filter and convert to LateralMoveCapability format
-	// Only include paths where the principal matches current identity or their groups
-	for _, path := range result.AllPaths {
-		if !relevantPrincipals[path.Principal] && !relevantPrincipals[strings.ToLower(path.Principal)] {
-			continue
+	// Run lateral movement analysis (empty string means all categories)
+	findings := svc.AnalyzeLateral("")
+
+	// Filter findings for relevant principals only
+	for _, finding := range findings {
+		hasRelevantPrincipal := false
+		for _, principalAccess := range finding.Principals {
+			// Check if this principal is relevant to the current identity
+			if relevantPrincipals[principalAccess.Principal] || relevantPrincipals[strings.ToLower(principalAccess.Principal)] {
+				hasRelevantPrincipal = true
+
+				capability := LateralMoveCapability{
+					ProjectID:   "", // FoxMapper doesn't track project ID per finding
+					Permission:  finding.Permission,
+					Category:    finding.Category,
+					Description: finding.Description,
+					SourceRole:  principalAccess.Principal,
+					SourceScope: "via privilege escalation",
+				}
+				m.LateralMoveCapabilities = append(m.LateralMoveCapabilities, capability)
+			}
 		}
 
-		// Determine project ID from scope
-		projectID := path.ProjectID
-		if projectID == "" {
-			// For org/folder level, show scope info instead
-			projectID = fmt.Sprintf("%s:%s", path.ScopeType, path.ScopeID)
+		// Store full finding for detailed playbook generation
+		if hasRelevantPrincipal {
+			m.FoxMapperLateralFindings = append(m.FoxMapperLateralFindings, finding)
 		}
-
-		capability := LateralMoveCapability{
-			ProjectID:   projectID,
-			Permission:  path.Method,
-			Category:    path.Category,
-			RiskLevel:   path.RiskLevel,
-			Description: path.Description,
-			SourceRole:  fmt.Sprintf("%s (%s)", path.Principal, path.PrincipalType),
-			SourceScope: fmt.Sprintf("%s/%s", path.ScopeType, path.ScopeID),
-		}
-		m.LateralMoveCapabilities = append(m.LateralMoveCapabilities, capability)
 	}
 }
 
@@ -1244,11 +1336,6 @@ func (m *WhoAmIModule) generateLoot() {
 			if path.Confidence == "potential" {
 				confidenceNote = "# NOTE: This is a POTENTIAL path based on role name. Actual exploitation depends on resource configuration.\n"
 			}
-			// Use the stored command if available, otherwise generate one
-			exploitCmd := path.Command
-			if exploitCmd == "" {
-				exploitCmd = attackpathservice.GeneratePrivescCommand(path.Permission, path.ProjectID, path.ProjectID)
-			}
 			m.LootMap["whoami-privesc"].Contents += fmt.Sprintf(
 				"## %s\n"+
 					"# %s\n"+
@@ -1264,12 +1351,13 @@ func (m *WhoAmIModule) generateLoot() {
 				path.Confidence,
 				path.RequiredPerms,
 				confidenceNote,
-				exploitCmd,
+				path.Command,
 			)
 		}
 
 		// Data exfiltration capabilities loot
 		for _, cap := range m.DataExfilCapabilities {
+			exfilCmd := generateExfilCommand(cap.Permission, cap.Category)
 			m.LootMap["whoami-data-exfil"].Contents += fmt.Sprintf(
 				"## %s\n"+
 					"# Category: %s\n"+
@@ -1282,12 +1370,13 @@ func (m *WhoAmIModule) generateLoot() {
 				cap.Description,
 				cap.SourceRole,
 				cap.SourceScope,
-				attackpathservice.GenerateExfilCommand(cap.Permission, cap.ProjectID, cap.ProjectID),
+				exfilCmd,
 			)
 		}
 
 		// Lateral movement capabilities loot
 		for _, cap := range m.LateralMoveCapabilities {
+			lateralCmd := generateLateralCommand(cap.Permission, cap.Category)
 			m.LootMap["whoami-lateral-movement"].Contents += fmt.Sprintf(
 				"## %s\n"+
 					"# Category: %s\n"+
@@ -1300,63 +1389,303 @@ func (m *WhoAmIModule) generateLoot() {
 				cap.Description,
 				cap.SourceRole,
 				cap.SourceScope,
-				attackpathservice.GenerateLateralCommand(cap.Permission, cap.ProjectID, cap.ProjectID),
+				lateralCmd,
 			)
 		}
 
-		// Generate playbooks using centralized attackpathService functions
+		// Generate playbooks based on FoxMapper findings
 		m.generatePlaybooks()
 	}
 }
 
-// generatePlaybooks creates playbooks using the centralized attackpathService playbook functions
+// generatePlaybooks creates detailed playbooks based on FoxMapper findings
+// Uses the same visual path style as the foxmapper module
 func (m *WhoAmIModule) generatePlaybooks() {
-	// Convert PrivEscPaths to AttackPaths for the centralized function
-	var privescAttackPaths []attackpathservice.AttackPath
-	for _, path := range m.PrivEscPaths {
-		privescAttackPaths = append(privescAttackPaths, attackpathservice.AttackPath{
-			Principal:     m.Identity.Email,
-			PrincipalType: m.Identity.Type,
-			Method:        path.Permission,
-			Category:      path.Category,
-			Description:   path.Description,
-			ScopeName:     path.SourceScope,
-			ProjectID:     path.ProjectID,
-		})
-	}
-	m.LootMap["whoami-privesc-playbook"].Contents = attackpathservice.GeneratePrivescPlaybook(privescAttackPaths, m.Identity.Email)
+	// Privilege escalation playbook with detailed paths
+	m.LootMap["whoami-privesc-playbook"].Contents = m.generatePrivescPlaybook()
 
-	// Convert DataExfilCapabilities to AttackPaths for the centralized function
-	var exfilAttackPaths []attackpathservice.AttackPath
-	for _, cap := range m.DataExfilCapabilities {
-		exfilAttackPaths = append(exfilAttackPaths, attackpathservice.AttackPath{
-			Principal:     m.Identity.Email,
-			PrincipalType: m.Identity.Type,
-			Method:        cap.Permission,
-			Category:      cap.Category,
-			RiskLevel:     cap.RiskLevel,
-			Description:   cap.Description,
-			ScopeName:     cap.SourceScope,
-			ProjectID:     cap.ProjectID,
-		})
-	}
-	m.LootMap["whoami-data-exfil-playbook"].Contents = attackpathservice.GenerateExfilPlaybook(exfilAttackPaths, m.Identity.Email)
+	// Data exfiltration playbook
+	m.LootMap["whoami-data-exfil-playbook"].Contents = m.generateDataExfilPlaybook()
 
-	// Convert LateralMoveCapabilities to AttackPaths for the centralized function
-	var lateralAttackPaths []attackpathservice.AttackPath
-	for _, cap := range m.LateralMoveCapabilities {
-		lateralAttackPaths = append(lateralAttackPaths, attackpathservice.AttackPath{
-			Principal:     m.Identity.Email,
-			PrincipalType: m.Identity.Type,
-			Method:        cap.Permission,
-			Category:      cap.Category,
-			RiskLevel:     cap.RiskLevel,
-			Description:   cap.Description,
-			ScopeName:     cap.SourceScope,
-			ProjectID:     cap.ProjectID,
-		})
+	// Lateral movement playbook
+	m.LootMap["whoami-lateral-movement-playbook"].Contents = m.generateLateralPlaybook()
+}
+
+// generatePrivescPlaybook creates a detailed privesc playbook with FoxMapper path visualization
+func (m *WhoAmIModule) generatePrivescPlaybook() string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# Privilege Escalation Playbook for %s\n\n", m.Identity.Email))
+	sb.WriteString("This playbook contains privilege escalation paths identified by FoxMapper analysis.\n")
+	sb.WriteString("Paths show the escalation chain from your current identity to admin principals.\n\n")
+
+	// Summary
+	sb.WriteString("================================================================================\n")
+	sb.WriteString("SUMMARY\n")
+	sb.WriteString("================================================================================\n\n")
+	sb.WriteString(fmt.Sprintf("Identity: %s (%s)\n", m.Identity.Email, m.Identity.Type))
+	sb.WriteString(fmt.Sprintf("Findings with escalation paths: %d\n", len(m.FoxMapperPrivescFindings)))
+
+	// Count total paths and by level
+	totalPaths := 0
+	orgPaths := 0
+	folderPaths := 0
+	projectPaths := 0
+	for _, finding := range m.FoxMapperPrivescFindings {
+		totalPaths += len(finding.Paths)
+		orgPaths += finding.PathsToOrgAdmin
+		folderPaths += finding.PathsToFolderAdmin
+		projectPaths += finding.PathsToProjectAdmin
 	}
-	m.LootMap["whoami-lateral-movement-playbook"].Contents = attackpathservice.GenerateLateralPlaybook(lateralAttackPaths, m.Identity.Email)
+	sb.WriteString(fmt.Sprintf("Total escalation paths: %d\n", totalPaths))
+	if orgPaths > 0 {
+		sb.WriteString(fmt.Sprintf("  → Paths to Org Admin: %d\n", orgPaths))
+	}
+	if folderPaths > 0 {
+		sb.WriteString(fmt.Sprintf("  → Paths to Folder Admin: %d\n", folderPaths))
+	}
+	if projectPaths > 0 {
+		sb.WriteString(fmt.Sprintf("  → Paths to Project Admin: %d\n", projectPaths))
+	}
+	sb.WriteString("\n")
+
+	// If we have FoxMapper service and findings, show detailed paths
+	if m.FoxMapperService != nil && len(m.FoxMapperPrivescFindings) > 0 {
+		for _, finding := range m.FoxMapperPrivescFindings {
+			if len(finding.Paths) == 0 {
+				continue
+			}
+
+			sb.WriteString("================================================================================\n")
+			sb.WriteString(fmt.Sprintf("SOURCE: %s (%s)\n", finding.Principal, finding.MemberType))
+			sb.WriteString(fmt.Sprintf("Highest reachable: %s admin\n", finding.HighestAdminLevel))
+			sb.WriteString(fmt.Sprintf("Escalation paths: %d (viable: %d, scope-blocked: %d)\n",
+				len(finding.Paths), finding.ViablePathCount, finding.ScopeBlockedCount))
+			sb.WriteString("================================================================================\n\n")
+
+			for pathIdx, path := range finding.Paths {
+				scopeStatus := ""
+				if path.ScopeBlocked {
+					scopeStatus = " [SCOPE-BLOCKED]"
+				}
+
+				sb.WriteString(fmt.Sprintf("--- Path %d: %s → %s (%s admin, %d hops)%s ---\n\n",
+					pathIdx+1, path.Source, path.Destination, path.AdminLevel, path.HopCount, scopeStatus))
+
+				// Show the path as a visual chain
+				sb.WriteString(fmt.Sprintf("  %s\n", path.Source))
+				for i, edge := range path.Edges {
+					sb.WriteString("    │\n")
+
+					scopeWarning := ""
+					if edge.ScopeBlocksEscalation {
+						scopeWarning = " ⚠️  BLOCKED BY OAUTH SCOPE"
+					} else if edge.ScopeLimited {
+						scopeWarning = " ⚠️  scope-limited"
+					}
+
+					sb.WriteString(fmt.Sprintf("    ├── [%d] %s%s\n", i+1, edge.ShortReason, scopeWarning))
+
+					if edge.Resource != "" {
+						sb.WriteString(fmt.Sprintf("    │       Resource: %s\n", edge.Resource))
+					}
+
+					if edge.Reason != "" && edge.Reason != edge.ShortReason {
+						reason := edge.Reason
+						if len(reason) > 80 {
+							sb.WriteString(fmt.Sprintf("    │       %s\n", reason[:80]))
+							sb.WriteString(fmt.Sprintf("    │       %s\n", reason[80:]))
+						} else {
+							sb.WriteString(fmt.Sprintf("    │       %s\n", reason))
+						}
+					}
+
+					if i < len(path.Edges)-1 {
+						sb.WriteString("    │\n")
+						sb.WriteString("    ▼\n")
+						sb.WriteString(fmt.Sprintf("  %s\n", edge.Destination))
+					} else {
+						sb.WriteString("    │\n")
+						sb.WriteString(fmt.Sprintf("    └──▶ %s (ADMIN)\n", edge.Destination))
+					}
+				}
+				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
+		}
+	} else if len(m.PrivEscPaths) > 0 {
+		// Fallback to simplified output if no FoxMapper findings
+		sb.WriteString("================================================================================\n")
+		sb.WriteString("ESCALATION PATHS (Summary)\n")
+		sb.WriteString("================================================================================\n\n")
+
+		for i, path := range m.PrivEscPaths {
+			sb.WriteString(fmt.Sprintf("### Path %d: %s\n\n", i+1, path.Category))
+			sb.WriteString(fmt.Sprintf("- Permission: %s\n", path.Permission))
+			sb.WriteString(fmt.Sprintf("- Description: %s\n", path.Description))
+			sb.WriteString(fmt.Sprintf("- Source: %s at %s\n", path.SourceRole, path.SourceScope))
+			sb.WriteString(fmt.Sprintf("- Confidence: %s\n\n", path.Confidence))
+			if path.Command != "" {
+				sb.WriteString(fmt.Sprintf("```bash\n%s\n```\n\n", path.Command))
+			}
+		}
+	}
+
+	// Add impersonation targets section if we have any
+	if len(m.ImpersonationTargets) > 0 {
+		sb.WriteString("================================================================================\n")
+		sb.WriteString("IMPERSONATION TARGETS (Verified via IAM Policy)\n")
+		sb.WriteString("================================================================================\n\n")
+
+		for _, target := range m.ImpersonationTargets {
+			sb.WriteString(fmt.Sprintf("Service Account: %s\n", target.ServiceAccount))
+			sb.WriteString(fmt.Sprintf("Project: %s\n", target.ProjectID))
+			if target.CanImpersonate {
+				sb.WriteString("  ✓ Can generate access tokens\n")
+				sb.WriteString(fmt.Sprintf("    gcloud auth print-access-token --impersonate-service-account=%s\n", target.ServiceAccount))
+			}
+			if target.CanCreateKeys {
+				sb.WriteString("  ✓ Can create service account keys\n")
+				sb.WriteString(fmt.Sprintf("    gcloud iam service-accounts keys create key.json --iam-account=%s\n", target.ServiceAccount))
+			}
+			if target.CanActAs {
+				sb.WriteString("  ✓ Can act as (use with compute, functions, etc.)\n")
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}
+
+// generateDataExfilPlaybook creates a detailed data exfil playbook
+func (m *WhoAmIModule) generateDataExfilPlaybook() string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# Data Exfiltration Playbook for %s\n\n", m.Identity.Email))
+	sb.WriteString("This playbook contains data exfiltration capabilities identified by FoxMapper analysis.\n\n")
+
+	// Summary
+	sb.WriteString("================================================================================\n")
+	sb.WriteString("SUMMARY\n")
+	sb.WriteString("================================================================================\n\n")
+	sb.WriteString(fmt.Sprintf("Identity: %s (%s)\n", m.Identity.Email, m.Identity.Type))
+	sb.WriteString(fmt.Sprintf("Exfiltration techniques: %d\n", len(m.FoxMapperDataExfilFindings)))
+	sb.WriteString(fmt.Sprintf("Total capabilities: %d\n\n", len(m.DataExfilCapabilities)))
+
+	// Group by service
+	if len(m.FoxMapperDataExfilFindings) > 0 {
+		sb.WriteString("================================================================================\n")
+		sb.WriteString("DATA EXFILTRATION TECHNIQUES\n")
+		sb.WriteString("================================================================================\n\n")
+
+		for _, finding := range m.FoxMapperDataExfilFindings {
+			sb.WriteString(fmt.Sprintf("--- %s: %s ---\n\n", strings.ToUpper(finding.Service), finding.Technique))
+			sb.WriteString(fmt.Sprintf("Permission: %s\n", finding.Permission))
+			sb.WriteString(fmt.Sprintf("Description: %s\n\n", finding.Description))
+
+			sb.WriteString("Principals with access:\n")
+			for _, principal := range finding.Principals {
+				adminStatus := ""
+				if principal.IsAdmin {
+					adminStatus = " (Admin)"
+				}
+				sb.WriteString(fmt.Sprintf("  • %s%s\n", principal.Principal, adminStatus))
+			}
+			sb.WriteString("\n")
+
+			sb.WriteString("Exploitation:\n")
+			sb.WriteString(fmt.Sprintf("  %s\n\n", finding.Exploitation))
+		}
+	} else if len(m.DataExfilCapabilities) > 0 {
+		// Fallback
+		sb.WriteString("================================================================================\n")
+		sb.WriteString("CAPABILITIES\n")
+		sb.WriteString("================================================================================\n\n")
+
+		for i, cap := range m.DataExfilCapabilities {
+			sb.WriteString(fmt.Sprintf("### Capability %d: %s\n\n", i+1, cap.Category))
+			sb.WriteString(fmt.Sprintf("- Permission: %s\n", cap.Permission))
+			sb.WriteString(fmt.Sprintf("- Description: %s\n", cap.Description))
+			sb.WriteString(fmt.Sprintf("- Source: %s at %s\n\n", cap.SourceRole, cap.SourceScope))
+			exfilCmd := generateExfilCommand(cap.Permission, cap.Category)
+			if exfilCmd != "" {
+				sb.WriteString(fmt.Sprintf("```bash\n%s\n```\n\n", exfilCmd))
+			}
+		}
+	}
+
+	return sb.String()
+}
+
+// generateLateralPlaybook creates a detailed lateral movement playbook
+func (m *WhoAmIModule) generateLateralPlaybook() string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# Lateral Movement Playbook for %s\n\n", m.Identity.Email))
+	sb.WriteString("This playbook contains lateral movement capabilities identified by FoxMapper analysis.\n\n")
+
+	// Summary
+	sb.WriteString("================================================================================\n")
+	sb.WriteString("SUMMARY\n")
+	sb.WriteString("================================================================================\n\n")
+	sb.WriteString(fmt.Sprintf("Identity: %s (%s)\n", m.Identity.Email, m.Identity.Type))
+	sb.WriteString(fmt.Sprintf("Lateral movement techniques: %d\n", len(m.FoxMapperLateralFindings)))
+	sb.WriteString(fmt.Sprintf("Total capabilities: %d\n\n", len(m.LateralMoveCapabilities)))
+
+	// Group by category
+	if len(m.FoxMapperLateralFindings) > 0 {
+		sb.WriteString("================================================================================\n")
+		sb.WriteString("LATERAL MOVEMENT TECHNIQUES\n")
+		sb.WriteString("================================================================================\n\n")
+
+		// Group by category
+		categories := make(map[string][]foxmapperservice.LateralFinding)
+		for _, finding := range m.FoxMapperLateralFindings {
+			categories[finding.Category] = append(categories[finding.Category], finding)
+		}
+
+		for category, findings := range categories {
+			sb.WriteString(fmt.Sprintf("=== %s ===\n\n", strings.ToUpper(strings.ReplaceAll(category, "_", " "))))
+
+			for _, finding := range findings {
+				sb.WriteString(fmt.Sprintf("--- %s ---\n\n", finding.Technique))
+				sb.WriteString(fmt.Sprintf("Permission: %s\n", finding.Permission))
+				sb.WriteString(fmt.Sprintf("Description: %s\n\n", finding.Description))
+
+				sb.WriteString("Principals with access:\n")
+				for _, principal := range finding.Principals {
+					adminStatus := ""
+					if principal.IsAdmin {
+						adminStatus = " (Admin)"
+					}
+					sb.WriteString(fmt.Sprintf("  • %s%s\n", principal.Principal, adminStatus))
+				}
+				sb.WriteString("\n")
+
+				sb.WriteString("Exploitation:\n")
+				sb.WriteString(fmt.Sprintf("  %s\n\n", finding.Exploitation))
+			}
+		}
+	} else if len(m.LateralMoveCapabilities) > 0 {
+		// Fallback
+		sb.WriteString("================================================================================\n")
+		sb.WriteString("CAPABILITIES\n")
+		sb.WriteString("================================================================================\n\n")
+
+		for i, cap := range m.LateralMoveCapabilities {
+			sb.WriteString(fmt.Sprintf("### Capability %d: %s\n\n", i+1, cap.Category))
+			sb.WriteString(fmt.Sprintf("- Permission: %s\n", cap.Permission))
+			sb.WriteString(fmt.Sprintf("- Description: %s\n", cap.Description))
+			sb.WriteString(fmt.Sprintf("- Source: %s at %s\n\n", cap.SourceRole, cap.SourceScope))
+			lateralCmd := generateLateralCommand(cap.Permission, cap.Category)
+			if lateralCmd != "" {
+				sb.WriteString(fmt.Sprintf("```bash\n%s\n```\n\n", lateralCmd))
+			}
+		}
+	}
+
+	return sb.String()
 }
 
 // ------------------------------

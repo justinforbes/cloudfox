@@ -50,11 +50,11 @@ type SecretsModule struct {
 	gcpinternal.BaseGCPModule
 
 	// Module-specific fields - per-project for hierarchical output
-	ProjectSecrets  map[string][]SecretsService.SecretInfo   // projectID -> secrets
-	LootMap         map[string]map[string]*internal.LootFile // projectID -> loot files
-	AttackPathCache *gcpinternal.AttackPathCache             // Cached attack path analysis results
-	client          *secretmanager.Client
-	mu              sync.Mutex
+	ProjectSecrets map[string][]SecretsService.SecretInfo   // projectID -> secrets
+	LootMap        map[string]map[string]*internal.LootFile // projectID -> loot files
+	FoxMapperCache *gcpinternal.FoxMapperCache              // Cached FoxMapper analysis results
+	client         *secretmanager.Client
+	mu             sync.Mutex
 }
 
 // ------------------------------
@@ -102,17 +102,10 @@ func runGCPSecretsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *SecretsModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_SECRETS_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
+	// Get FoxMapper cache for graph-based analysis
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_SECRETS_MODULE_NAME)
 	}
 
 	// Run enumeration with concurrency
@@ -457,13 +450,9 @@ func (m *SecretsModule) secretsToTableBody(secrets []SecretsService.SecretInfo) 
 					// Check attack paths for service account principals
 					attackPaths := "-"
 					if memberType == "ServiceAccount" {
-						if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-							// Extract email from member string (serviceAccount:email@...)
-							email := strings.TrimPrefix(member, "serviceAccount:")
-							attackPaths = m.AttackPathCache.GetAttackSummary(email)
-						} else {
-							attackPaths = "run --attack-paths"
-						}
+						// Extract email from member string (serviceAccount:email@...)
+						email := strings.TrimPrefix(member, "serviceAccount:")
+						attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, email)
 					}
 
 					body = append(body, []string{

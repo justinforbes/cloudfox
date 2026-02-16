@@ -66,14 +66,14 @@ Single project analysis (-p) will have limited results.`,
 type CrossProjectModule struct {
 	gcpinternal.BaseGCPModule
 
-	CrossBindings         []crossprojectservice.CrossProjectBinding
-	CrossProjectSAs       []crossprojectservice.CrossProjectServiceAccount
-	LateralMovementPaths  []crossprojectservice.LateralMovementPath
-	CrossProjectSinks     []crossprojectservice.CrossProjectLoggingSink
-	CrossProjectPubSub    []crossprojectservice.CrossProjectPubSubExport
-	LootMap               map[string]*internal.LootFile
-	AttackPathCache       *gcpinternal.AttackPathCache
-	OrgCache              *gcpinternal.OrgCache
+	CrossBindings        []crossprojectservice.CrossProjectBinding
+	CrossProjectSAs      []crossprojectservice.CrossProjectServiceAccount
+	LateralMovementPaths []crossprojectservice.LateralMovementPath
+	CrossProjectSinks    []crossprojectservice.CrossProjectLoggingSink
+	CrossProjectPubSub   []crossprojectservice.CrossProjectPubSubExport
+	LootMap              map[string]*internal.LootFile
+	FoxMapperCache       *gcpinternal.FoxMapperCache
+	OrgCache             *gcpinternal.OrgCache
 }
 
 // ------------------------------
@@ -118,17 +118,10 @@ func runGCPCrossProjectCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *CrossProjectModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_CROSSPROJECT_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
+	// Get FoxMapper cache for graph-based analysis
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_CROSSPROJECT_MODULE_NAME)
 	}
 
 	// Get org cache from context (populated by --org-cache flag or all-checks)
@@ -371,31 +364,8 @@ func (m *CrossProjectModule) getImpersonationTarget(principal, role, targetProje
 		return "-", "-"
 	}
 
-	// Try to get impersonation targets from cache
-	if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-		cleanedPrincipal := cleanPrincipal(principal)
-		targets := m.AttackPathCache.GetImpersonationTargets(cleanedPrincipal)
-		if len(targets) > 0 {
-			// Filter targets to those in the target project
-			var projectTargets []string
-			for _, t := range targets {
-				if strings.Contains(t, targetProject) {
-					projectTargets = append(projectTargets, t)
-				}
-			}
-			if len(projectTargets) > 0 {
-				if len(projectTargets) == 1 {
-					return "Service Account", projectTargets[0]
-				}
-				return "Service Account", fmt.Sprintf("%d SAs", len(projectTargets))
-			}
-			// If no project-specific targets, show all targets
-			if len(targets) == 1 {
-				return "Service Account", targets[0]
-			}
-			return "Service Account", fmt.Sprintf("%d SAs", len(targets))
-		}
-	}
+	// FoxMapper handles impersonation differently via graph edges
+	// Since we no longer use AttackPathCache, we rely on FoxMapper or show a generic message
 
 	// No specific targets found in cache - this likely means the role was granted at the
 	// project level (not on specific SAs), which means ALL SAs in the target project can be impersonated
@@ -454,16 +424,12 @@ func extractCrossProjectResourceName(path string) string {
 
 // getAttackPathForTarget returns attack path summary for a principal accessing a target project
 func (m *CrossProjectModule) getAttackPathForTarget(targetProject, principal string) string {
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		return "-"
-	}
-
 	// Clean principal for lookup
 	cleanedPrincipal := cleanPrincipal(principal)
 
 	// Check if this is a service account
 	if strings.Contains(cleanedPrincipal, "@") && strings.Contains(cleanedPrincipal, ".iam.gserviceaccount.com") {
-		return m.AttackPathCache.GetAttackSummary(cleanedPrincipal)
+		return gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, cleanedPrincipal)
 	}
 
 	return "-"

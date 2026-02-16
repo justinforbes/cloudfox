@@ -25,18 +25,29 @@ Features:
 - Shows security configuration (public access prevention, uniform access, versioning)
 - Enumerates IAM policies and identifies public buckets
 - Shows encryption type (Google-managed vs CMEK)
-- Shows retention and soft delete policies
+- Shows retention, soft delete, and lifecycle policies
 - Generates gcloud commands for further enumeration
 - Generates exploitation commands for data access
 
 Security Columns:
 - Public: Whether the bucket has allUsers or allAuthenticatedUsers access
-- PublicAccessPrevention: "enforced" prevents public access at org/project level
-- UniformAccess: true means IAM-only (no ACLs), recommended for security
-- Versioning: Object versioning enabled (helps with recovery/compliance)
-- Logging: Access logging enabled (audit trail)
-- Encryption: "Google-managed" or "CMEK" (customer-managed keys)
-- Retention: Data retention policy (compliance/immutability)`,
+- Public Access Prevention:
+    "enforced" = Public access blocked at bucket level
+    "inherited" = Inherits from project/org (may allow public if not blocked above)
+    "unspecified" = No prevention (most permissive)
+- Uniform Access:
+    "Yes" = IAM-only access control (recommended, no ACLs)
+    "No (ACLs)" = Legacy ACLs enabled - access can be granted at object level
+                  bypassing bucket IAM, harder to audit
+- Soft Delete: Retention period for deleted objects (ransomware protection)
+    "No" = Deleted objects are immediately removed
+    "Xd" = Deleted objects retained for X days before permanent deletion
+- Lifecycle: Automated object management rules
+    "Delete@Xd" = Objects auto-deleted after X days (data loss risk if short)
+    "Archive" = Objects transitioned to cheaper storage classes
+    "X rules" = Number of lifecycle rules configured
+- Versioning: Object versioning (helps recovery, compliance)
+- Encryption: "Google-managed" or "CMEK" (customer-managed keys)`,
 	Run: runGCPBucketsCommand,
 }
 
@@ -49,7 +60,7 @@ type BucketsModule struct {
 	// Module-specific fields - per-project for hierarchical output
 	ProjectBuckets  map[string][]CloudStorageService.BucketInfo // projectID -> buckets
 	LootMap         map[string]map[string]*internal.LootFile    // projectID -> loot files
-	AttackPathCache *gcpinternal.AttackPathCache                // Cached attack path analysis results
+	FoxMapperCache  *gcpinternal.FoxMapperCache                 // FoxMapper graph data (preferred)
 	mu              sync.Mutex
 }
 
@@ -89,17 +100,10 @@ func runGCPBucketsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *BucketsModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_BUCKETS_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
+	// Try to get FoxMapper cache (preferred - graph-based analysis)
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_BUCKETS_MODULE_NAME)
 	}
 
 	// Run enumeration with concurrency
@@ -359,8 +363,11 @@ func (m *BucketsModule) getTableHeader() []string {
 		"Name",
 		"Location",
 		"Public",
-		"Versioning",
+		"Public Access Prevention",
 		"Uniform Access",
+		"Soft Delete",
+		"Lifecycle",
+		"Versioning",
 		"Encryption",
 		"IAM Binding Role",
 		"Principal Type",
@@ -379,6 +386,41 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 			publicDisplay = bucket.PublicAccess
 		}
 
+		// Format soft delete
+		softDeleteDisplay := "No"
+		if bucket.SoftDeleteEnabled {
+			softDeleteDisplay = fmt.Sprintf("%dd", bucket.SoftDeleteRetentionDays)
+		}
+
+		// Format lifecycle - show delete rule age if present
+		lifecycleDisplay := "No"
+		if bucket.LifecycleEnabled {
+			if bucket.HasDeleteRule && bucket.ShortestDeleteDays > 0 {
+				lifecycleDisplay = fmt.Sprintf("Delete@%dd", bucket.ShortestDeleteDays)
+			} else if bucket.HasArchiveRule {
+				lifecycleDisplay = "Archive"
+			} else {
+				lifecycleDisplay = fmt.Sprintf("%d rules", bucket.LifecycleRuleCount)
+			}
+		}
+
+		// Format uniform access - highlight security concern if disabled
+		uniformAccessDisplay := "Yes"
+		if !bucket.UniformBucketLevelAccess {
+			uniformAccessDisplay = "No (ACLs)"
+		}
+
+		// Format encryption - show KMS key if CMEK
+		encryptionDisplay := bucket.EncryptionType
+		if bucket.EncryptionType == "CMEK" && bucket.KMSKeyName != "" {
+			// Extract just the key name from the full path for display
+			// Format: projects/PROJECT/locations/LOCATION/keyRings/RING/cryptoKeys/KEY
+			keyParts := strings.Split(bucket.KMSKeyName, "/")
+			if len(keyParts) >= 2 {
+				encryptionDisplay = fmt.Sprintf("CMEK (%s)", keyParts[len(keyParts)-1])
+			}
+		}
+
 		// One row per IAM member
 		if len(bucket.IAMBindings) > 0 {
 			for _, binding := range bucket.IAMBindings {
@@ -388,13 +430,9 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 					// Check attack paths for service account principals
 					attackPaths := "-"
 					if memberType == "ServiceAccount" {
-						if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-							// Extract email from member string (serviceAccount:email@...)
-							email := strings.TrimPrefix(member, "serviceAccount:")
-							attackPaths = m.AttackPathCache.GetAttackSummary(email)
-						} else {
-							attackPaths = "run --attack-paths"
-						}
+						// Extract email from member string (serviceAccount:email@...)
+						email := strings.TrimPrefix(member, "serviceAccount:")
+						attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, email)
 					}
 
 					body = append(body, []string{
@@ -402,9 +440,12 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 						bucket.Name,
 						bucket.Location,
 						publicDisplay,
+						bucket.PublicAccessPrevention,
+						uniformAccessDisplay,
+						softDeleteDisplay,
+						lifecycleDisplay,
 						shared.BoolToYesNo(bucket.VersioningEnabled),
-						shared.BoolToYesNo(bucket.UniformBucketLevelAccess),
-						bucket.EncryptionType,
+						encryptionDisplay,
 						binding.Role,
 						memberType,
 						member,
@@ -419,9 +460,12 @@ func (m *BucketsModule) bucketsToTableBody(buckets []CloudStorageService.BucketI
 				bucket.Name,
 				bucket.Location,
 				publicDisplay,
+				bucket.PublicAccessPrevention,
+				uniformAccessDisplay,
+				softDeleteDisplay,
+				lifecycleDisplay,
 				shared.BoolToYesNo(bucket.VersioningEnabled),
-				shared.BoolToYesNo(bucket.UniformBucketLevelAccess),
-				bucket.EncryptionType,
+				encryptionDisplay,
 				"-",
 				"-",
 				"-",

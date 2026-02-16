@@ -39,7 +39,7 @@ type CloudBuildModule struct {
 	ProjectBuilds           map[string][]cloudbuildservice.BuildInfo               // projectID -> builds
 	ProjectSecurityAnalysis map[string][]cloudbuildservice.TriggerSecurityAnalysis // projectID -> analysis
 	LootMap                 map[string]map[string]*internal.LootFile               // projectID -> loot files
-	AttackPathCache         *gcpinternal.AttackPathCache                           // Cached attack path analysis results
+	FoxMapperCache          *gcpinternal.FoxMapperCache                            // Cached FoxMapper attack path analysis results
 	mu                      sync.Mutex
 }
 
@@ -78,8 +78,8 @@ func runGCPCloudBuildCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *CloudBuildModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
+	// Get FoxMapper cache from context
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_CLOUDBUILD_MODULE_NAME, m.processProject)
 
@@ -348,9 +348,9 @@ func (m *CloudBuildModule) triggersToTableBody(triggers []cloudbuildservice.Trig
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
 		attackPaths := "run --attack-paths"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
+		if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
-				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
+				attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sa)
 			} else {
 				attackPaths = "No"
 			}

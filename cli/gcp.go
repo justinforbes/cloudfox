@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/BishopFox/cloudfox/gcp/commands"
-	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
 	oauthservice "github.com/BishopFox/cloudfox/gcp/services/oauthService"
 	orgsservice "github.com/BishopFox/cloudfox/gcp/services/organizationsService"
 	"github.com/BishopFox/cloudfox/internal"
@@ -126,15 +125,29 @@ var (
 			// Get account for cache operations
 			account, _ := ctx.Value("account").(string)
 
-			// If --attack-paths flag is set, load or run attack path analysis
+			// If --attack-paths flag is set, try to load FoxMapper data
 			// This allows individual modules to show the Attack Paths column
 			if GCPAttackPaths && len(GCPProjectIDs) > 0 {
-				GCPLogger.InfoM("Loading/running attack path analysis (privesc/exfil/lateral)...", "gcp")
-				attackPathCache := loadOrRunAttackPathAnalysis(ctx, GCPRefreshCache)
-				if attackPathCache != nil && attackPathCache.IsPopulated() {
-					ctx = gcpinternal.SetAttackPathCacheInContext(ctx, attackPathCache)
-					privesc, exfil, lateral := attackPathCache.GetStats()
-					GCPLogger.SuccessM(fmt.Sprintf("Attack path cache ready: %d privesc, %d exfil, %d lateral - modules will show Attack Paths column", privesc, exfil, lateral), "gcp")
+				GCPLogger.InfoM("Looking for FoxMapper graph data...", "gcp")
+
+				// Get org ID from hierarchy if available (GCPOrganization flag may be empty)
+				orgID := GCPOrganization
+				if orgID == "" {
+					if hierarchy, ok := ctx.Value("hierarchy").(*gcpinternal.ScopeHierarchy); ok && hierarchy != nil {
+						if len(hierarchy.Organizations) > 0 {
+							orgID = hierarchy.Organizations[0].ID
+						}
+					}
+				}
+
+				foxMapperCache := gcpinternal.TryLoadFoxMapper(orgID, GCPProjectIDs)
+				if foxMapperCache != nil && foxMapperCache.IsPopulated() {
+					ctx = gcpinternal.SetFoxMapperCacheInContext(ctx, foxMapperCache)
+					totalNodes, adminNodes, nodesWithPrivesc := foxMapperCache.GetStats()
+					GCPLogger.SuccessM(fmt.Sprintf("FoxMapper data loaded: %d principals, %d admins, %d with privesc - modules will show Attack Paths column",
+						totalNodes, adminNodes, nodesWithPrivesc), "gcp")
+				} else {
+					GCPLogger.InfoM("No FoxMapper data found. Run 'foxmapper gcp graph create' to generate graph data for attack path analysis.", "gcp")
 				}
 			}
 
@@ -258,27 +271,35 @@ var GCPAllChecksCommand = &cobra.Command{
 			}
 		}
 
-		// Run privesc command first (produces output) and populate cache for other modules
+		// Run privesc command first (produces output) and load FoxMapper data for other modules
 		if privescCmd != nil {
 			GCPLogger.InfoM("Running privilege escalation analysis first...", "all-checks")
 			privescCmd.Run(cmd, args)
 			executedModules = append(executedModules, "privesc")
 
-			// After running privesc, load or populate attack path cache for other modules
-			// BUT only if cache wasn't already populated by --attack-paths flag in PersistentPreRun
-			existingCache := gcpinternal.GetAttackPathCacheFromContext(ctx)
-			if existingCache != nil && existingCache.IsPopulated() {
-				// Cache already populated by --attack-paths flag, reuse it
-				privesc, exfil, lateral := existingCache.GetStats()
-				GCPLogger.InfoM(fmt.Sprintf("Using existing attack path cache: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "all-checks")
+			// After running privesc, try to load FoxMapper data for other modules
+			existingFoxMapper := gcpinternal.GetFoxMapperCacheFromContext(ctx)
+			if existingFoxMapper != nil && existingFoxMapper.IsPopulated() {
+				totalNodes, adminNodes, nodesWithPrivesc := existingFoxMapper.GetStats()
+				GCPLogger.InfoM(fmt.Sprintf("Using existing FoxMapper cache: %d principals, %d admins, %d with privesc", totalNodes, adminNodes, nodesWithPrivesc), "all-checks")
 			} else {
-				// Load from disk or run analysis
-				attackPathCache := loadOrRunAttackPathAnalysis(ctx, GCPRefreshCache)
-				if attackPathCache != nil && attackPathCache.IsPopulated() {
-					ctx = gcpinternal.SetAttackPathCacheInContext(ctx, attackPathCache)
+				// Get org ID from org cache if available (GCPOrganization flag may be empty)
+				orgID := GCPOrganization
+				if orgID == "" {
+					if orgCache := gcpinternal.GetOrgCacheFromContext(ctx); orgCache != nil && len(orgCache.Organizations) > 0 {
+						orgID = orgCache.Organizations[0].ID
+					}
+				}
+
+				// Try to load FoxMapper data
+				foxMapperCache := gcpinternal.TryLoadFoxMapper(orgID, GCPProjectIDs)
+				if foxMapperCache != nil && foxMapperCache.IsPopulated() {
+					ctx = gcpinternal.SetFoxMapperCacheInContext(ctx, foxMapperCache)
 					cmd.SetContext(ctx)
-					privesc, exfil, lateral := attackPathCache.GetStats()
-					GCPLogger.SuccessM(fmt.Sprintf("Attack path cache ready: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "all-checks")
+					totalNodes, adminNodes, nodesWithPrivesc := foxMapperCache.GetStats()
+					GCPLogger.SuccessM(fmt.Sprintf("FoxMapper data loaded: %d principals, %d admins, %d with privesc", totalNodes, adminNodes, nodesWithPrivesc), "all-checks")
+				} else {
+					GCPLogger.InfoM("No FoxMapper data found. Run 'foxmapper gcp graph create' for attack path analysis.", "all-checks")
 				}
 			}
 			GCPLogger.InfoM("", "all-checks")
@@ -313,122 +334,6 @@ var GCPAllChecksCommand = &cobra.Command{
 		duration := time.Since(startTime)
 		printExecutionSummary(executedModules, duration)
 	},
-}
-
-// loadOrRunAttackPathAnalysis loads attack path cache from disk if available, or runs analysis and saves it
-func loadOrRunAttackPathAnalysis(ctx context.Context, forceRefresh bool) *gcpinternal.AttackPathCache {
-	account, _ := ctx.Value("account").(string)
-
-	// Check if cache exists and we're not forcing refresh
-	if !forceRefresh && gcpinternal.AttackPathCacheExists(GCPOutputDirectory, account) {
-		// Check if cache is stale (older than 24 hours)
-		if gcpinternal.IsCacheStale(GCPOutputDirectory, account, "attack-paths", gcpinternal.DefaultCacheExpiration) {
-			age, _ := gcpinternal.GetCacheAge(GCPOutputDirectory, account, "attack-paths")
-			GCPLogger.InfoM(fmt.Sprintf("Attack path cache is stale (age: %s > 24h), refreshing...", formatDuration(age)), "gcp")
-		} else {
-			cache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(GCPOutputDirectory, account)
-			if err == nil && cache != nil {
-				age, _ := gcpinternal.GetCacheAge(GCPOutputDirectory, account, "attack-paths")
-				privesc, exfil, lateral := cache.GetStats()
-				GCPLogger.InfoM(fmt.Sprintf("Loaded attack path cache from disk (age: %s, %d projects analyzed, P:%d E:%d L:%d)",
-					formatDuration(age), len(metadata.ProjectsIn), privesc, exfil, lateral), "gcp")
-				return cache
-			}
-			if err != nil {
-				GCPLogger.InfoM(fmt.Sprintf("Could not load attack path cache: %v, re-analyzing...", err), "gcp")
-				// Delete corrupted cache file
-				gcpinternal.DeleteCache(GCPOutputDirectory, account, "attack-paths")
-			}
-		}
-	}
-
-	// Run analysis and create cache
-	return runAttackPathAnalysisAndSave(ctx)
-}
-
-// runAttackPathAnalysisAndSave runs attack path analysis and saves to disk
-func runAttackPathAnalysisAndSave(ctx context.Context) *gcpinternal.AttackPathCache {
-	cache := gcpinternal.NewAttackPathCache()
-
-	// Get project IDs from context
-	projectIDs, ok := ctx.Value("projectIDs").([]string)
-	if !ok || len(projectIDs) == 0 {
-		return cache
-	}
-
-	// Get account from context
-	account, _ := ctx.Value("account").(string)
-
-	// Get project names from context
-	projectNames, _ := ctx.Value("projectNames").(map[string]string)
-	if projectNames == nil {
-		projectNames = make(map[string]string)
-	}
-
-	// Use unified attackpathService for all 3 types
-	svc := attackpathservice.New()
-
-	// Run analysis for all attack path types
-	result, err := svc.CombinedAttackPathAnalysis(ctx, projectIDs, projectNames, "all")
-	if err != nil {
-		GCPLogger.ErrorM(fmt.Sprintf("Failed to run attack path analysis: %v", err), "gcp")
-		return cache
-	}
-
-	// Store raw data for modules that need full details (like privesc)
-	cache.SetRawData(result)
-
-	// Convert paths to cache format
-	var pathInfos []gcpinternal.AttackPathInfo
-	for _, path := range result.AllPaths {
-		var pathType gcpinternal.AttackPathType
-		switch path.PathType {
-		case "privesc":
-			pathType = gcpinternal.AttackPathPrivesc
-		case "exfil":
-			pathType = gcpinternal.AttackPathExfil
-		case "lateral":
-			pathType = gcpinternal.AttackPathLateral
-		default:
-			continue
-		}
-
-		pathInfos = append(pathInfos, gcpinternal.AttackPathInfo{
-			Principal:     path.Principal,
-			PrincipalType: path.PrincipalType,
-			Method:        path.Method,
-			PathType:      pathType,
-			Category:      path.Category,
-			RiskLevel:     path.RiskLevel,
-			Target:        path.TargetResource,
-			Permissions:   path.Permissions,
-			ScopeType:     path.ScopeType,
-			ScopeID:       path.ScopeID,
-		})
-	}
-
-	// Populate cache
-	cache.PopulateFromPaths(pathInfos)
-
-	// Save to disk
-	err = gcpinternal.SaveAttackPathCacheToFile(cache, projectIDs, GCPOutputDirectory, account, "2.0.0")
-	if err != nil {
-		GCPLogger.InfoM(fmt.Sprintf("Could not save attack path cache to disk: %v", err), "gcp")
-	} else {
-		cacheDir := gcpinternal.GetCacheDirectory(GCPOutputDirectory, account)
-		GCPLogger.InfoM(fmt.Sprintf("Attack path cache saved to %s", cacheDir), "gcp")
-	}
-
-	privesc, exfil, lateral := cache.GetStats()
-	GCPLogger.InfoM(fmt.Sprintf("Attack path analysis: %d privesc, %d exfil, %d lateral", privesc, exfil, lateral), "gcp")
-
-	return cache
-}
-
-// runPrivescAndPopulateCache is kept for backward compatibility
-// DEPRECATED: Use loadOrRunAttackPathAnalysis instead
-func runPrivescAndPopulateCache(ctx context.Context) *gcpinternal.PrivescCache {
-	return runAttackPathAnalysisAndSave(ctx)
 }
 
 // loadOrPopulateOrgCache loads org cache from disk if available, or enumerates and saves it
@@ -665,6 +570,7 @@ func init() {
 		commands.GCPLateralMovementCommand,
 		commands.GCPDataExfiltrationCommand,
 		commands.GCPPublicAccessCommand,
+		commands.GCPFoxMapperCommand,
 
 		// Inventory command
 		commands.GCPInventoryCommand,

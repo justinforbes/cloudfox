@@ -403,8 +403,18 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// ServiceAccounts retrieves all service accounts in a project with detailed info
+// ServiceAccounts retrieves all service accounts in a project with detailed info (including keys)
 func (s *IAMService) ServiceAccounts(projectID string) ([]ServiceAccountInfo, error) {
+	return s.serviceAccountsInternal(projectID, true)
+}
+
+// ServiceAccountsBasic retrieves service accounts without querying keys (faster, fewer permissions needed)
+func (s *IAMService) ServiceAccountsBasic(projectID string) ([]ServiceAccountInfo, error) {
+	return s.serviceAccountsInternal(projectID, false)
+}
+
+// serviceAccountsInternal retrieves service accounts with optional key enumeration
+func (s *IAMService) serviceAccountsInternal(projectID string, includeKeys bool) ([]ServiceAccountInfo, error) {
 	ctx := context.Background()
 	iamService, err := s.getIAMService(ctx)
 	if err != nil {
@@ -428,24 +438,26 @@ func (s *IAMService) ServiceAccounts(projectID string) ([]ServiceAccountInfo, er
 				OAuth2ClientID: sa.Oauth2ClientId,
 			}
 
-			// Get keys for this service account
-			keys, err := s.getServiceAccountKeys(ctx, iamService, sa.Name)
-			if err != nil {
-				// Log but don't fail - we might not have permission
-				parsedErr := gcpinternal.ParseGCPError(err, "iam.googleapis.com")
-				gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_IAM_MODULE_NAME,
-					fmt.Sprintf("Could not list keys for %s", sa.Email))
-			} else {
-				saInfo.Keys = keys
-				// Count user-managed keys only
-				userManagedCount := 0
-				for _, key := range keys {
-					if key.KeyType == "USER_MANAGED" {
-						userManagedCount++
+			// Get keys for this service account (only if requested)
+			if includeKeys {
+				keys, err := s.getServiceAccountKeys(ctx, iamService, sa.Name)
+				if err != nil {
+					// Log but don't fail - we might not have permission
+					parsedErr := gcpinternal.ParseGCPError(err, "iam.googleapis.com")
+					gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_IAM_MODULE_NAME,
+						fmt.Sprintf("Could not list keys for %s", sa.Email))
+				} else {
+					saInfo.Keys = keys
+					// Count user-managed keys only
+					userManagedCount := 0
+					for _, key := range keys {
+						if key.KeyType == "USER_MANAGED" {
+							userManagedCount++
+						}
 					}
+					saInfo.KeyCount = userManagedCount
+					saInfo.HasKeys = userManagedCount > 0
 				}
-				saInfo.KeyCount = userManagedCount
-				saInfo.HasKeys = userManagedCount > 0
 			}
 
 			serviceAccounts = append(serviceAccounts, saInfo)
@@ -711,8 +723,8 @@ func (s *IAMService) CombinedIAM(projectID string) (CombinedIAMData, error) {
 	}
 	data.Principals = principals
 
-	// Get service accounts with details
-	serviceAccounts, err := s.ServiceAccounts(projectID)
+	// Get service accounts (without keys - use ServiceAccounts() if keys needed)
+	serviceAccounts, err := s.ServiceAccountsBasic(projectID)
 	if err != nil {
 		// Don't fail completely
 		gcpinternal.HandleGCPError(err, logger, globals.GCP_IAM_MODULE_NAME,
@@ -817,6 +829,65 @@ func (s *IAMService) PrincipalsWithRolesEnhanced(projectID string) ([]PrincipalW
 // GetMemberType returns the member type for display purposes
 func GetMemberType(member string) string {
 	return determinePrincipalType(member)
+}
+
+// GetRolesForServiceAccount returns all roles assigned to a service account in a project
+// This includes both direct project-level bindings and inherited bindings from folders/org
+func (s *IAMService) GetRolesForServiceAccount(projectID string, saEmail string) ([]string, error) {
+	// Get all bindings with inheritance
+	bindings, err := s.PoliciesWithInheritance(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find roles for this service account
+	saFullIdentifier := "serviceAccount:" + saEmail
+	rolesSet := make(map[string]bool)
+
+	for _, binding := range bindings {
+		for _, member := range binding.Members {
+			if member == saFullIdentifier {
+				rolesSet[binding.Role] = true
+			}
+		}
+	}
+
+	// Convert to slice
+	var roles []string
+	for role := range rolesSet {
+		roles = append(roles, role)
+	}
+
+	return roles, nil
+}
+
+// FormatRolesShort formats roles for compact table display
+// Extracts just the role name from the full path and abbreviates common prefixes
+func FormatRolesShort(roles []string) string {
+	if len(roles) == 0 {
+		return "-"
+	}
+
+	var shortRoles []string
+	for _, role := range roles {
+		// Extract role name from full path
+		shortRole := role
+
+		// Handle different role formats
+		if strings.HasPrefix(role, "roles/") {
+			shortRole = strings.TrimPrefix(role, "roles/")
+		} else if strings.Contains(role, "/roles/") {
+			// Custom role: projects/xxx/roles/MyRole or organizations/xxx/roles/MyRole
+			parts := strings.Split(role, "/roles/")
+			if len(parts) == 2 {
+				shortRole = parts[1] + " (custom)"
+			}
+		}
+
+		shortRoles = append(shortRoles, shortRole)
+	}
+
+	return strings.Join(shortRoles, ", ")
 }
 
 // PermissionEntry represents a single permission with its source information
@@ -1398,8 +1469,8 @@ func (s *IAMService) GetServiceAccountIAMPolicy(ctx context.Context, saEmail str
 func (s *IAMService) GetAllServiceAccountImpersonation(projectID string) ([]SAImpersonationInfo, error) {
 	ctx := context.Background()
 
-	// Get all service accounts
-	serviceAccounts, err := s.ServiceAccounts(projectID)
+	// Get all service accounts (without keys - impersonation analysis doesn't need them)
+	serviceAccounts, err := s.ServiceAccountsBasic(projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -1424,8 +1495,8 @@ func (s *IAMService) GetAllServiceAccountImpersonation(projectID string) ([]SAIm
 func (s *IAMService) ServiceAccountsWithImpersonation(projectID string) ([]ServiceAccountInfo, error) {
 	ctx := context.Background()
 
-	// Get base service account info
-	serviceAccounts, err := s.ServiceAccounts(projectID)
+	// Get base service account info (without keys - impersonation analysis doesn't need them)
+	serviceAccounts, err := s.ServiceAccountsBasic(projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -1880,8 +1951,8 @@ func (s *IAMService) CombinedIAMEnhanced(ctx context.Context, projectIDs []strin
 
 	// Get service accounts and custom roles for each project
 	for _, projectID := range projectIDs {
-		// Service accounts
-		serviceAccounts, err := s.ServiceAccounts(projectID)
+		// Service accounts (without keys)
+		serviceAccounts, err := s.ServiceAccountsBasic(projectID)
 		if err == nil {
 			data.ServiceAccounts = append(data.ServiceAccounts, serviceAccounts...)
 		}

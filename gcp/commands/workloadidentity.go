@@ -75,7 +75,7 @@ type WorkloadIdentityModule struct {
 	ProjectProviders         map[string][]workloadidentityservice.WorkloadIdentityProvider    // projectID -> providers
 	ProjectFederatedBindings map[string][]workloadidentityservice.FederatedIdentityBinding    // projectID -> federated bindings
 	LootMap                  map[string]map[string]*internal.LootFile                         // projectID -> loot files
-	AttackPathCache          *gcpinternal.AttackPathCache                                     // Cached attack path analysis results
+	FoxMapperCache           *gcpinternal.FoxMapperCache                                      // FoxMapper cache for attack path analysis
 	mu                       sync.Mutex
 }
 
@@ -119,17 +119,10 @@ func runGCPWorkloadIdentityCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *WorkloadIdentityModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
+	// Get FoxMapper cache from context
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper cache for attack path analysis", globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME)
 	}
 
 	// Run enumeration with concurrency
@@ -346,9 +339,9 @@ func (m *WorkloadIdentityModule) processProject(ctx context.Context, projectID s
 func (m *WorkloadIdentityModule) findWorkloadIdentityBindings(ctx context.Context, projectID, clusterName, location, workloadPool string, logger internal.Logger) []WorkloadIdentityBinding {
 	var bindings []WorkloadIdentityBinding
 
-	// Get all service accounts in the project and check their IAM policies
+	// Get all service accounts in the project and check their IAM policies (without keys)
 	iamSvc := IAMService.New()
-	serviceAccounts, err := iamSvc.ServiceAccounts(projectID)
+	serviceAccounts, err := iamSvc.ServiceAccountsBasic(projectID)
 	if err != nil {
 		gcpinternal.HandleGCPError(err, logger, globals.GCP_WORKLOAD_IDENTITY_MODULE_NAME,
 			fmt.Sprintf("Could not list service accounts in project %s", projectID))
@@ -843,12 +836,7 @@ func (m *WorkloadIdentityModule) buildTables(
 		}
 
 		// Check attack paths for the GCP service account
-		attackPaths := "-"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-			attackPaths = m.AttackPathCache.GetAttackSummary(binding.GCPServiceAccount)
-		} else {
-			attackPaths = "run --attack-paths"
-		}
+		attackPaths := gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, binding.GCPServiceAccount)
 
 		bindingsBody = append(bindingsBody, []string{
 			m.GetProjectName(binding.ProjectID),
@@ -961,12 +949,7 @@ func (m *WorkloadIdentityModule) buildTables(
 		var fedBindingsBody [][]string
 		for _, fb := range federatedBindings {
 			// Check attack paths for the GCP service account
-			attackPaths := "-"
-			if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-				attackPaths = m.AttackPathCache.GetAttackSummary(fb.GCPServiceAccount)
-			} else {
-				attackPaths = "run --attack-paths"
-			}
+			attackPaths := gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, fb.GCPServiceAccount)
 
 			fedBindingsBody = append(fedBindingsBody, []string{
 				m.GetProjectName(fb.ProjectID),

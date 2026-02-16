@@ -52,7 +52,7 @@ type ServiceAgentsModule struct {
 
 	ProjectAgents   map[string][]serviceagentsservice.ServiceAgentInfo // projectID -> agents
 	LootMap         map[string]map[string]*internal.LootFile           // projectID -> loot files
-	AttackPathCache *gcpinternal.AttackPathCache                       // Cached attack path analysis results
+	FoxMapperCache  *gcpinternal.FoxMapperCache                        // Cached FoxMapper analysis results
 	mu              sync.Mutex
 }
 
@@ -89,18 +89,8 @@ func runGCPServiceAgentsCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *ServiceAgentsModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_SERVICEAGENTS_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
-	}
+	// Get FoxMapper cache from context
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_SERVICEAGENTS_MODULE_NAME, m.processProject)
 
@@ -468,8 +458,8 @@ func (m *ServiceAgentsModule) agentsToTableBody(agents []serviceagentsservice.Se
 
 		// Check attack paths for this service agent
 		attackPaths := "run --attack-paths"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-			attackPaths = m.AttackPathCache.GetAttackSummary(agent.Email)
+		if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, agent.Email)
 		}
 
 		// One row per role

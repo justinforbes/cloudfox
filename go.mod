@@ -143,7 +143,6 @@ require (
 require (
 	cloud.google.com/go/asset v1.22.0
 	cloud.google.com/go/kms v1.23.2
-	cloud.google.com/go/logging v1.13.1
 	cloud.google.com/go/monitoring v1.24.3
 	cloud.google.com/go/pubsub v1.50.1
 	cloud.google.com/go/securitycenter v1.38.1

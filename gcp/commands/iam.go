@@ -91,7 +91,7 @@ type IAMModule struct {
 	Groups          []IAMService.GroupInfo
 	MFAStatus       map[string]*IAMService.MFAStatus
 	LootMap         map[string]*internal.LootFile
-	AttackPathCache *gcpinternal.AttackPathCache
+	FoxMapperCache  *gcpinternal.FoxMapperCache
 	mu              sync.Mutex
 
 	// Member to groups mapping (email -> list of group emails)
@@ -148,17 +148,10 @@ func runGCPIAMCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *IAMModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
-
-	// If no context cache, try loading from disk cache
-	if m.AttackPathCache == nil || !m.AttackPathCache.IsPopulated() {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.IsPopulated() {
-			logger.InfoM(fmt.Sprintf("Using attack path cache from disk (created: %s)",
-				metadata.CreatedAt.Format("2006-01-02 15:04:05")), globals.GCP_IAM_MODULE_NAME)
-			m.AttackPathCache = diskCache
-		}
+	// Get FoxMapper cache for graph-based analysis
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_IAM_MODULE_NAME)
 	}
 
 	logger.InfoM("Enumerating IAM across organizations, folders, and projects...", globals.GCP_IAM_MODULE_NAME)
@@ -686,11 +679,7 @@ func (m *IAMModule) buildTables() []internal.TableFile {
 		// Check attack paths for service account principals
 		attackPaths := "-"
 		if sb.MemberType == "ServiceAccount" {
-			if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-				attackPaths = m.AttackPathCache.GetAttackSummary(sb.MemberEmail)
-			} else {
-				attackPaths = "run --attack-paths"
-			}
+			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sb.MemberEmail)
 		}
 
 		body = append(body, []string{
@@ -730,12 +719,7 @@ func (m *IAMModule) buildTables() []internal.TableFile {
 		}
 
 		// Check attack paths for this service account
-		attackPaths := "-"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-			attackPaths = m.AttackPathCache.GetAttackSummary(sa.Email)
-		} else {
-			attackPaths = "run --attack-paths"
-		}
+		attackPaths := gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sa.Email)
 
 		body = append(body, []string{
 			"project",
@@ -912,11 +896,7 @@ func (m *IAMModule) buildTablesForProject(projectID string) []internal.TableFile
 		// Check attack paths for service account principals
 		attackPaths := "-"
 		if sb.MemberType == "ServiceAccount" {
-			if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-				attackPaths = m.AttackPathCache.GetAttackSummary(sb.MemberEmail)
-			} else {
-				attackPaths = "run --attack-paths"
-			}
+			attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sb.MemberEmail)
 		}
 
 		body = append(body, []string{
@@ -959,12 +939,7 @@ func (m *IAMModule) buildTablesForProject(projectID string) []internal.TableFile
 		}
 
 		// Check attack paths for this service account
-		attackPaths := "-"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
-			attackPaths = m.AttackPathCache.GetAttackSummary(sa.Email)
-		} else {
-			attackPaths = "run --attack-paths"
-		}
+		attackPaths := gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sa.Email)
 
 		body = append(body, []string{
 			"project",

@@ -33,7 +33,7 @@ type DataprocModule struct {
 	gcpinternal.BaseGCPModule
 	ProjectClusters map[string][]dataprocservice.ClusterInfo // projectID -> clusters
 	LootMap         map[string]map[string]*internal.LootFile // projectID -> loot files
-	AttackPathCache *gcpinternal.AttackPathCache             // Cached attack path analysis results
+	FoxMapperCache  *gcpinternal.FoxMapperCache              // Cached FoxMapper results
 	mu              sync.Mutex
 }
 
@@ -60,8 +60,8 @@ func runGCPDataprocCommand(cmd *cobra.Command, args []string) {
 }
 
 func (m *DataprocModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
+	// Get FoxMapper cache from context
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_DATAPROC_MODULE_NAME, m.processProject)
 
@@ -202,9 +202,9 @@ func (m *DataprocModule) clustersToTableBody(clusters []dataprocservice.ClusterI
 
 		// Check attack paths (privesc/exfil/lateral) for the service account
 		attackPaths := "run --attack-paths"
-		if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
+		if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 			if sa != "(default)" && sa != "" {
-				attackPaths = m.AttackPathCache.GetAttackSummary(sa)
+				attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, sa)
 			} else {
 				attackPaths = "No"
 			}

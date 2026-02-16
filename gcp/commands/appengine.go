@@ -104,7 +104,7 @@ type AppEngineModule struct {
 	ProjectVersions      map[string][]AppEngineVersion
 	ProjectFirewallRules map[string][]AppEngineFirewallRule
 	LootMap              map[string]map[string]*internal.LootFile
-	AttackPathCache      *gcpinternal.AttackPathCache // Cached attack path analysis results
+	FoxMapperCache       *gcpinternal.FoxMapperCache  // FoxMapper cache for attack path analysis
 	mu                   sync.Mutex
 
 	totalApps     int
@@ -149,8 +149,8 @@ func runGCPAppEngineCommand(cmd *cobra.Command, args []string) {
 // Module Execution
 // ------------------------------
 func (m *AppEngineModule) Execute(ctx context.Context, logger internal.Logger) {
-	// Get attack path cache from context (populated by all-checks or attack path analysis)
-	m.AttackPathCache = gcpinternal.GetAttackPathCacheFromContext(ctx)
+	// Get FoxMapper cache from context
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
 
 	logger.InfoM("Enumerating App Engine applications...", GCP_APPENGINE_MODULE_NAME)
 
@@ -535,9 +535,9 @@ func (m *AppEngineModule) buildTablesForProject(projectID string, apps []AppEngi
 
 			// Check attack paths (privesc/exfil/lateral) for the service account
 			attackPaths := "run --attack-paths"
-			if m.AttackPathCache != nil && m.AttackPathCache.IsPopulated() {
+			if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 				if ver.ServiceAccount != "" {
-					attackPaths = m.AttackPathCache.GetAttackSummary(ver.ServiceAccount)
+					attackPaths = gcpinternal.GetAttackSummaryFromCaches(m.FoxMapperCache, nil, ver.ServiceAccount)
 				} else {
 					attackPaths = "No"
 				}

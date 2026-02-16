@@ -6,8 +6,8 @@ import (
 	"strings"
 	"sync"
 
-	attackpathservice "github.com/BishopFox/cloudfox/gcp/services/attackpathService"
 	bigqueryservice "github.com/BishopFox/cloudfox/gcp/services/bigqueryService"
+	foxmapperservice "github.com/BishopFox/cloudfox/gcp/services/foxmapperService"
 	loggingservice "github.com/BishopFox/cloudfox/gcp/services/loggingService"
 	orgpolicyservice "github.com/BishopFox/cloudfox/gcp/services/orgpolicyService"
 	pubsubservice "github.com/BishopFox/cloudfox/gcp/services/pubsubService"
@@ -33,7 +33,8 @@ var GCPDataExfiltrationCommand = &cobra.Command{
 	Short:   "Identify data exfiltration paths and high-risk data exposure",
 	Long: `Identify data exfiltration vectors and paths in GCP environments.
 
-This module identifies both ACTUAL misconfigurations and POTENTIAL exfiltration vectors.
+This module identifies both ACTUAL misconfigurations and POTENTIAL exfiltration vectors
+using FoxMapper graph data for permission analysis.
 
 Actual Findings (specific resources):
 - Public snapshots and images (actual IAM policy check)
@@ -43,12 +44,16 @@ Actual Findings (specific resources):
 - BigQuery datasets with public IAM bindings
 - Storage Transfer Service jobs to external destinations
 
-Potential Vectors (capabilities that exist):
-- BigQuery Export: Can export data to GCS bucket or external table
-- Pub/Sub Subscription: Can push messages to external HTTP endpoint
-- Cloud Function: Can make outbound HTTP requests to external endpoints
-- Cloud Run: Can make outbound HTTP requests to external endpoints
-- Logging Sink: Can export logs to external project or Pub/Sub topic
+Permission-Based Vectors (from FoxMapper graph):
+- Storage objects read/list permissions
+- BigQuery data access and export permissions
+- Cloud SQL export and connect permissions
+- Secret Manager access permissions
+- KMS decrypt permissions
+- Logging read permissions
+
+Prerequisites:
+- Run 'foxmapper gcp graph create' for permission-based analysis
 
 Security Controls Checked:
 - VPC Service Controls (VPC-SC) perimeter protection
@@ -75,7 +80,6 @@ type ExfiltrationPath struct {
 	VPCSCProtected bool     // Is this project protected by VPC-SC?
 }
 
-
 type PublicExport struct {
 	ResourceType string
 	ResourceName string
@@ -101,22 +105,20 @@ type OrgPolicyProtection struct {
 	MissingProtections          []string
 }
 
-// PermissionBasedExfilPath is replaced by attackpathservice.AttackPath for centralized handling
-
 // ------------------------------
 // Module Struct
 // ------------------------------
 type DataExfiltrationModule struct {
 	gcpinternal.BaseGCPModule
 
-	ProjectExfiltrationPaths map[string][]ExfiltrationPath             // projectID -> paths
-	ProjectPublicExports     map[string][]PublicExport                // projectID -> exports
-	ProjectAttackPaths       map[string][]attackpathservice.AttackPath // projectID -> permission-based attack paths
-	LootMap                  map[string]map[string]*internal.LootFile // projectID -> loot files
+	ProjectExfiltrationPaths map[string][]ExfiltrationPath                // projectID -> paths
+	ProjectPublicExports     map[string][]PublicExport                    // projectID -> exports
+	FoxMapperFindings        []foxmapperservice.DataExfilFinding          // FoxMapper-based findings
+	LootMap                  map[string]map[string]*internal.LootFile     // projectID -> loot files
 	mu                       sync.Mutex
 	vpcscProtectedProj       map[string]bool                 // Projects protected by VPC-SC
 	orgPolicyProtection      map[string]*OrgPolicyProtection // Org policy protections per project
-	usedAttackPathCache      bool                            // Whether attack paths were loaded from cache
+	FoxMapperCache           *gcpinternal.FoxMapperCache     // FoxMapper cache for unified data access
 }
 
 // ------------------------------
@@ -143,7 +145,7 @@ func runGCPDataExfiltrationCommand(cmd *cobra.Command, args []string) {
 		BaseGCPModule:            gcpinternal.NewBaseGCPModule(cmdCtx),
 		ProjectExfiltrationPaths: make(map[string][]ExfiltrationPath),
 		ProjectPublicExports:     make(map[string][]PublicExport),
-		ProjectAttackPaths:       make(map[string][]attackpathservice.AttackPath),
+		FoxMapperFindings:        []foxmapperservice.DataExfilFinding{},
 		LootMap:                  make(map[string]map[string]*internal.LootFile),
 		vpcscProtectedProj:       make(map[string]bool),
 		orgPolicyProtection:      make(map[string]*OrgPolicyProtection),
@@ -163,7 +165,6 @@ func (m *DataExfiltrationModule) getAllExfiltrationPaths() []ExfiltrationPath {
 	return all
 }
 
-
 func (m *DataExfiltrationModule) getAllPublicExports() []PublicExport {
 	var all []PublicExport
 	for _, exports := range m.ProjectPublicExports {
@@ -172,39 +173,18 @@ func (m *DataExfiltrationModule) getAllPublicExports() []PublicExport {
 	return all
 }
 
-func (m *DataExfiltrationModule) getAllAttackPaths() []attackpathservice.AttackPath {
-	var all []attackpathservice.AttackPath
-	for _, paths := range m.ProjectAttackPaths {
-		all = append(all, paths...)
-	}
-	return all
-}
-
 func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Identifying data exfiltration paths and potential vectors...", GCP_DATAEXFILTRATION_MODULE_NAME)
 
-	var usedCache bool
-
-	// Check if attack path analysis was already run (via --attack-paths flag)
-	if cache := gcpinternal.GetAttackPathCacheFromContext(ctx); cache != nil && cache.HasRawData() {
-		if cachedResult, ok := cache.GetRawData().(*attackpathservice.CombinedAttackPathData); ok {
-			logger.InfoM("Using cached attack path analysis results for permission-based paths", GCP_DATAEXFILTRATION_MODULE_NAME)
-			m.loadAttackPathsFromCache(cachedResult)
-			usedCache = true
+	// Get FoxMapper cache from context or try to load it
+	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+	if m.FoxMapperCache == nil || !m.FoxMapperCache.IsPopulated() {
+		// Try to load FoxMapper data (org from hierarchy if available)
+		orgID := ""
+		if m.Hierarchy != nil && len(m.Hierarchy.Organizations) > 0 {
+			orgID = m.Hierarchy.Organizations[0].ID
 		}
-	}
-
-	// If no context cache, try loading from disk cache
-	if !usedCache {
-		diskCache, metadata, err := gcpinternal.LoadAttackPathCacheFromFile(m.OutputDirectory, m.Account)
-		if err == nil && diskCache != nil && diskCache.HasRawData() {
-			if cachedResult, ok := diskCache.GetRawData().(*attackpathservice.CombinedAttackPathData); ok {
-				logger.InfoM(fmt.Sprintf("Using disk cache for permission-based paths (created: %s)",
-					metadata.CreatedAt.Format("2006-01-02 15:04:05")), GCP_DATAEXFILTRATION_MODULE_NAME)
-				m.loadAttackPathsFromCache(cachedResult)
-				usedCache = true
-			}
-		}
+		m.FoxMapperCache = gcpinternal.TryLoadFoxMapper(orgID, m.ProjectIDs)
 	}
 
 	// First, check VPC-SC protection status for all projects
@@ -213,26 +193,25 @@ func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Lo
 	// Check organization policy protections for all projects
 	m.checkOrgPolicyProtection(ctx, logger)
 
-	// If we didn't use cache, analyze org and folder level exfil paths
-	if !usedCache {
-		m.analyzeOrgFolderExfilPaths(ctx, logger)
-	}
-
-	// Process each project - this always runs to find actual misconfigurations
-	// (public buckets, snapshots, etc.) but skip permission-based analysis if cached
-	m.usedAttackPathCache = usedCache
+	// Process each project for actual misconfigurations
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, GCP_DATAEXFILTRATION_MODULE_NAME, m.processProject)
 
-	// If we ran new analysis, save to cache (skip if running under all-checks)
-	if !usedCache {
-		m.saveToAttackPathCache(ctx, logger)
+	// Analyze permission-based exfiltration using FoxMapper
+	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
+		logger.InfoM("Analyzing permission-based exfiltration paths using FoxMapper...", GCP_DATAEXFILTRATION_MODULE_NAME)
+		svc := m.FoxMapperCache.GetService()
+		m.FoxMapperFindings = svc.AnalyzeDataExfil("")
+		if len(m.FoxMapperFindings) > 0 {
+			logger.InfoM(fmt.Sprintf("Found %d permission-based exfiltration techniques with access", len(m.FoxMapperFindings)), GCP_DATAEXFILTRATION_MODULE_NAME)
+		}
+	} else {
+		logger.InfoM("No FoxMapper data found - skipping permission-based analysis. Run 'foxmapper gcp graph create' for full analysis.", GCP_DATAEXFILTRATION_MODULE_NAME)
 	}
 
 	allPaths := m.getAllExfiltrationPaths()
-	allPermBasedPaths := m.getAllAttackPaths()
 
 	// Check results
-	hasResults := len(allPaths) > 0 || len(allPermBasedPaths) > 0
+	hasResults := len(allPaths) > 0 || len(m.FoxMapperFindings) > 0
 
 	if !hasResults {
 		logger.InfoM("No data exfiltration paths found", GCP_DATAEXFILTRATION_MODULE_NAME)
@@ -242,163 +221,23 @@ func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Lo
 	if len(allPaths) > 0 {
 		logger.SuccessM(fmt.Sprintf("Found %d actual misconfiguration(s)", len(allPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
 	}
-	if len(allPermBasedPaths) > 0 {
-		logger.SuccessM(fmt.Sprintf("Found %d permission-based exfiltration path(s)", len(allPermBasedPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
+	if len(m.FoxMapperFindings) > 0 {
+		logger.SuccessM(fmt.Sprintf("Found %d permission-based exfiltration technique(s) with access", len(m.FoxMapperFindings)), GCP_DATAEXFILTRATION_MODULE_NAME)
 	}
 
 	m.writeOutput(ctx, logger)
-}
-
-// loadAttackPathsFromCache loads exfil attack paths from cached data
-func (m *DataExfiltrationModule) loadAttackPathsFromCache(data *attackpathservice.CombinedAttackPathData) {
-	// Filter to only include exfil paths and organize by project
-	for _, path := range data.AllPaths {
-		if path.PathType == "exfil" {
-			if path.ScopeType == "project" && path.ScopeID != "" {
-				m.ProjectAttackPaths[path.ScopeID] = append(m.ProjectAttackPaths[path.ScopeID], path)
-			} else if path.ScopeType == "organization" || path.ScopeType == "folder" {
-				// Distribute org/folder paths to all enumerated projects
-				for _, projectID := range m.ProjectIDs {
-					pathCopy := path
-					pathCopy.ProjectID = projectID
-					m.ProjectAttackPaths[projectID] = append(m.ProjectAttackPaths[projectID], pathCopy)
-				}
-			}
-		}
-	}
-}
-
-// saveToAttackPathCache saves attack path data to disk cache
-func (m *DataExfiltrationModule) saveToAttackPathCache(ctx context.Context, logger internal.Logger) {
-	// Skip saving if running under all-checks (consolidated save happens at the end)
-	if gcpinternal.IsAllChecksMode(ctx) {
-		logger.InfoM("Skipping individual cache save (all-checks mode)", GCP_DATAEXFILTRATION_MODULE_NAME)
-		return
-	}
-
-	// Run full analysis (all types) so we can cache for other modules
-	svc := attackpathservice.New()
-	fullResult, err := svc.CombinedAttackPathAnalysis(ctx, m.ProjectIDs, m.ProjectNames, "all")
-	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not run full attack path analysis for caching: %v", err), GCP_DATAEXFILTRATION_MODULE_NAME)
-		return
-	}
-
-	cache := gcpinternal.NewAttackPathCache()
-
-	// Populate cache with paths from all scopes
-	var pathInfos []gcpinternal.AttackPathInfo
-	for _, path := range fullResult.AllPaths {
-		pathInfos = append(pathInfos, gcpinternal.AttackPathInfo{
-			Principal:     path.Principal,
-			PrincipalType: path.PrincipalType,
-			Method:        path.Method,
-			PathType:      gcpinternal.AttackPathType(path.PathType),
-			Category:      path.Category,
-			RiskLevel:     path.RiskLevel,
-			Target:        path.TargetResource,
-			Permissions:   path.Permissions,
-			ScopeType:     path.ScopeType,
-			ScopeID:       path.ScopeID,
-		})
-	}
-	cache.PopulateFromPaths(pathInfos)
-	cache.SetRawData(fullResult)
-
-	// Save to disk
-	err = gcpinternal.SaveAttackPathCacheToFile(cache, m.ProjectIDs, m.OutputDirectory, m.Account, "1.0")
-	if err != nil {
-		logger.InfoM(fmt.Sprintf("Could not save attack path cache: %v", err), GCP_DATAEXFILTRATION_MODULE_NAME)
-	} else {
-		privesc, exfil, lateral := cache.GetStats()
-		logger.InfoM(fmt.Sprintf("Saved attack path cache to disk (%d privesc, %d exfil, %d lateral)",
-			privesc, exfil, lateral), GCP_DATAEXFILTRATION_MODULE_NAME)
-	}
-}
-
-// analyzeOrgFolderExfilPaths analyzes organization and folder level IAM for exfil permissions
-func (m *DataExfiltrationModule) analyzeOrgFolderExfilPaths(ctx context.Context, logger internal.Logger) {
-	attackSvc := attackpathservice.New()
-
-	// Analyze organization-level IAM
-	orgPaths, orgNames, _, err := attackSvc.AnalyzeOrganizationAttackPaths(ctx, "exfil")
-	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME, "Could not analyze organization-level exfil paths")
-		}
-	} else if len(orgPaths) > 0 {
-		logger.InfoM(fmt.Sprintf("Found %d organization-level exfil path(s)", len(orgPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
-		for i := range orgPaths {
-			orgName := orgNames[orgPaths[i].ScopeID]
-			if orgName == "" {
-				orgName = orgPaths[i].ScopeID
-			}
-			// Update the path with org context
-			orgPaths[i].ScopeName = orgName
-			orgPaths[i].RiskLevel = "CRITICAL" // Org-level is critical
-			orgPaths[i].PathType = "exfil"
-		}
-		// Distribute org-level paths to ALL enumerated projects
-		// (org-level access affects all projects in the org)
-		m.mu.Lock()
-		for _, projectID := range m.ProjectIDs {
-			for _, path := range orgPaths {
-				pathCopy := path
-				pathCopy.ProjectID = projectID
-				m.ProjectAttackPaths[projectID] = append(m.ProjectAttackPaths[projectID], pathCopy)
-			}
-		}
-		m.mu.Unlock()
-	}
-
-	// Analyze folder-level IAM
-	folderPaths, folderNames, err := attackSvc.AnalyzeFolderAttackPaths(ctx, "exfil")
-	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME, "Could not analyze folder-level exfil paths")
-		}
-	} else if len(folderPaths) > 0 {
-		logger.InfoM(fmt.Sprintf("Found %d folder-level exfil path(s)", len(folderPaths)), GCP_DATAEXFILTRATION_MODULE_NAME)
-		for i := range folderPaths {
-			folderName := folderNames[folderPaths[i].ScopeID]
-			if folderName == "" {
-				folderName = folderPaths[i].ScopeID
-			}
-			// Update the path with folder context
-			folderPaths[i].ScopeName = folderName
-			folderPaths[i].RiskLevel = "CRITICAL" // Folder-level is critical
-			folderPaths[i].PathType = "exfil"
-		}
-		// Distribute folder-level paths to ALL enumerated projects
-		// (folder-level access affects all projects in the folder)
-		// TODO: Could be smarter and only distribute to projects in the folder
-		m.mu.Lock()
-		for _, projectID := range m.ProjectIDs {
-			for _, path := range folderPaths {
-				pathCopy := path
-				pathCopy.ProjectID = projectID
-				m.ProjectAttackPaths[projectID] = append(m.ProjectAttackPaths[projectID], pathCopy)
-			}
-		}
-		m.mu.Unlock()
-	}
 }
 
 // ------------------------------
 // VPC-SC Protection Check
 // ------------------------------
 func (m *DataExfiltrationModule) checkVPCSCProtection(ctx context.Context, logger internal.Logger) {
-	// Try to get organization ID from projects
-	// VPC-SC is organization-level
 	vpcsc := vpcscservice.New()
 
-	// Get org ID from first project (simplified - in reality would need proper org detection)
 	if len(m.ProjectIDs) == 0 {
 		return
 	}
 
-	// Try common org IDs or skip if we don't have org access
-	// This is a best-effort check
 	policies, err := vpcsc.ListAccessPolicies("")
 	if err != nil {
 		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
@@ -407,17 +246,14 @@ func (m *DataExfiltrationModule) checkVPCSCProtection(ctx context.Context, logge
 		return
 	}
 
-	// For each policy, check perimeters
 	for _, policy := range policies {
 		perimeters, err := vpcsc.ListServicePerimeters(policy.Name)
 		if err != nil {
 			continue
 		}
 
-		// Mark projects in perimeters as protected
 		for _, perimeter := range perimeters {
 			for _, resource := range perimeter.Resources {
-				// Resources are in format "projects/123456"
 				projectNum := strings.TrimPrefix(resource, "projects/")
 				m.mu.Lock()
 				m.vpcscProtectedProj[projectNum] = true
@@ -439,10 +275,8 @@ func (m *DataExfiltrationModule) checkOrgPolicyProtection(ctx context.Context, l
 			MissingProtections: []string{},
 		}
 
-		// Get all policies for this project
 		policies, err := orgSvc.ListProjectPolicies(projectID)
 		if err != nil {
-			// Non-fatal - continue with other projects
 			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
 				logger.InfoM(fmt.Sprintf("Could not check org policies for %s: %v", projectID, err), GCP_DATAEXFILTRATION_MODULE_NAME)
 			}
@@ -452,7 +286,6 @@ func (m *DataExfiltrationModule) checkOrgPolicyProtection(ctx context.Context, l
 			continue
 		}
 
-		// Check for specific protective policies
 		for _, policy := range policies {
 			switch policy.Constraint {
 			case "constraints/storage.publicAccessPrevention":
@@ -476,7 +309,6 @@ func (m *DataExfiltrationModule) checkOrgPolicyProtection(ctx context.Context, l
 					protection.CloudFunctionsVPCConnector = true
 				}
 			case "constraints/run.allowedIngress":
-				// Check if ingress is restricted to internal or internal-and-cloud-load-balancing
 				if len(policy.AllowedValues) > 0 {
 					for _, val := range policy.AllowedValues {
 						if val == "internal" || val == "internal-and-cloud-load-balancing" {
@@ -525,15 +357,6 @@ func (m *DataExfiltrationModule) checkOrgPolicyProtection(ctx context.Context, l
 	}
 }
 
-// isOrgPolicyProtected checks if a project has key org policy protections
-func (m *DataExfiltrationModule) isOrgPolicyProtected(projectID string) bool {
-	if protection, ok := m.orgPolicyProtection[projectID]; ok {
-		// Consider protected if at least public access prevention is enabled
-		return protection.PublicAccessPrevention
-	}
-	return false
-}
-
 // ------------------------------
 // Project Processor
 // ------------------------------
@@ -548,119 +371,47 @@ func (m *DataExfiltrationModule) initializeLootForProject(projectID string) {
 }
 
 func (m *DataExfiltrationModule) generatePlaybook() *internal.LootFile {
-	// Convert all findings to AttackPath format for centralized playbook generation
-	allAttackPaths := m.collectAllAttackPaths()
+	var sb strings.Builder
+	sb.WriteString("# GCP Data Exfiltration Playbook\n")
+	sb.WriteString("# Generated by CloudFox\n\n")
+
+	// Actual misconfigurations
+	allPaths := m.getAllExfiltrationPaths()
+	if len(allPaths) > 0 {
+		sb.WriteString("## Actual Misconfigurations\n\n")
+		for _, path := range allPaths {
+			sb.WriteString(fmt.Sprintf("### %s: %s\n", path.PathType, path.ResourceName))
+			sb.WriteString(fmt.Sprintf("- Project: %s\n", path.ProjectID))
+			sb.WriteString(fmt.Sprintf("- Risk Level: %s\n", path.RiskLevel))
+			sb.WriteString(fmt.Sprintf("- Description: %s\n", path.Description))
+			sb.WriteString(fmt.Sprintf("- Destination: %s\n\n", path.Destination))
+			if path.ExploitCommand != "" {
+				sb.WriteString("```bash\n")
+				sb.WriteString(path.ExploitCommand)
+				sb.WriteString("\n```\n\n")
+			}
+		}
+	}
+
+	// Permission-based findings from FoxMapper
+	if len(m.FoxMapperFindings) > 0 {
+		sb.WriteString("## Permission-Based Exfiltration Techniques\n\n")
+		for _, finding := range m.FoxMapperFindings {
+			sb.WriteString(fmt.Sprintf("### %s (%s)\n", finding.Technique, finding.Service))
+			sb.WriteString(fmt.Sprintf("- Permission: %s\n", finding.Permission))
+			sb.WriteString(fmt.Sprintf("- Description: %s\n", finding.Description))
+			sb.WriteString(fmt.Sprintf("- Principals with access: %d\n\n", len(finding.Principals)))
+			if finding.Exploitation != "" {
+				sb.WriteString("```bash\n")
+				sb.WriteString(finding.Exploitation)
+				sb.WriteString("\n```\n\n")
+			}
+		}
+	}
 
 	return &internal.LootFile{
 		Name:     "data-exfiltration-playbook",
-		Contents: attackpathservice.GenerateExfilPlaybook(allAttackPaths, ""),
-	}
-}
-
-// collectAllAttackPaths converts ExfiltrationPath and PublicExport to AttackPath
-func (m *DataExfiltrationModule) collectAllAttackPaths() []attackpathservice.AttackPath {
-	var allPaths []attackpathservice.AttackPath
-
-	// Convert ExfiltrationPaths (actual misconfigurations)
-	for _, paths := range m.ProjectExfiltrationPaths {
-		for _, p := range paths {
-			allPaths = append(allPaths, m.exfiltrationPathToAttackPath(p))
-		}
-	}
-
-	// Convert PublicExports (bucket specific public exports)
-	for _, exports := range m.ProjectPublicExports {
-		for _, e := range exports {
-			allPaths = append(allPaths, m.publicExportToAttackPath(e))
-		}
-	}
-
-	// Include permission-based attack paths (already in AttackPath format)
-	for _, paths := range m.ProjectAttackPaths {
-		allPaths = append(allPaths, paths...)
-	}
-
-	return allPaths
-}
-
-// exfiltrationPathToAttackPath converts ExfiltrationPath to AttackPath with correct category mapping
-func (m *DataExfiltrationModule) exfiltrationPathToAttackPath(p ExfiltrationPath) attackpathservice.AttackPath {
-	// Map PathType to centralized category
-	category := mapExfilPathTypeToCategory(p.PathType)
-
-	return attackpathservice.AttackPath{
-		PathType:       "exfil",
-		Category:       category,
-		Method:         p.PathType,
-		Principal:      "N/A (Misconfiguration)",
-		PrincipalType:  "resource",
-		TargetResource: p.ResourceName,
-		ProjectID:      p.ProjectID,
-		ScopeType:      "project",
-		ScopeID:        p.ProjectID,
-		ScopeName:      p.ProjectID,
-		Description:    p.Destination,
-		Permissions:    []string{},
-		ExploitCommand: p.ExploitCommand,
-	}
-}
-
-
-// publicExportToAttackPath converts PublicExport to AttackPath
-func (m *DataExfiltrationModule) publicExportToAttackPath(e PublicExport) attackpathservice.AttackPath {
-	category := "Public Bucket"
-	if e.ResourceType == "snapshot" {
-		category = "Public Snapshot"
-	} else if e.ResourceType == "image" {
-		category = "Public Image"
-	} else if e.ResourceType == "dataset" {
-		category = "Public BigQuery"
-	}
-
-	return attackpathservice.AttackPath{
-		PathType:       "exfil",
-		Category:       category,
-		Method:         e.ResourceType + " (" + e.AccessLevel + ")",
-		Principal:      e.AccessLevel,
-		PrincipalType:  "public",
-		TargetResource: e.ResourceName,
-		ProjectID:      e.ProjectID,
-		ScopeType:      "project",
-		ScopeID:        e.ProjectID,
-		ScopeName:      e.ProjectID,
-		Description:    fmt.Sprintf("Public %s with %s access", e.ResourceType, e.AccessLevel),
-		Permissions:    []string{},
-		ExploitCommand: "",
-	}
-}
-
-// mapExfilPathTypeToCategory maps ExfiltrationPath.PathType to centralized categories
-func mapExfilPathTypeToCategory(pathType string) string {
-	switch {
-	case strings.Contains(pathType, "Snapshot"):
-		return "Public Snapshot"
-	case strings.Contains(pathType, "Image"):
-		return "Public Image"
-	case strings.Contains(pathType, "Bucket"), strings.Contains(pathType, "Storage"):
-		return "Public Bucket"
-	case strings.Contains(pathType, "Logging"):
-		return "Logging Sink"
-	case strings.Contains(pathType, "Pub/Sub Push") || strings.Contains(pathType, "PubSub Push"):
-		return "Pub/Sub Push"
-	case strings.Contains(pathType, "Pub/Sub BigQuery") || strings.Contains(pathType, "PubSub BigQuery"):
-		return "Pub/Sub BigQuery Export"
-	case strings.Contains(pathType, "Pub/Sub GCS") || strings.Contains(pathType, "PubSub GCS"):
-		return "Pub/Sub GCS Export"
-	case strings.Contains(pathType, "Pub/Sub") || strings.Contains(pathType, "PubSub"):
-		return "Pub/Sub Push" // Default Pub/Sub category
-	case strings.Contains(pathType, "BigQuery"):
-		return "Public BigQuery"
-	case strings.Contains(pathType, "SQL"):
-		return "Cloud SQL Export"
-	case strings.Contains(pathType, "Transfer"):
-		return "Storage Transfer Job"
-	default:
-		return "Potential Vector"
+		Contents: sb.String(),
 	}
 }
 
@@ -675,25 +426,25 @@ func (m *DataExfiltrationModule) processProject(ctx context.Context, projectID s
 
 	// === ACTUAL MISCONFIGURATIONS ===
 
-	// 1. Find public/shared snapshots (REAL check)
+	// 1. Find public/shared snapshots
 	m.findPublicSnapshots(ctx, projectID, logger)
 
-	// 2. Find public/shared images (REAL check)
+	// 2. Find public/shared images
 	m.findPublicImages(ctx, projectID, logger)
 
-	// 3. Find public buckets (REAL check)
+	// 3. Find public buckets
 	m.findPublicBuckets(ctx, projectID, logger)
 
-	// 4. Find cross-project logging sinks (REAL enumeration)
+	// 4. Find cross-project logging sinks
 	m.findCrossProjectLoggingSinks(ctx, projectID, logger)
 
-	// 5. Find Pub/Sub push subscriptions to external endpoints (REAL check)
+	// 5. Find Pub/Sub push subscriptions to external endpoints
 	m.findPubSubPushEndpoints(ctx, projectID, logger)
 
 	// 6. Find Pub/Sub subscriptions exporting to external destinations
 	m.findPubSubExportSubscriptions(ctx, projectID, logger)
 
-	// 7. Find BigQuery datasets with public access (REAL check)
+	// 7. Find BigQuery datasets with public access
 	m.findPublicBigQueryDatasets(ctx, projectID, logger)
 
 	// 8. Find Cloud SQL with export enabled
@@ -701,11 +452,6 @@ func (m *DataExfiltrationModule) processProject(ctx context.Context, projectID s
 
 	// 9. Find Storage Transfer jobs to external destinations
 	m.findStorageTransferJobs(ctx, projectID, logger)
-
-	// === PERMISSION-BASED EXFILTRATION CAPABILITIES ===
-
-	// 10. Check IAM for principals with data exfiltration permissions
-	m.findPermissionBasedExfilPaths(ctx, projectID, logger)
 }
 
 // findPublicSnapshots finds snapshots that are publicly accessible
@@ -721,13 +467,11 @@ func (m *DataExfiltrationModule) findPublicSnapshots(ctx context.Context, projec
 	req := computeService.Snapshots.List(projectID)
 	err = req.Pages(ctx, func(page *compute.SnapshotList) error {
 		for _, snapshot := range page.Items {
-			// Get IAM policy for snapshot
 			policy, err := computeService.Snapshots.GetIamPolicy(projectID, snapshot.Name).Do()
 			if err != nil {
 				continue
 			}
 
-			// Check for public access
 			accessLevel := ""
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
@@ -794,13 +538,11 @@ func (m *DataExfiltrationModule) findPublicImages(ctx context.Context, projectID
 	req := computeService.Images.List(projectID)
 	err = req.Pages(ctx, func(page *compute.ImageList) error {
 		for _, image := range page.Items {
-			// Get IAM policy for image
 			policy, err := computeService.Images.GetIamPolicy(projectID, image.Name).Do()
 			if err != nil {
 				continue
 			}
 
-			// Check for public access
 			accessLevel := ""
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
@@ -875,13 +617,11 @@ func (m *DataExfiltrationModule) findPublicBuckets(ctx context.Context, projectI
 	}
 
 	for _, bucket := range resp.Items {
-		// Get IAM policy for bucket
 		policy, err := storageService.Buckets.GetIamPolicy(bucket.Name).Do()
 		if err != nil {
 			continue
 		}
 
-		// Check for public access
 		accessLevel := ""
 		for _, binding := range policy.Bindings {
 			for _, member := range binding.Members {
@@ -932,7 +672,7 @@ func (m *DataExfiltrationModule) findPublicBuckets(ctx context.Context, projectI
 	}
 }
 
-// findCrossProjectLoggingSinks finds REAL logging sinks that export to external destinations
+// findCrossProjectLoggingSinks finds logging sinks that export to external destinations
 func (m *DataExfiltrationModule) findCrossProjectLoggingSinks(ctx context.Context, projectID string, logger internal.Logger) {
 	ls := loggingservice.New()
 	sinks, err := ls.Sinks(projectID)
@@ -947,11 +687,10 @@ func (m *DataExfiltrationModule) findCrossProjectLoggingSinks(ctx context.Contex
 			continue
 		}
 
-		// Only report cross-project or external sinks
 		if sink.IsCrossProject {
 			riskLevel := "HIGH"
 			if sink.DestinationType == "pubsub" {
-				riskLevel = "MEDIUM" // Pub/Sub is often used for legitimate cross-project messaging
+				riskLevel = "MEDIUM"
 			}
 
 			destDesc := fmt.Sprintf("%s in project %s", sink.DestinationType, sink.DestinationProject)
@@ -995,7 +734,6 @@ func (m *DataExfiltrationModule) findPubSubPushEndpoints(ctx context.Context, pr
 			continue
 		}
 
-		// Check if endpoint is external (not run.app, cloudfunctions.net, or same project)
 		endpoint := sub.PushEndpoint
 		isExternal := true
 		if strings.Contains(endpoint, ".run.app") ||
@@ -1012,7 +750,7 @@ func (m *DataExfiltrationModule) findPubSubPushEndpoints(ctx context.Context, pr
 				PathType:     "Pub/Sub Push",
 				ResourceName: sub.Name,
 				ProjectID:    projectID,
-				Description:  fmt.Sprintf("Subscription pushes messages to external endpoint"),
+				Description:  "Subscription pushes messages to external endpoint",
 				Destination:  endpoint,
 				RiskLevel:    riskLevel,
 				RiskReasons:  []string{"Messages pushed to external HTTP endpoint", "Endpoint may be attacker-controlled"},
@@ -1041,9 +779,7 @@ func (m *DataExfiltrationModule) findPubSubExportSubscriptions(ctx context.Conte
 	}
 
 	for _, sub := range subs {
-		// Check for BigQuery export
 		if sub.BigQueryTable != "" {
-			// Extract project from table reference
 			parts := strings.Split(sub.BigQueryTable, ".")
 			if len(parts) >= 1 {
 				destProject := parts[0]
@@ -1069,7 +805,6 @@ func (m *DataExfiltrationModule) findPubSubExportSubscriptions(ctx context.Conte
 			}
 		}
 
-		// Check for Cloud Storage export
 		if sub.CloudStorageBucket != "" {
 			path := ExfiltrationPath{
 				PathType:     "Pub/Sub GCS Export",
@@ -1104,7 +839,6 @@ func (m *DataExfiltrationModule) findPublicBigQueryDatasets(ctx context.Context,
 	}
 
 	for _, dataset := range datasets {
-		// Check if dataset has public access (already computed by the service)
 		if dataset.IsPublic {
 			export := PublicExport{
 				ResourceType: "BigQuery Dataset",
@@ -1155,18 +889,16 @@ func (m *DataExfiltrationModule) findCloudSQLExportConfig(ctx context.Context, p
 	}
 
 	for _, instance := range resp.Items {
-		// Check if instance has automated backups enabled with export to GCS
 		if instance.Settings != nil && instance.Settings.BackupConfiguration != nil {
 			backup := instance.Settings.BackupConfiguration
 			if backup.Enabled && backup.BinaryLogEnabled {
-				// Instance has binary logging - can export via CDC
 				path := ExfiltrationPath{
 					PathType:     "Cloud SQL Export",
 					ResourceName: instance.Name,
 					ProjectID:    projectID,
 					Description:  "Cloud SQL instance with binary logging enabled (enables CDC export)",
 					Destination:  "External via mysqldump/pg_dump or CDC",
-					RiskLevel:    "LOW", // This is standard config, not necessarily a risk
+					RiskLevel:    "LOW",
 					RiskReasons:  []string{"Binary logging enables change data capture", "Data can be exported if IAM allows"},
 					ExploitCommand: fmt.Sprintf(
 						"# Check export permissions\n"+
@@ -1192,7 +924,6 @@ func (m *DataExfiltrationModule) findStorageTransferJobs(ctx context.Context, pr
 		return
 	}
 
-	// List transfer jobs for this project - filter is a required parameter
 	filter := fmt.Sprintf(`{"projectId":"%s"}`, projectID)
 	req := stsService.TransferJobs.List(filter)
 	err = req.Pages(ctx, func(page *storagetransfer.ListTransferJobsResponse) error {
@@ -1201,7 +932,6 @@ func (m *DataExfiltrationModule) findStorageTransferJobs(ctx context.Context, pr
 				continue
 			}
 
-			// Check for external destinations (AWS S3, Azure Blob, HTTP)
 			var destination string
 			var destType string
 			var isExternal bool
@@ -1256,45 +986,6 @@ func (m *DataExfiltrationModule) findStorageTransferJobs(ctx context.Context, pr
 	}
 }
 
-
-// findPermissionBasedExfilPaths identifies principals with data exfiltration permissions
-// This uses the centralized attackpathService for project and resource-level analysis
-func (m *DataExfiltrationModule) findPermissionBasedExfilPaths(ctx context.Context, projectID string, logger internal.Logger) {
-	// Skip if we already loaded attack paths from cache
-	if m.usedAttackPathCache {
-		return
-	}
-
-	// Use attackpathService for project-level analysis
-	attackSvc := attackpathservice.New()
-
-	projectName := m.GetProjectName(projectID)
-	paths, err := attackSvc.AnalyzeProjectAttackPaths(ctx, projectID, projectName, "exfil")
-	if err != nil {
-		gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME,
-			fmt.Sprintf("Could not analyze exfil permissions for project %s", projectID))
-		return
-	}
-
-	// Store paths directly (they're already AttackPath type)
-	m.mu.Lock()
-	m.ProjectAttackPaths[projectID] = append(m.ProjectAttackPaths[projectID], paths...)
-	m.mu.Unlock()
-
-	// Also analyze resource-level IAM
-	resourcePaths, err := attackSvc.AnalyzeResourceAttackPaths(ctx, projectID, "exfil")
-	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			gcpinternal.HandleGCPError(err, logger, GCP_DATAEXFILTRATION_MODULE_NAME,
-				fmt.Sprintf("Could not analyze resource-level exfil permissions for project %s", projectID))
-		}
-	} else {
-		m.mu.Lock()
-		m.ProjectAttackPaths[projectID] = append(m.ProjectAttackPaths[projectID], resourcePaths...)
-		m.mu.Unlock()
-	}
-}
-
 // ------------------------------
 // Loot File Management
 // ------------------------------
@@ -1325,7 +1016,6 @@ func (m *DataExfiltrationModule) addExfiltrationPathToLoot(projectID string, pat
 	lootFile.Contents += fmt.Sprintf("%s\n\n", path.ExploitCommand)
 }
 
-
 // ------------------------------
 // Output Generation
 // ------------------------------
@@ -1349,31 +1039,25 @@ func (m *DataExfiltrationModule) getMisconfigHeader() []string {
 	}
 }
 
-func (m *DataExfiltrationModule) getAttackPathsHeader() []string {
+func (m *DataExfiltrationModule) getFoxMapperHeader() []string {
 	return []string{
-		"Project",
-		"Source",
-		"Principal Type",
-		"Principal",
-		"Method",
-		"Target Resource",
-		"Category",
-		"Binding Scope",
-		"Permissions",
+		"Technique",
+		"Service",
+		"Permission",
+		"Description",
+		"Principal Count",
 	}
 }
 
 func (m *DataExfiltrationModule) pathsToTableBody(paths []ExfiltrationPath, exports []PublicExport) [][]string {
 	var body [][]string
 
-	// Track which resources we've added from PublicExports
 	publicResources := make(map[string]PublicExport)
 	for _, e := range exports {
 		key := fmt.Sprintf("%s:%s:%s", e.ProjectID, e.ResourceType, e.ResourceName)
 		publicResources[key] = e
 	}
 
-	// Add exfiltration paths (actual misconfigurations)
 	for _, p := range paths {
 		key := fmt.Sprintf("%s:%s:%s", p.ProjectID, p.PathType, p.ResourceName)
 		export, isPublic := publicResources[key]
@@ -1396,7 +1080,6 @@ func (m *DataExfiltrationModule) pathsToTableBody(paths []ExfiltrationPath, expo
 		})
 	}
 
-	// Add any remaining public exports not already covered
 	for _, e := range publicResources {
 		body = append(body, []string{
 			m.GetProjectName(e.ProjectID),
@@ -1411,56 +1094,15 @@ func (m *DataExfiltrationModule) pathsToTableBody(paths []ExfiltrationPath, expo
 	return body
 }
 
-func (m *DataExfiltrationModule) attackPathsToTableBody(paths []attackpathservice.AttackPath) [][]string {
+func (m *DataExfiltrationModule) foxMapperFindingsToTableBody() [][]string {
 	var body [][]string
-	for _, p := range paths {
-		// Format source (where permission was granted)
-		source := p.ScopeName
-		if source == "" {
-			source = p.ScopeID
-		}
-		if p.ScopeType == "organization" {
-			source = "org:" + source
-		} else if p.ScopeType == "folder" {
-			source = "folder:" + source
-		} else if p.ScopeType == "resource" {
-			source = "resource"
-		} else {
-			source = "project"
-		}
-
-		// Format target resource
-		targetResource := p.TargetResource
-		if targetResource == "" || targetResource == "*" {
-			targetResource = "*"
-		}
-
-		// Format permissions
-		permissions := strings.Join(p.Permissions, ", ")
-		if permissions == "" {
-			permissions = "-"
-		}
-
-		// Format binding scope (where the IAM binding is defined)
-		bindingScope := "Project"
-		if p.ScopeType == "organization" {
-			bindingScope = "Organization"
-		} else if p.ScopeType == "folder" {
-			bindingScope = "Folder"
-		} else if p.ScopeType == "resource" {
-			bindingScope = "Resource"
-		}
-
+	for _, f := range m.FoxMapperFindings {
 		body = append(body, []string{
-			m.GetProjectName(p.ProjectID),
-			source,
-			p.PrincipalType,
-			p.Principal,
-			p.Method,
-			targetResource,
-			p.Category,
-			bindingScope,
-			permissions,
+			f.Technique,
+			f.Service,
+			f.Permission,
+			f.Description,
+			fmt.Sprintf("%d", len(f.Principals)),
 		})
 	}
 	return body
@@ -1471,7 +1113,6 @@ func (m *DataExfiltrationModule) buildTablesForProject(projectID string) []inter
 
 	paths := m.ProjectExfiltrationPaths[projectID]
 	exports := m.ProjectPublicExports[projectID]
-	attackPaths := m.ProjectAttackPaths[projectID]
 
 	if len(paths) > 0 || len(exports) > 0 {
 		body := m.pathsToTableBody(paths, exports)
@@ -1484,14 +1125,6 @@ func (m *DataExfiltrationModule) buildTablesForProject(projectID string) []inter
 		}
 	}
 
-	if len(attackPaths) > 0 {
-		tableFiles = append(tableFiles, internal.TableFile{
-			Name:   "data-exfiltration",
-			Header: m.getAttackPathsHeader(),
-			Body:   m.attackPathsToTableBody(attackPaths),
-		})
-	}
-
 	return tableFiles
 }
 
@@ -1501,7 +1134,6 @@ func (m *DataExfiltrationModule) writeHierarchicalOutput(ctx context.Context, lo
 		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
 	}
 
-	// Collect all project IDs that have data
 	projectIDs := make(map[string]bool)
 	for projectID := range m.ProjectExfiltrationPaths {
 		projectIDs[projectID] = true
@@ -1509,16 +1141,11 @@ func (m *DataExfiltrationModule) writeHierarchicalOutput(ctx context.Context, lo
 	for projectID := range m.ProjectPublicExports {
 		projectIDs[projectID] = true
 	}
-	for projectID := range m.ProjectAttackPaths {
-		projectIDs[projectID] = true
-	}
 
-	// Generate playbook once for all projects
 	playbook := m.generatePlaybook()
 	playbookAdded := false
 
 	for projectID := range projectIDs {
-		// Ensure loot is initialized
 		m.initializeLootForProject(projectID)
 
 		tableFiles := m.buildTablesForProject(projectID)
@@ -1532,13 +1159,26 @@ func (m *DataExfiltrationModule) writeHierarchicalOutput(ctx context.Context, lo
 			}
 		}
 
-		// Add playbook to first project only (to avoid duplication)
 		if playbook != nil && playbook.Contents != "" && !playbookAdded {
 			lootFiles = append(lootFiles, *playbook)
 			playbookAdded = true
 		}
 
 		outputData.ProjectLevelData[projectID] = DataExfiltrationOutput{Table: tableFiles, Loot: lootFiles}
+	}
+
+	// Add FoxMapper findings table at first project level if exists
+	if len(m.FoxMapperFindings) > 0 && len(m.ProjectIDs) > 0 {
+		firstProject := m.ProjectIDs[0]
+		if existing, ok := outputData.ProjectLevelData[firstProject]; ok {
+			existingOutput := existing.(DataExfiltrationOutput)
+			existingOutput.Table = append(existingOutput.Table, internal.TableFile{
+				Name:   "data-exfiltration-permissions",
+				Header: m.getFoxMapperHeader(),
+				Body:   m.foxMapperFindingsToTableBody(),
+			})
+			outputData.ProjectLevelData[firstProject] = existingOutput
+		}
 	}
 
 	pathBuilder := m.BuildPathBuilder()
@@ -1552,14 +1192,11 @@ func (m *DataExfiltrationModule) writeHierarchicalOutput(ctx context.Context, lo
 func (m *DataExfiltrationModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
 	allPaths := m.getAllExfiltrationPaths()
 	allExports := m.getAllPublicExports()
-	allAttackPaths := m.getAllAttackPaths()
 
-	// Initialize loot for projects
 	for _, projectID := range m.ProjectIDs {
 		m.initializeLootForProject(projectID)
 	}
 
-	// Build tables
 	tables := []internal.TableFile{}
 
 	misconfigBody := m.pathsToTableBody(allPaths, allExports)
@@ -1571,15 +1208,14 @@ func (m *DataExfiltrationModule) writeFlatOutput(ctx context.Context, logger int
 		})
 	}
 
-	if len(allAttackPaths) > 0 {
+	if len(m.FoxMapperFindings) > 0 {
 		tables = append(tables, internal.TableFile{
-			Name:   "data-exfiltration",
-			Header: m.getAttackPathsHeader(),
-			Body:   m.attackPathsToTableBody(allAttackPaths),
+			Name:   "data-exfiltration-permissions",
+			Header: m.getFoxMapperHeader(),
+			Body:   m.foxMapperFindingsToTableBody(),
 		})
 	}
 
-	// Collect loot files
 	var lootFiles []internal.LootFile
 	for _, projectLoot := range m.LootMap {
 		for _, loot := range projectLoot {
@@ -1589,7 +1225,6 @@ func (m *DataExfiltrationModule) writeFlatOutput(ctx context.Context, logger int
 		}
 	}
 
-	// Add playbook
 	playbook := m.generatePlaybook()
 	if playbook != nil && playbook.Contents != "" {
 		lootFiles = append(lootFiles, *playbook)
