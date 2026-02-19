@@ -337,51 +337,38 @@ func (m *ServiceAccountsModule) addServiceAccountToLoot(projectID string, sa Ser
 
 	keyFileName := strings.Split(sa.Email, "@")[0]
 
-	// Build summary info
-	dwdStatus := "No"
-	if sa.OAuth2ClientID != "" {
-		dwdStatus = fmt.Sprintf("Yes (Client ID: %s)", sa.OAuth2ClientID)
-	}
-
-	defaultSAInfo := "No"
-	if sa.IsDefaultSA {
-		defaultSAInfo = fmt.Sprintf("Yes (%s)", sa.DefaultSAType)
-	}
-
 	lootFile.Contents += fmt.Sprintf(
 		"# ==========================================\n"+
 			"# SERVICE ACCOUNT: %s\n"+
-			"# ==========================================\n"+
-			"# Project: %s\n"+
-			"# Display Name: %s\n"+
-			"# Disabled: %v\n"+
-			"# Default SA: %s\n"+
-			"# DWD Enabled: %s\n",
+			"# ==========================================\n",
 		sa.Email,
-		projectID,
-		sa.DisplayName,
-		sa.Disabled,
-		defaultSAInfo,
-		dwdStatus,
 	)
 
-	// Add key summary
+	if sa.DisplayName != "" {
+		lootFile.Contents += fmt.Sprintf("# Display Name: %s\n", sa.DisplayName)
+	}
+	if sa.Disabled {
+		lootFile.Contents += "# DISABLED\n"
+	}
+	if sa.IsDefaultSA {
+		lootFile.Contents += fmt.Sprintf("# Default SA: %s\n", sa.DefaultSAType)
+	}
+	if sa.OAuth2ClientID != "" {
+		lootFile.Contents += fmt.Sprintf("# DWD Enabled (Client ID: %s)\n", sa.OAuth2ClientID)
+	}
+
+	// Add key summary - only show if keys exist
 	userKeyCount := 0
-	googleKeyCount := 0
 	for _, key := range sa.Keys {
 		if key.KeyType == "USER_MANAGED" {
 			userKeyCount++
-		} else if key.KeyType == "SYSTEM_MANAGED" {
-			googleKeyCount++
 		}
 	}
-	lootFile.Contents += fmt.Sprintf("# User Managed Keys: %d\n", userKeyCount)
-	lootFile.Contents += fmt.Sprintf("# Google Managed Keys: %d\n", googleKeyCount)
-	if sa.OldestKeyAge > 0 {
-		lootFile.Contents += fmt.Sprintf("# Oldest Key Age: %d days\n", sa.OldestKeyAge)
-		if sa.OldestKeyAge > 90 {
-			lootFile.Contents += "# WARNING: Key older than 90 days - rotation recommended\n"
-		}
+	if userKeyCount > 0 {
+		lootFile.Contents += fmt.Sprintf("# User Managed Keys: %d\n", userKeyCount)
+	}
+	if sa.OldestKeyAge > 90 {
+		lootFile.Contents += fmt.Sprintf("# WARNING: Key older than 90 days (%d days)\n", sa.OldestKeyAge)
 	}
 
 	// Add impersonation info if available
@@ -453,28 +440,6 @@ gcloud projects list --impersonate-service-account=%s
 # python dwd_exploit.py --key-file %s-key.json --subject admin@domain.com --all-scopes
 
 `, sa.OAuth2ClientID, projectID, keyFileName)
-	}
-
-	// Add section for old keys
-	if sa.HasOldKeys {
-		lootFile.Contents += fmt.Sprintf(`# === KEY ROTATION ===
-# This SA has keys older than 90 days (%d days)
-
-# List keys with age
-gcloud iam service-accounts keys list --iam-account=%s --project=%s --format='table(name.basename(), keyType, validAfterTime, validBeforeTime)'
-
-`, sa.OldestKeyAge, sa.Email, projectID)
-	}
-
-	// Add section for default SA
-	if sa.IsDefaultSA {
-		lootFile.Contents += fmt.Sprintf(`# === DEFAULT SERVICE ACCOUNT ===
-# This is a %s default service account
-
-# Check roles granted to this SA
-gcloud projects get-iam-policy %s --format=json | jq -r '.bindings[] | select(.members[] | contains("%s")) | .role'
-
-`, sa.DefaultSAType, projectID, sa.Email)
 	}
 
 	lootFile.Contents += "\n"

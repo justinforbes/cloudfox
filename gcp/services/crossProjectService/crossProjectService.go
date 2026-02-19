@@ -116,8 +116,9 @@ type CrossProjectPubSubExport struct {
 	RiskReasons     []string `json:"riskReasons"`
 }
 
-// AnalyzeCrossProjectAccess analyzes cross-project IAM bindings for a set of projects
-func (s *CrossProjectService) AnalyzeCrossProjectAccess(projectIDs []string) ([]CrossProjectBinding, error) {
+// AnalyzeCrossProjectAccess analyzes cross-project IAM bindings for a set of projects.
+// If orgCache is provided, it resolves project numbers to IDs for accurate detection.
+func (s *CrossProjectService) AnalyzeCrossProjectAccess(projectIDs []string, orgCache *gcpinternal.OrgCache) ([]CrossProjectBinding, error) {
 	ctx := context.Background()
 
 	crmService, err := s.getResourceManagerService(ctx)
@@ -142,7 +143,7 @@ func (s *CrossProjectService) AnalyzeCrossProjectAccess(projectIDs []string) ([]
 
 		for _, binding := range policy.Bindings {
 			for _, member := range binding.Members {
-				sourceProject := extractProjectFromMember(member)
+				sourceProject := extractProjectFromMember(member, orgCache)
 
 				// Check if this is cross-project access
 				if sourceProject != "" && sourceProject != targetProject {
@@ -247,8 +248,9 @@ func (s *CrossProjectService) GetCrossProjectServiceAccounts(projectIDs []string
 	return crossProjectSAs, nil
 }
 
-// FindLateralMovementPaths identifies lateral movement paths between projects
-func (s *CrossProjectService) FindLateralMovementPaths(projectIDs []string) ([]LateralMovementPath, error) {
+// FindLateralMovementPaths identifies lateral movement paths between projects.
+// If orgCache is provided, it resolves project numbers to IDs for accurate detection.
+func (s *CrossProjectService) FindLateralMovementPaths(projectIDs []string, orgCache *gcpinternal.OrgCache) ([]LateralMovementPath, error) {
 	ctx := context.Background()
 
 	crmService, err := s.getResourceManagerService(ctx)
@@ -274,7 +276,7 @@ func (s *CrossProjectService) FindLateralMovementPaths(projectIDs []string) ([]L
 			// Find principals from source project that have access to target
 			for _, binding := range policy.Bindings {
 				for _, member := range binding.Members {
-					memberProject := extractProjectFromMember(member)
+					memberProject := extractProjectFromMember(member, orgCache)
 					if memberProject == sourceProject {
 						path := LateralMovementPath{
 							SourceProject:   sourceProject,
@@ -445,34 +447,83 @@ func (s *CrossProjectService) generateLateralMovementCommands(path LateralMoveme
 	return commands
 }
 
-// extractProjectFromMember extracts the project ID from a member string
-func extractProjectFromMember(member string) string {
-	// serviceAccount:sa-name@project-id.iam.gserviceaccount.com
-	if strings.HasPrefix(member, "serviceAccount:") {
-		email := strings.TrimPrefix(member, "serviceAccount:")
-		// Format: name@project-id.iam.gserviceaccount.com
-		// or: project-id@project-id.iam.gserviceaccount.com
-		if strings.Contains(email, ".iam.gserviceaccount.com") {
-			parts := strings.Split(email, "@")
-			if len(parts) == 2 {
-				domain := parts[1]
-				projectPart := strings.TrimSuffix(domain, ".iam.gserviceaccount.com")
-				return projectPart
-			}
-		}
-		// App Engine default service accounts
-		if strings.Contains(email, "@appspot.gserviceaccount.com") {
-			parts := strings.Split(email, "@")
-			if len(parts) == 2 {
-				return strings.TrimSuffix(parts[1], ".appspot.gserviceaccount.com")
-			}
-		}
-		// Compute Engine default service accounts: project-number@project.iam.gserviceaccount.com
-		if strings.Contains(email, "-compute@developer.gserviceaccount.com") {
-			// Can't extract project ID from project number easily
-			return ""
-		}
+// extractProjectFromMember extracts the project ID from a member string.
+// If orgCache is provided, it resolves project numbers to IDs.
+func extractProjectFromMember(member string, orgCache *gcpinternal.OrgCache) string {
+	if !strings.HasPrefix(member, "serviceAccount:") {
+		return ""
 	}
+
+	email := strings.TrimPrefix(member, "serviceAccount:")
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return ""
+	}
+
+	prefix := parts[0]
+	domain := parts[1]
+
+	// Helper to resolve a project number to ID via OrgCache
+	resolveNumber := func(number string) string {
+		if orgCache != nil && orgCache.IsPopulated() {
+			if resolved := orgCache.GetProjectIDByNumber(number); resolved != "" {
+				return resolved
+			}
+		}
+		return "" // Can't resolve without cache
+	}
+
+	// Pattern: name@project-id.iam.gserviceaccount.com (regular SAs)
+	// But NOT gcp-sa-* domains (those are Google service agents with project numbers)
+	if strings.HasSuffix(domain, ".iam.gserviceaccount.com") && !strings.HasPrefix(domain, "gcp-sa-") {
+		projectPart := strings.TrimSuffix(domain, ".iam.gserviceaccount.com")
+		return projectPart
+	}
+
+	// Pattern: service-PROJECT_NUMBER@gcp-sa-*.iam.gserviceaccount.com
+	if strings.HasPrefix(domain, "gcp-sa-") && strings.HasSuffix(domain, ".iam.gserviceaccount.com") {
+		number := prefix
+		if strings.HasPrefix(prefix, "service-") {
+			number = strings.TrimPrefix(prefix, "service-")
+		}
+		if resolved := resolveNumber(number); resolved != "" {
+			return resolved
+		}
+		return ""
+	}
+
+	// Pattern: PROJECT_ID@appspot.gserviceaccount.com
+	if domain == "appspot.gserviceaccount.com" {
+		return prefix // This is already a project ID
+	}
+
+	// Pattern: PROJECT_NUMBER-compute@developer.gserviceaccount.com
+	if strings.HasSuffix(domain, "developer.gserviceaccount.com") {
+		if idx := strings.Index(prefix, "-compute"); idx > 0 {
+			number := prefix[:idx]
+			if resolved := resolveNumber(number); resolved != "" {
+				return resolved
+			}
+		}
+		return ""
+	}
+
+	// Pattern: PROJECT_NUMBER@cloudservices.gserviceaccount.com
+	if domain == "cloudservices.gserviceaccount.com" {
+		if resolved := resolveNumber(prefix); resolved != "" {
+			return resolved
+		}
+		return ""
+	}
+
+	// Pattern: PROJECT_NUMBER@cloudbuild.gserviceaccount.com
+	if domain == "cloudbuild.gserviceaccount.com" {
+		if resolved := resolveNumber(prefix); resolved != "" {
+			return resolved
+		}
+		return ""
+	}
+
 	return ""
 }
 

@@ -522,27 +522,6 @@ func (m *DomainWideDelegationModule) generateDWDCommands(accounts []domainwidede
 # WARNING: Only use with proper authorization
 
 # =============================================================================
-# DISCOVERED DWD SERVICE ACCOUNTS
-# =============================================================================
-`)
-
-	for _, account := range accounts {
-		dwdStatus := "No"
-		if account.DWDEnabled {
-			dwdStatus = "Yes"
-		}
-		commands.WriteString(fmt.Sprintf("\n# %s\n", account.Email))
-		commands.WriteString(fmt.Sprintf("#   DWD Enabled: %s | Keys: %d\n", dwdStatus, len(account.Keys)))
-		if account.OAuth2ClientID != "" {
-			commands.WriteString(fmt.Sprintf("#   OAuth2 Client ID: %s\n", account.OAuth2ClientID))
-		}
-		for _, key := range account.Keys {
-			commands.WriteString(fmt.Sprintf("#   Key: %s\n", key.KeyID))
-		}
-	}
-
-	commands.WriteString(`
-# =============================================================================
 # STEP 1: INSTALL DEPENDENCIES
 # =============================================================================
 pip install google-auth google-auth-oauthlib google-api-python-client

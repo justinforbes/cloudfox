@@ -79,6 +79,9 @@ type LateralMovementModule struct {
 	FoxMapperFindings []foxmapperservice.LateralFinding // FoxMapper-based findings
 	FoxMapperCache    *gcpinternal.FoxMapperCache
 
+	// OrgCache for ancestry lookups
+	OrgCache *gcpinternal.OrgCache
+
 	// Loot
 	LootMap map[string]map[string]*internal.LootFile // projectID -> loot files
 	mu      sync.Mutex
@@ -121,6 +124,15 @@ func runGCPLateralMovementCommand(cmd *cobra.Command, args []string) {
 func (m *LateralMovementModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Mapping lateral movement paths...", GCP_LATERALMOVEMENT_MODULE_NAME)
 
+	// Load OrgCache for ancestry lookups (needed for per-project filtering)
+	m.OrgCache = gcpinternal.GetOrgCacheFromContext(ctx)
+	if m.OrgCache == nil || !m.OrgCache.IsPopulated() {
+		diskCache, _, err := gcpinternal.LoadOrgCacheFromFile(m.OutputDirectory, m.Account)
+		if err == nil && diskCache != nil && diskCache.IsPopulated() {
+			m.OrgCache = diskCache
+		}
+	}
+
 	// Get FoxMapper cache from context or try to load it
 	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
 	if m.FoxMapperCache == nil || !m.FoxMapperCache.IsPopulated() {
@@ -144,7 +156,11 @@ func (m *LateralMovementModule) Execute(ctx context.Context, logger internal.Log
 	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
 		logger.InfoM("Analyzing permission-based lateral movement using FoxMapper...", GCP_LATERALMOVEMENT_MODULE_NAME)
 		svc := m.FoxMapperCache.GetService()
-		m.FoxMapperFindings = svc.AnalyzeLateral("")
+		allFindings := svc.AnalyzeLateral("")
+
+		// Filter findings to only include principals from specified projects
+		m.FoxMapperFindings = m.filterFindingsByProjects(allFindings)
+
 		if len(m.FoxMapperFindings) > 0 {
 			logger.InfoM(fmt.Sprintf("Found %d permission-based lateral movement techniques", len(m.FoxMapperFindings)), GCP_LATERALMOVEMENT_MODULE_NAME)
 		}
@@ -174,6 +190,37 @@ func (m *LateralMovementModule) Execute(ctx context.Context, logger internal.Log
 	m.writeOutput(ctx, logger)
 }
 
+// filterFindingsByProjects filters FoxMapper findings to only include principals
+// from the specified projects (via -p or -l flags) OR principals without a clear project
+func (m *LateralMovementModule) filterFindingsByProjects(findings []foxmapperservice.LateralFinding) []foxmapperservice.LateralFinding {
+	// Build a set of specified project IDs for fast lookup
+	specifiedProjects := make(map[string]bool)
+	for _, projectID := range m.ProjectIDs {
+		specifiedProjects[projectID] = true
+	}
+
+	var filtered []foxmapperservice.LateralFinding
+
+	for _, finding := range findings {
+		var filteredPrincipals []foxmapperservice.PrincipalAccess
+		for _, p := range finding.Principals {
+			principalProject := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+			// Include if: SA from specified project OR user/group (no project)
+			if specifiedProjects[principalProject] || principalProject == "" {
+				filteredPrincipals = append(filteredPrincipals, p)
+			}
+		}
+
+		if len(filteredPrincipals) > 0 {
+			filteredFinding := finding
+			filteredFinding.Principals = filteredPrincipals
+			filtered = append(filtered, filteredFinding)
+		}
+	}
+
+	return filtered
+}
+
 // ------------------------------
 // Project Processor
 // ------------------------------
@@ -187,56 +234,140 @@ func (m *LateralMovementModule) initializeLootForProject(projectID string) {
 	}
 }
 
-func (m *LateralMovementModule) generatePlaybook() *internal.LootFile {
+// getLateralExploitCommand returns specific exploitation commands for a lateral movement permission
+func getLateralExploitCommand(permission, principal, project string) string {
+	commands := map[string]string{
+		// Service Account Impersonation
+		"iam.serviceAccounts.getAccessToken": "gcloud auth print-access-token --impersonate-service-account=TARGET_SA",
+		"iam.serviceAccountKeys.create":      "gcloud iam service-accounts keys create key.json --iam-account=TARGET_SA",
+		"iam.serviceAccounts.signBlob":       "gcloud iam service-accounts sign-blob --iam-account=TARGET_SA input.txt output.sig",
+		"iam.serviceAccounts.signJwt":        "# Sign JWT to impersonate SA\ngcloud iam service-accounts sign-jwt --iam-account=TARGET_SA claim.json signed.jwt",
+		"iam.serviceAccounts.getOpenIdToken": "gcloud auth print-identity-token --impersonate-service-account=TARGET_SA",
+		"iam.serviceAccounts.actAs":          "# actAs allows deploying resources with this SA\ngcloud run deploy SERVICE --service-account=TARGET_SA",
+
+		// Compute Access
+		"compute.instances.osLogin":                   "gcloud compute ssh INSTANCE --zone=ZONE --project=PROJECT",
+		"compute.instances.setMetadata":               "gcloud compute instances add-metadata INSTANCE --zone=ZONE --metadata=ssh-keys=\"user:$(cat ~/.ssh/id_rsa.pub)\"",
+		"compute.projects.setCommonInstanceMetadata":  "gcloud compute project-info add-metadata --metadata=ssh-keys=\"user:$(cat ~/.ssh/id_rsa.pub)\"",
+		"compute.instances.getSerialPortOutput":       "gcloud compute instances get-serial-port-output INSTANCE --zone=ZONE",
+
+		// GKE Access
+		"container.clusters.getCredentials": "gcloud container clusters get-credentials CLUSTER --zone=ZONE --project=PROJECT",
+		"container.pods.exec":               "kubectl exec -it POD -- /bin/sh",
+		"container.pods.attach":             "kubectl attach -it POD",
+
+		// Serverless
+		"cloudfunctions.functions.create": "gcloud functions deploy FUNC --runtime=python311 --service-account=TARGET_SA --trigger-http",
+		"cloudfunctions.functions.update": "gcloud functions deploy FUNC --service-account=TARGET_SA",
+		"run.services.create":             "gcloud run deploy SERVICE --image=IMAGE --service-account=TARGET_SA",
+		"run.services.update":             "gcloud run services update SERVICE --service-account=TARGET_SA",
+
+		// IAM Policy Modification
+		"resourcemanager.projects.setIamPolicy":       "gcloud projects add-iam-policy-binding PROJECT --member=user:ATTACKER --role=roles/owner",
+		"resourcemanager.folders.setIamPolicy":        "gcloud resource-manager folders add-iam-policy-binding FOLDER_ID --member=user:ATTACKER --role=roles/owner",
+		"resourcemanager.organizations.setIamPolicy":  "gcloud organizations add-iam-policy-binding ORG_ID --member=user:ATTACKER --role=roles/owner",
+	}
+
+	cmd, ok := commands[permission]
+	if !ok {
+		return fmt.Sprintf("# No specific command for %s - check gcloud documentation", permission)
+	}
+
+	if project != "" && project != "-" {
+		cmd = strings.ReplaceAll(cmd, "PROJECT", project)
+	}
+
+	return cmd
+}
+
+// generatePlaybookForProject generates a loot file specific to a project
+func (m *LateralMovementModule) generatePlaybookForProject(projectID string) *internal.LootFile {
 	var sb strings.Builder
-	sb.WriteString("# GCP Lateral Movement Playbook\n")
+	sb.WriteString("# GCP Lateral Movement Commands\n")
+	sb.WriteString(fmt.Sprintf("# Project: %s\n", projectID))
 	sb.WriteString("# Generated by CloudFox\n\n")
 
-	// Token theft vectors
-	if len(m.AllPaths) > 0 {
+	// Token theft vectors for this project
+	if paths, ok := m.ProjectPaths[projectID]; ok && len(paths) > 0 {
 		sb.WriteString("## Token Theft Vectors\n\n")
 
-		// Group by category
-		byCategory := make(map[string][]LateralMovementPath)
-		for _, path := range m.AllPaths {
-			byCategory[path.Category] = append(byCategory[path.Category], path)
+		for _, path := range paths {
+			sb.WriteString(fmt.Sprintf("### %s -> %s\n", path.Source, path.Target))
+			sb.WriteString(fmt.Sprintf("# Method: %s\n", path.Method))
+			sb.WriteString(fmt.Sprintf("# Category: %s\n", path.Category))
+			if path.ExploitCommand != "" {
+				sb.WriteString(path.ExploitCommand)
+				sb.WriteString("\n\n")
+			}
 		}
+	}
 
-		for category, paths := range byCategory {
-			sb.WriteString(fmt.Sprintf("### %s\n\n", category))
-			for _, path := range paths {
-				sb.WriteString(fmt.Sprintf("**%s → %s**\n", path.Source, path.Target))
-				sb.WriteString(fmt.Sprintf("- Method: %s\n", path.Method))
-				sb.WriteString(fmt.Sprintf("- Risk: %s\n", path.RiskLevel))
-				sb.WriteString(fmt.Sprintf("- Description: %s\n\n", path.Description))
-				if path.ExploitCommand != "" {
-					sb.WriteString("```bash\n")
-					sb.WriteString(path.ExploitCommand)
-					sb.WriteString("\n```\n\n")
+	// Permission-based findings - filter to this project's principals + users/groups
+	if len(m.FoxMapperFindings) > 0 {
+		hasFindings := false
+
+		for _, finding := range m.FoxMapperFindings {
+			var relevantPrincipals []foxmapperservice.PrincipalAccess
+
+			for _, p := range finding.Principals {
+				principalProject := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+				if principalProject == projectID || principalProject == "" {
+					relevantPrincipals = append(relevantPrincipals, p)
+				}
+			}
+
+			if len(relevantPrincipals) == 0 {
+				continue
+			}
+
+			if !hasFindings {
+				sb.WriteString("## Permission-Based Lateral Movement Commands\n\n")
+				hasFindings = true
+			}
+
+			sb.WriteString(fmt.Sprintf("### %s (%s)\n", finding.Permission, finding.Category))
+			sb.WriteString(fmt.Sprintf("# %s\n\n", finding.Description))
+
+			for _, p := range relevantPrincipals {
+				project := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+				if project == "" {
+					project = projectID
+				}
+
+				principalType := p.MemberType
+				if principalType == "" {
+					if p.IsServiceAccount {
+						principalType = "serviceAccount"
+					} else {
+						principalType = "user"
+					}
+				}
+
+				sb.WriteString(fmt.Sprintf("## %s (%s)\n", p.Principal, principalType))
+
+				if p.IsServiceAccount {
+					sb.WriteString(fmt.Sprintf("# Impersonate first:\ngcloud config set auth/impersonate_service_account %s\n\n", p.Principal))
+				}
+
+				cmd := getLateralExploitCommand(finding.Permission, p.Principal, project)
+				sb.WriteString(cmd)
+				sb.WriteString("\n\n")
+
+				if p.IsServiceAccount {
+					sb.WriteString("# Reset impersonation when done:\n# gcloud config unset auth/impersonate_service_account\n\n")
 				}
 			}
 		}
 	}
 
-	// Permission-based findings from FoxMapper
-	if len(m.FoxMapperFindings) > 0 {
-		sb.WriteString("## Permission-Based Lateral Movement Techniques\n\n")
-		for _, finding := range m.FoxMapperFindings {
-			sb.WriteString(fmt.Sprintf("### %s (%s)\n", finding.Technique, finding.Category))
-			sb.WriteString(fmt.Sprintf("- Permission: %s\n", finding.Permission))
-			sb.WriteString(fmt.Sprintf("- Description: %s\n", finding.Description))
-			sb.WriteString(fmt.Sprintf("- Principals with access: %d\n\n", len(finding.Principals)))
-			if finding.Exploitation != "" {
-				sb.WriteString("```bash\n")
-				sb.WriteString(finding.Exploitation)
-				sb.WriteString("\n```\n\n")
-			}
-		}
+	contents := sb.String()
+	if contents == fmt.Sprintf("# GCP Lateral Movement Commands\n# Project: %s\n# Generated by CloudFox\n\n", projectID) {
+		return nil
 	}
 
 	return &internal.LootFile{
-		Name:     "lateral-movement-playbook",
-		Contents: sb.String(),
+		Name:     "lateral-movement-commands",
+		Contents: contents,
 	}
 }
 
@@ -620,11 +751,13 @@ func (m *LateralMovementModule) getHeader() []string {
 
 func (m *LateralMovementModule) getFoxMapperHeader() []string {
 	return []string{
-		"Technique",
+		"Scope Type",
+		"Scope ID",
+		"Principal Type",
+		"Principal",
 		"Category",
 		"Permission",
 		"Description",
-		"Principal Count",
 	}
 }
 
@@ -644,76 +777,173 @@ func (m *LateralMovementModule) pathsToTableBody(paths []LateralMovementPath) []
 	return body
 }
 
+// foxMapperFindingsForProject returns findings for a specific project
+// Includes: SAs from that project + users/groups (which can access any project)
+// Also filters by scope: only org/folder/project findings in the project's hierarchy
+func (m *LateralMovementModule) foxMapperFindingsForProject(projectID string) [][]string {
+	var body [][]string
+
+	// Get ancestor folders and org for filtering
+	var ancestorFolders []string
+	var projectOrgID string
+	if m.OrgCache != nil && m.OrgCache.IsPopulated() {
+		ancestorFolders = m.OrgCache.GetProjectAncestorFolders(projectID)
+		projectOrgID = m.OrgCache.GetProjectOrgID(projectID)
+	}
+	ancestorFolderSet := make(map[string]bool)
+	for _, f := range ancestorFolders {
+		ancestorFolderSet[f] = true
+	}
+
+	for _, f := range m.FoxMapperFindings {
+		for _, p := range f.Principals {
+			principalProject := extractProjectFromPrincipal(p.Principal, m.OrgCache)
+
+			// Include if: SA from this project OR user/group (no project)
+			if principalProject != projectID && principalProject != "" {
+				continue
+			}
+
+			// Filter by scope hierarchy
+			if !m.scopeMatchesProject(p.ScopeType, p.ScopeID, projectID, projectOrgID, ancestorFolderSet) {
+				continue
+			}
+
+			principalType := p.MemberType
+			if principalType == "" {
+				if p.IsServiceAccount {
+					principalType = "serviceAccount"
+				} else {
+					principalType = "user"
+				}
+			}
+
+			scopeType := p.ScopeType
+			if scopeType == "" {
+				scopeType = "-"
+			}
+			scopeID := p.ScopeID
+			if scopeID == "" {
+				scopeID = "-"
+			}
+
+			body = append(body, []string{
+				scopeType,
+				scopeID,
+				principalType,
+				p.Principal,
+				f.Category,
+				f.Permission,
+				f.Description,
+			})
+		}
+	}
+	return body
+}
+
+// foxMapperFindingsToTableBody returns all findings (for flat output)
 func (m *LateralMovementModule) foxMapperFindingsToTableBody() [][]string {
 	var body [][]string
 	for _, f := range m.FoxMapperFindings {
-		body = append(body, []string{
-			f.Technique,
-			f.Category,
-			f.Permission,
-			f.Description,
-			fmt.Sprintf("%d", len(f.Principals)),
-		})
+		for _, p := range f.Principals {
+			principalType := p.MemberType
+			if principalType == "" {
+				if p.IsServiceAccount {
+					principalType = "serviceAccount"
+				} else {
+					principalType = "user"
+				}
+			}
+
+			scopeType := p.ScopeType
+			if scopeType == "" {
+				scopeType = "-"
+			}
+			scopeID := p.ScopeID
+			if scopeID == "" {
+				scopeID = "-"
+			}
+
+			body = append(body, []string{
+				scopeType,
+				scopeID,
+				principalType,
+				p.Principal,
+				f.Category,
+				f.Permission,
+				f.Description,
+			})
+		}
 	}
 	return body
 }
 
 func (m *LateralMovementModule) buildTablesForProject(projectID string) []internal.TableFile {
-	var tableFiles []internal.TableFile
+	// No longer outputting the old lateral-movement table
+	// All findings are now in lateral-movement-permissions
+	return []internal.TableFile{}
+}
 
-	if paths, ok := m.ProjectPaths[projectID]; ok && len(paths) > 0 {
-		tableFiles = append(tableFiles, internal.TableFile{
-			Name:   "lateral-movement",
-			Header: m.getHeader(),
-			Body:   m.pathsToTableBody(paths),
-		})
+// scopeMatchesProject checks if a scope (org/folder/project) is in the hierarchy for a project
+func (m *LateralMovementModule) scopeMatchesProject(scopeType, scopeID, projectID, projectOrgID string, ancestorFolderSet map[string]bool) bool {
+	if scopeType == "" || scopeID == "" {
+		// No scope info - include by default
+		return true
 	}
 
-	return tableFiles
+	switch scopeType {
+	case "project":
+		return scopeID == projectID
+	case "organization":
+		if projectOrgID != "" {
+			return scopeID == projectOrgID
+		}
+		// No org info - include by default
+		return true
+	case "folder":
+		if len(ancestorFolderSet) > 0 {
+			return ancestorFolderSet[scopeID]
+		}
+		// No folder info - include by default
+		return true
+	case "resource":
+		// Resource-level - include by default
+		return true
+	default:
+		return true
+	}
 }
 
 func (m *LateralMovementModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
 	outputData := internal.HierarchicalOutputData{
 		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		FolderLevelData:  make(map[string]internal.CloudfoxOutput),
 		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
 	}
 
-	// Generate playbook once for all projects
-	playbook := m.generatePlaybook()
-	playbookAdded := false
-
-	// Iterate over ALL projects, not just ones with enumerated paths
+	// Process each specified project
 	for _, projectID := range m.ProjectIDs {
-		tableFiles := m.buildTablesForProject(projectID)
+		var tableFiles []internal.TableFile
 
-		var lootFiles []internal.LootFile
-		if projectLoot, ok := m.LootMap[projectID]; ok {
-			for _, loot := range projectLoot {
-				if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
-					lootFiles = append(lootFiles, *loot)
-				}
-			}
-		}
-
-		// Add playbook to first project only
-		if playbook != nil && playbook.Contents != "" && !playbookAdded {
-			lootFiles = append(lootFiles, *playbook)
-			playbookAdded = true
-		}
-
-		// Add FoxMapper findings table to first project only
-		if len(m.FoxMapperFindings) > 0 && projectID == m.ProjectIDs[0] {
+		// Add FoxMapper findings table for this project (the only table now)
+		foxMapperBody := m.foxMapperFindingsForProject(projectID)
+		if len(foxMapperBody) > 0 {
 			tableFiles = append(tableFiles, internal.TableFile{
 				Name:   "lateral-movement-permissions",
 				Header: m.getFoxMapperHeader(),
-				Body:   m.foxMapperFindingsToTableBody(),
+				Body:   foxMapperBody,
 			})
 		}
 
-		// Only add to output if we have tables or loot
-		if len(tableFiles) > 0 || len(lootFiles) > 0 {
-			outputData.ProjectLevelData[projectID] = LateralMovementOutput{Table: tableFiles, Loot: lootFiles}
+		// Add project-specific playbook (only one loot file per project)
+		var lootFiles []internal.LootFile
+		playbook := m.generatePlaybookForProject(projectID)
+		if playbook != nil && playbook.Contents != "" {
+			lootFiles = append(lootFiles, *playbook)
 		}
+
+		// Always add all specified projects to output
+		outputData.ProjectLevelData[projectID] = LateralMovementOutput{Table: tableFiles, Loot: lootFiles}
 	}
 
 	pathBuilder := m.BuildPathBuilder()
@@ -727,14 +957,7 @@ func (m *LateralMovementModule) writeHierarchicalOutput(ctx context.Context, log
 func (m *LateralMovementModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
 	tables := []internal.TableFile{}
 
-	if len(m.AllPaths) > 0 {
-		tables = append(tables, internal.TableFile{
-			Name:   "lateral-movement",
-			Header: m.getHeader(),
-			Body:   m.pathsToTableBody(m.AllPaths),
-		})
-	}
-
+	// Only output the permissions table (not the old lateral-movement table)
 	if len(m.FoxMapperFindings) > 0 {
 		tables = append(tables, internal.TableFile{
 			Name:   "lateral-movement-permissions",
@@ -743,20 +966,14 @@ func (m *LateralMovementModule) writeFlatOutput(ctx context.Context, logger inte
 		})
 	}
 
-	// Collect loot files
+	// Add per-project playbooks
 	var lootFiles []internal.LootFile
-	for _, projectLoot := range m.LootMap {
-		for _, loot := range projectLoot {
-			if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
-				lootFiles = append(lootFiles, *loot)
-			}
+	for _, projectID := range m.ProjectIDs {
+		playbook := m.generatePlaybookForProject(projectID)
+		if playbook != nil && playbook.Contents != "" {
+			playbook.Name = fmt.Sprintf("lateral-movement-commands-%s", projectID)
+			lootFiles = append(lootFiles, *playbook)
 		}
-	}
-
-	// Add playbook
-	playbook := m.generatePlaybook()
-	if playbook != nil && playbook.Contents != "" {
-		lootFiles = append(lootFiles, *playbook)
 	}
 
 	output := LateralMovementOutput{

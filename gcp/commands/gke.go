@@ -1,11 +1,12 @@
 package commands
 
 import (
-	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/BishopFox/cloudfox/gcp/shared"
 
 	GKEService "github.com/BishopFox/cloudfox/gcp/services/gkeService"
 	"github.com/BishopFox/cloudfox/globals"
@@ -49,7 +50,9 @@ Attack Surface:
 - Default service accounts may have excessive permissions
 - Legacy ABAC allows broader access than RBAC
 - Autopilot clusters have reduced attack surface
-- Binary Authorization prevents untrusted container images`,
+- Binary Authorization prevents untrusted container images
+
+TIP: Run 'workload-identity' to enumerate K8s SA -> GCP SA bindings and Workload Identity Federation (external identity pools/providers).`,
 	Run: runGCPGKECommand,
 }
 
@@ -60,10 +63,10 @@ type GKEModule struct {
 	gcpinternal.BaseGCPModule
 
 	// Module-specific fields - per-project for hierarchical output
-	ProjectClusters  map[string][]GKEService.ClusterInfo       // projectID -> clusters
-	ProjectNodePools map[string][]GKEService.NodePoolInfo      // projectID -> node pools
-	LootMap          map[string]map[string]*internal.LootFile  // projectID -> loot files
-	FoxMapperCache   *gcpinternal.FoxMapperCache               // FoxMapper graph data (preferred)
+	ProjectClusters  map[string][]GKEService.ClusterInfo      // projectID -> clusters
+	ProjectNodePools map[string][]GKEService.NodePoolInfo     // projectID -> node pools
+	LootMap          map[string]map[string]*internal.LootFile // projectID -> loot files
+	FoxMapperCache   *gcpinternal.FoxMapperCache              // FoxMapper graph data (preferred)
 	mu               sync.Mutex
 }
 
@@ -203,15 +206,22 @@ func (m *GKEModule) addClusterToLoot(projectID string, cluster GKEService.Cluste
 	}
 
 	lootFile.Contents += fmt.Sprintf(
-		"# Cluster: %s (%s)\n"+
-			"# Project: %s\n"+
-			"gcloud container clusters describe %s --location=%s --project=%s\n"+
-			"gcloud container clusters get-credentials %s --location=%s --project=%s\n"+
+		"#### Cluster: %s (%s)\n"+
+			"### Project: %s\n\n"+
+			"# Get detailed cluster configuration and settings\n"+
+			"gcloud container clusters describe %s --location=%s --project=%s\n\n"+
+			"# Configure kubectl to authenticate to this cluster\n"+
+			"gcloud container clusters get-credentials %s --location=%s --project=%s\n\n"+
+			"# List all node pools in this cluster\n"+
 			"gcloud container node-pools list --cluster=%s --location=%s --project=%s\n\n"+
-			"# kubectl commands (after getting credentials):\n"+
-			"kubectl cluster-info\n"+
-			"kubectl get nodes -o wide\n"+
-			"kubectl get namespaces\n"+
+			"# kubectl commands (after getting credentials):\n\n"+
+			"# Show cluster endpoint and services info\n"+
+			"kubectl cluster-info\n\n"+
+			"# List all nodes with additional details (IP, OS, runtime)\n"+
+			"kubectl get nodes -o wide\n\n"+
+			"# List all namespaces in the cluster\n"+
+			"kubectl get namespaces\n\n"+
+			"# Check what actions you can perform in the cluster\n"+
 			"kubectl auth can-i --list\n\n",
 		cluster.Name, cluster.Location,
 		cluster.ProjectID,
@@ -379,8 +389,8 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 	// Node pools table - node-level details including hardware security (like instances module)
 	nodePoolHeader := []string{
 		"Project", "Cluster", "Node Pool", "Machine Type", "Node Count",
-		"Service Account", "SA Attack Paths", "SA Scopes", "SA Scope Summary",
 		"Auto Upgrade", "Secure Boot", "Integrity", "Preemptible",
+		"Service Account", "SA Attack Paths", "SA Scopes", "SA Scope Summary",
 	}
 
 	var nodePoolBody [][]string
@@ -409,10 +419,11 @@ func (m *GKEModule) buildTablesForProject(clusters []GKEService.ClusterInfo, nod
 
 		nodePoolBody = append(nodePoolBody, []string{
 			m.GetProjectName(np.ProjectID), np.ClusterName, np.Name,
-			np.MachineType, fmt.Sprintf("%d", np.NodeCount), saDisplay, attackPaths,
-			scopes, scopeSummary, shared.BoolToYesNo(np.AutoUpgrade),
+			np.MachineType, fmt.Sprintf("%d", np.NodeCount),
+			shared.BoolToYesNo(np.AutoUpgrade),
 			shared.BoolToYesNo(np.SecureBoot), shared.BoolToYesNo(np.IntegrityMonitoring),
 			shared.BoolToYesNo(np.Preemptible || np.Spot),
+			saDisplay, attackPaths, scopes, scopeSummary,
 		})
 	}
 

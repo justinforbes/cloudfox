@@ -49,10 +49,11 @@ TIP: Run foxmapper first to populate the Attack Paths column with privesc/exfil/
 type ServiceAgentsModule struct {
 	gcpinternal.BaseGCPModule
 
-	ProjectAgents   map[string][]serviceagentsservice.ServiceAgentInfo // projectID -> agents
-	LootMap         map[string]map[string]*internal.LootFile           // projectID -> loot files
-	FoxMapperCache  *gcpinternal.FoxMapperCache                        // Cached FoxMapper analysis results
-	mu              sync.Mutex
+	ProjectAgents  map[string][]serviceagentsservice.ServiceAgentInfo // projectID -> agents
+	LootMap        map[string]map[string]*internal.LootFile           // projectID -> loot files
+	FoxMapperCache *gcpinternal.FoxMapperCache                        // Cached FoxMapper analysis results
+	OrgCache       *gcpinternal.OrgCache
+	mu             sync.Mutex
 }
 
 // ------------------------------
@@ -90,6 +91,9 @@ func runGCPServiceAgentsCommand(cmd *cobra.Command, args []string) {
 func (m *ServiceAgentsModule) Execute(ctx context.Context, logger internal.Logger) {
 	// Get FoxMapper cache from context
 	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
+
+	// Get OrgCache for project number resolution
+	m.OrgCache = gcpinternal.GetOrgCacheFromContext(ctx)
 
 	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_SERVICEAGENTS_MODULE_NAME, m.processProject)
 
@@ -134,7 +138,7 @@ func (m *ServiceAgentsModule) processProject(ctx context.Context, projectID stri
 	}
 
 	svc := serviceagentsservice.New()
-	agents, err := svc.GetServiceAgents(projectID)
+	agents, err := svc.GetServiceAgents(projectID, m.OrgCache)
 	if err != nil {
 		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
 			logger.ErrorM(fmt.Sprintf("Error getting service agents: %v", err), globals.GCP_SERVICEAGENTS_MODULE_NAME)
@@ -178,32 +182,17 @@ func (m *ServiceAgentsModule) addAgentToLoot(projectID string, agent serviceagen
 		crossProjectNote = " [CROSS-PROJECT from " + agent.SourceProject + "]"
 	}
 
-	// Check for high-risk roles
-	var highRiskRoles []string
-	for _, role := range agent.Roles {
-		riskLevel := getRiskLevel(role)
-		if riskLevel != "-" {
-			highRiskRoles = append(highRiskRoles, riskLevel)
-		}
-	}
-
-	highRiskNote := ""
-	if len(highRiskRoles) > 0 {
-		highRiskNote = " [HIGH RISK: " + strings.Join(highRiskRoles, ", ") + "]"
-	}
-
 	lootFile.Contents += fmt.Sprintf(
 		"# ==========================================\n"+
-			"# SERVICE AGENT: %s%s%s\n"+
+			"# SERVICE AGENT: %s%s\n"+
 			"# ==========================================\n"+
 			"# Email: %s\n"+
-			"# Project: %s\n"+
 			"# Description: %s\n",
-		agent.ServiceName, crossProjectNote, highRiskNote,
-		agent.Email, agent.ProjectID, agent.Description,
+		agent.ServiceName, crossProjectNote,
+		agent.Email, agent.Description,
 	)
 
-	if agent.SourceProject != "" {
+	if agent.IsCrossProject && agent.SourceProject != "" {
 		lootFile.Contents += fmt.Sprintf("# Source Project: %s\n", agent.SourceProject)
 	}
 
@@ -243,26 +232,6 @@ func (m *ServiceAgentsModule) writeOutput(ctx context.Context, logger internal.L
 	}
 }
 
-// High-risk roles that grant significant privileges
-var highRiskRoles = map[string]bool{
-	"roles/owner":                          true,
-	"roles/editor":                         true,
-	"roles/iam.serviceAccountAdmin":        true,
-	"roles/iam.serviceAccountKeyAdmin":     true,
-	"roles/iam.serviceAccountTokenCreator": true,
-	"roles/iam.serviceAccountUser":         true,
-	"roles/iam.workloadIdentityUser":       true,
-	"roles/compute.admin":                  true,
-	"roles/compute.instanceAdmin":          true,
-	"roles/container.admin":                true,
-	"roles/cloudbuild.builds.editor":       true,
-	"roles/cloudfunctions.admin":           true,
-	"roles/run.admin":                      true,
-	"roles/storage.admin":                  true,
-	"roles/secretmanager.admin":            true,
-	"roles/cloudkms.admin":                 true,
-}
-
 // getHeader returns the table header
 func (m *ServiceAgentsModule) getHeader() []string {
 	return []string{
@@ -272,69 +241,9 @@ func (m *ServiceAgentsModule) getHeader() []string {
 		"Source Project",
 		"Cross-Project",
 		"Role",
-		"Risk",
 		"Attack Paths",
 		"Description",
 	}
-}
-
-// getRiskLevel returns the risk level for a role
-// Returns the risk reason if high risk, or "-" if not
-func getRiskLevel(role string) string {
-	// Check known high-risk roles
-	riskReasons := map[string]string{
-		"roles/owner":                          "Owner",
-		"roles/editor":                         "Editor",
-		"roles/iam.serviceAccountAdmin":        "SA Admin",
-		"roles/iam.serviceAccountKeyAdmin":     "Key Admin",
-		"roles/iam.serviceAccountTokenCreator": "Token Creator",
-		"roles/iam.serviceAccountUser":         "SA User",
-		"roles/iam.workloadIdentityUser":       "Workload ID",
-		"roles/compute.admin":                  "Compute Admin",
-		"roles/compute.instanceAdmin":          "Instance Admin",
-		"roles/compute.instanceAdmin.v1":       "Instance Admin",
-		"roles/container.admin":                "GKE Admin",
-		"roles/container.clusterAdmin":         "Cluster Admin",
-		"roles/cloudbuild.builds.editor":       "Build Editor",
-		"roles/cloudfunctions.admin":           "Functions Admin",
-		"roles/run.admin":                      "Run Admin",
-		"roles/storage.admin":                  "Storage Admin",
-		"roles/secretmanager.admin":            "Secrets Admin",
-		"roles/cloudkms.admin":                 "KMS Admin",
-		"roles/bigquery.admin":                 "BigQuery Admin",
-		"roles/pubsub.admin":                   "Pub/Sub Admin",
-		"roles/logging.admin":                  "Logging Admin",
-		"roles/resourcemanager.projectIamAdmin": "IAM Admin",
-		"roles/resourcemanager.folderAdmin":    "Folder Admin",
-		"roles/resourcemanager.organizationAdmin": "Org Admin",
-	}
-
-	if reason, ok := riskReasons[role]; ok {
-		return reason
-	}
-
-	// Check for admin/owner patterns
-	if strings.HasSuffix(role, ".admin") {
-		// Extract service name for cleaner output
-		parts := strings.Split(role, "/")
-		if len(parts) == 2 {
-			serviceParts := strings.Split(parts[1], ".")
-			if len(serviceParts) > 0 {
-				// Capitalize first letter
-				name := serviceParts[0]
-				if len(name) > 0 {
-					return strings.ToUpper(name[:1]) + name[1:] + " Admin"
-				}
-			}
-		}
-		return "Admin Role"
-	}
-
-	if strings.Contains(role, "Admin") {
-		return "Admin Role"
-	}
-
-	return "-"
 }
 
 // writeHierarchicalOutput writes output to per-project directories
@@ -464,8 +373,6 @@ func (m *ServiceAgentsModule) agentsToTableBody(agents []serviceagentsservice.Se
 		// One row per role
 		if len(agent.Roles) > 0 {
 			for _, role := range agent.Roles {
-				riskLevel := getRiskLevel(role)
-
 				body = append(body, []string{
 					m.GetProjectName(agent.ProjectID),
 					agent.ServiceName,
@@ -473,7 +380,6 @@ func (m *ServiceAgentsModule) agentsToTableBody(agents []serviceagentsservice.Se
 					sourceProject,
 					crossProject,
 					role,
-					riskLevel,
 					attackPaths,
 					agent.Description,
 				})
@@ -486,7 +392,6 @@ func (m *ServiceAgentsModule) agentsToTableBody(agents []serviceagentsservice.Se
 				agent.Email,
 				sourceProject,
 				crossProject,
-				"-",
 				"-",
 				attackPaths,
 				agent.Description,

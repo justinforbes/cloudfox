@@ -183,6 +183,49 @@ func (c *FoxMapperCache) HasPrivesc(serviceAccount string) (bool, string) {
 	return false, ""
 }
 
+// GetAdminStatus returns the admin status for a principal from FoxMapper data
+// Returns: isAdmin (bool), adminLevel (string: "Org", "Folder", "Project", or "")
+func (c *FoxMapperCache) GetAdminStatus(principal string) (bool, string) {
+	if !c.populated {
+		return false, ""
+	}
+
+	// Clean the principal - remove prefixes if present
+	cleanPrincipal := principal
+	if strings.HasPrefix(principal, "serviceAccount:") {
+		cleanPrincipal = strings.TrimPrefix(principal, "serviceAccount:")
+	} else if strings.HasPrefix(principal, "user:") {
+		cleanPrincipal = strings.TrimPrefix(principal, "user:")
+	} else if strings.HasPrefix(principal, "group:") {
+		cleanPrincipal = strings.TrimPrefix(principal, "group:")
+	}
+
+	node := c.service.GetNode(cleanPrincipal)
+	if node == nil {
+		return false, ""
+	}
+
+	if node.IsAdmin {
+		level := node.AdminLevel
+		// Capitalize for display
+		switch level {
+		case "org":
+			return true, "Org"
+		case "folder":
+			return true, "Folder"
+		case "project":
+			return true, "Project"
+		default:
+			if level == "" {
+				return true, "Project" // Default to project if not specified
+			}
+			return true, level
+		}
+	}
+
+	return false, ""
+}
+
 // Context key for FoxMapper cache
 type foxMapperCacheKey struct{}
 
@@ -307,4 +350,18 @@ func GetAttackSummaryFromCaches(foxMapperCache *FoxMapperCache, _ interface{}, p
 	}
 
 	return "run foxmapper"
+}
+
+// GetAdminStatusFromCache returns admin status from FoxMapper cache
+// Returns the admin level (Org/Folder/Project) if admin, empty string otherwise
+func GetAdminStatusFromCache(foxMapperCache *FoxMapperCache, principal string) string {
+	if foxMapperCache == nil || !foxMapperCache.IsPopulated() {
+		return ""
+	}
+
+	isAdmin, level := foxMapperCache.GetAdminStatus(principal)
+	if isAdmin {
+		return level
+	}
+	return ""
 }

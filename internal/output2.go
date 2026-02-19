@@ -1213,6 +1213,7 @@ func formatNumberWithCommas(n int) string {
 // HierarchicalOutputData represents output data organized by scope for hierarchical output
 type HierarchicalOutputData struct {
 	OrgLevelData     map[string]CloudfoxOutput // orgID -> org-level data
+	FolderLevelData  map[string]CloudfoxOutput // folderID -> folder-level data
 	ProjectLevelData map[string]CloudfoxOutput // projectID -> project data
 }
 
@@ -1250,6 +1251,14 @@ func HandleHierarchicalOutput(
 		outPath := pathBuilder("organization", orgID)
 		if err := writeOutputToPath(outPath, format, verbosity, wrap, orgData, logger); err != nil {
 			return fmt.Errorf("failed to write org-level output for %s: %w", orgID, err)
+		}
+	}
+
+	// Write folder-level data (if any)
+	for folderID, folderData := range outputData.FolderLevelData {
+		outPath := pathBuilder("folder", folderID)
+		if err := writeOutputToPath(outPath, format, verbosity, wrap, folderData, logger); err != nil {
+			return fmt.Errorf("failed to write folder-level output for %s: %w", folderID, err)
 		}
 	}
 
@@ -1313,6 +1322,14 @@ func HandleHierarchicalOutputStreaming(
 		outPath := pathBuilder("organization", orgID)
 		if err := streamOutputToPath(outPath, format, verbosity, wrap, orgData, logger); err != nil {
 			return fmt.Errorf("failed to stream org-level output for %s: %w", orgID, err)
+		}
+	}
+
+	// Stream folder-level data (if any)
+	for folderID, folderData := range outputData.FolderLevelData {
+		outPath := pathBuilder("folder", folderID)
+		if err := streamOutputToPath(outPath, format, verbosity, wrap, folderData, logger); err != nil {
+			return fmt.Errorf("failed to stream folder-level output for %s: %w", folderID, err)
 		}
 	}
 
@@ -1456,6 +1473,11 @@ func HandleHierarchicalOutputSmart(
 			totalRows += len(tableFile.Body)
 		}
 	}
+	for _, folderData := range outputData.FolderLevelData {
+		for _, tableFile := range folderData.TableFiles() {
+			totalRows += len(tableFile.Body)
+		}
+	}
 	for _, projectData := range outputData.ProjectLevelData {
 		for _, tableFile := range projectData.TableFiles() {
 			totalRows += len(tableFile.Body)
@@ -1487,4 +1509,474 @@ func HandleHierarchicalOutputSmart(
 
 	// Use normal in-memory output for smaller datasets
 	return HandleHierarchicalOutput(cloudProvider, format, verbosity, wrap, pathBuilder, outputData)
+}
+
+// ============================================================================
+// SINGLE-PASS TEE STREAMING - Efficient hierarchical output with row routing
+// ============================================================================
+
+// RowRouter is a function that determines which project IDs a row belongs to.
+// Given a row (slice of strings), it returns the project IDs that should receive this row.
+// The row is always written to org-level; this determines additional project-level routing.
+type RowRouter func(row []string) []string
+
+// ProjectLootCollector is a function that returns loot files for a specific project.
+// This allows modules to provide inheritance-aware loot (e.g., org + folder + project loot).
+type ProjectLootCollector func(projectID string) []LootFile
+
+// TeeStreamingConfig holds configuration for single-pass tee streaming output
+type TeeStreamingConfig struct {
+	// OrgID is the organization ID for org-level output
+	OrgID string
+
+	// ProjectIDs is the list of all project IDs that may receive output
+	ProjectIDs []string
+
+	// Tables contains the table data to stream (header + body)
+	Tables []TableFile
+
+	// LootFiles contains loot files to write to org level
+	LootFiles []LootFile
+
+	// ProjectLootCollector returns loot files for a specific project (with inheritance).
+	// If nil, no loot is written to project directories.
+	ProjectLootCollector ProjectLootCollector
+
+	// RowRouter determines which projects each row belongs to
+	// If nil, rows are only written to org level
+	RowRouter RowRouter
+
+	// PathBuilder builds output paths for each scope
+	PathBuilder PathBuilder
+
+	// Format is the output format ("all", "csv", "json", "table")
+	Format string
+
+	// Verbosity level for console output
+	Verbosity int
+
+	// Wrap enables table wrapping
+	Wrap bool
+}
+
+// teeStreamWriter manages multiple output file handles for tee streaming
+type teeStreamWriter struct {
+	// orgWriters holds file writers for org-level output (format -> file)
+	orgCSV   *os.File
+	orgJSON  *os.File
+	orgTable *os.File
+
+	// projectWriters holds file writers for each project (projectID -> format -> file)
+	projectCSV   map[string]*os.File
+	projectJSON  map[string]*os.File
+	projectTable map[string]*os.File
+
+	// Track which projects have had headers written
+	projectHeaderWritten map[string]bool
+
+	// Configuration
+	format  string
+	outPath string
+}
+
+// HandleHierarchicalOutputTee performs single-pass streaming with tee to multiple outputs.
+// This is the most efficient method for large datasets that need both org-level and per-project output.
+//
+// Instead of streaming org data first, then streaming each project's filtered data separately,
+// this function streams through the data once and writes each row to:
+// 1. The org-level output (always)
+// 2. Any project-level outputs determined by the RowRouter function
+//
+// This reduces I/O and processing time significantly for large datasets.
+func HandleHierarchicalOutputTee(config TeeStreamingConfig) error {
+	logger := NewLogger()
+
+	if config.OrgID == "" {
+		return fmt.Errorf("OrgID is required for tee streaming")
+	}
+
+	// Get base module name for logging
+	baseCloudfoxModule := ""
+	if len(config.Tables) > 0 {
+		baseCloudfoxModule = config.Tables[0].Name
+	}
+
+	// Build output paths
+	orgPath := config.PathBuilder("organization", config.OrgID)
+	projectPaths := make(map[string]string)
+	for _, projectID := range config.ProjectIDs {
+		projectPaths[projectID] = config.PathBuilder("project", projectID)
+	}
+
+	// Track which projects received data (for loot file generation)
+	projectsWithData := make(map[string]bool)
+
+	// Process each table
+	for _, t := range config.Tables {
+		if config.Verbosity > 0 {
+			tmpClient := TableClient{Wrap: config.Wrap}
+			tmpClient.printTablesToScreen([]TableFile{t})
+		}
+
+		safeName := sanitizeFileName(t.Name)
+
+		// Initialize writers
+		writer := &teeStreamWriter{
+			projectCSV:           make(map[string]*os.File),
+			projectJSON:          make(map[string]*os.File),
+			projectTable:         make(map[string]*os.File),
+			projectHeaderWritten: make(map[string]bool),
+			format:               config.Format,
+		}
+
+		// Open org-level files
+		if err := writer.openOrgFiles(orgPath, safeName, config.Format); err != nil {
+			return fmt.Errorf("failed to open org files: %w", err)
+		}
+
+		// Write org-level headers
+		if err := writer.writeOrgHeader(t.Header, config.Format); err != nil {
+			writer.closeAll()
+			return fmt.Errorf("failed to write org header: %w", err)
+		}
+
+		// Pre-open project files if we have a router
+		if config.RowRouter != nil {
+			for projectID, projectPath := range projectPaths {
+				if err := writer.openProjectFiles(projectID, projectPath, safeName, config.Format); err != nil {
+					writer.closeAll()
+					return fmt.Errorf("failed to open project files for %s: %w", projectID, err)
+				}
+			}
+		}
+
+		// Stream each row
+		for _, row := range t.Body {
+			cleanRow := removeColorCodesFromSlice(row)
+
+			// Always write to org level
+			if err := writer.writeOrgRow(cleanRow, config.Format); err != nil {
+				writer.closeAll()
+				return fmt.Errorf("failed to write org row: %w", err)
+			}
+
+			// Route to projects if router is configured
+			if config.RowRouter != nil {
+				targetProjects := config.RowRouter(row)
+				for _, projectID := range targetProjects {
+					// Track that this project has data
+					projectsWithData[projectID] = true
+
+					// Write header if this is the first row for this project
+					if !writer.projectHeaderWritten[projectID] {
+						if err := writer.writeProjectHeader(projectID, t.Header, config.Format); err != nil {
+							writer.closeAll()
+							return fmt.Errorf("failed to write project header for %s: %w", projectID, err)
+						}
+						writer.projectHeaderWritten[projectID] = true
+					}
+
+					if err := writer.writeProjectRow(projectID, cleanRow, config.Format); err != nil {
+						writer.closeAll()
+						return fmt.Errorf("failed to write project row for %s: %w", projectID, err)
+					}
+				}
+			}
+		}
+
+		// Close all files
+		writer.closeAll()
+
+		// Log output paths
+		if config.Format == "all" || config.Format == "csv" {
+			logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(orgPath, "csv", safeName+".csv")), baseCloudfoxModule)
+		}
+		if config.Format == "all" || config.Format == "json" {
+			logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(orgPath, "json", safeName+".jsonl")), baseCloudfoxModule)
+		}
+		if config.Format == "all" || config.Format == "table" {
+			logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(orgPath, "table", safeName+".txt")), baseCloudfoxModule)
+		}
+
+		// Log project outputs (only for projects that received data)
+		for projectID := range writer.projectHeaderWritten {
+			projectPath := projectPaths[projectID]
+			if config.Format == "all" || config.Format == "csv" {
+				logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(projectPath, "csv", safeName+".csv")), baseCloudfoxModule)
+			}
+			if config.Format == "all" || config.Format == "json" {
+				logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(projectPath, "json", safeName+".jsonl")), baseCloudfoxModule)
+			}
+			if config.Format == "all" || config.Format == "table" {
+				logger.InfoM(fmt.Sprintf("Output written to %s", filepath.Join(projectPath, "table", safeName+".txt")), baseCloudfoxModule)
+			}
+		}
+	}
+
+	// Write loot files to org level
+	for _, l := range config.LootFiles {
+		lootDir := filepath.Join(orgPath, "loot")
+		if err := os.MkdirAll(lootDir, 0o755); err != nil {
+			return fmt.Errorf("failed to create loot directory: %w", err)
+		}
+
+		lootPath := filepath.Join(lootDir, l.Name+".txt")
+		if err := os.WriteFile(lootPath, []byte(l.Contents), 0644); err != nil {
+			return fmt.Errorf("failed to write loot file: %w", err)
+		}
+
+		logger.InfoM(fmt.Sprintf("Output written to %s", lootPath), baseCloudfoxModule)
+	}
+
+	// Write per-project loot files (with inheritance) if collector is provided
+	if config.ProjectLootCollector != nil {
+		for projectID := range projectsWithData {
+			projectPath := projectPaths[projectID]
+			projectLootFiles := config.ProjectLootCollector(projectID)
+
+			for _, l := range projectLootFiles {
+				lootDir := filepath.Join(projectPath, "loot")
+				if err := os.MkdirAll(lootDir, 0o755); err != nil {
+					return fmt.Errorf("failed to create project loot directory: %w", err)
+				}
+
+				lootPath := filepath.Join(lootDir, l.Name+".txt")
+				if err := os.WriteFile(lootPath, []byte(l.Contents), 0644); err != nil {
+					return fmt.Errorf("failed to write project loot file: %w", err)
+				}
+
+				logger.InfoM(fmt.Sprintf("Output written to %s", lootPath), baseCloudfoxModule)
+			}
+		}
+	}
+
+	return nil
+}
+
+// openOrgFiles opens output files for org-level output
+func (w *teeStreamWriter) openOrgFiles(orgPath, safeName, format string) error {
+	var err error
+
+	if format == "all" || format == "csv" {
+		csvDir := filepath.Join(orgPath, "csv")
+		if err = os.MkdirAll(csvDir, 0o755); err != nil {
+			return err
+		}
+		w.orgCSV, err = os.OpenFile(filepath.Join(csvDir, safeName+".csv"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+	}
+
+	if format == "all" || format == "json" {
+		jsonDir := filepath.Join(orgPath, "json")
+		if err = os.MkdirAll(jsonDir, 0o755); err != nil {
+			return err
+		}
+		w.orgJSON, err = os.OpenFile(filepath.Join(jsonDir, safeName+".jsonl"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+	}
+
+	if format == "all" || format == "table" {
+		tableDir := filepath.Join(orgPath, "table")
+		if err = os.MkdirAll(tableDir, 0o755); err != nil {
+			return err
+		}
+		w.orgTable, err = os.OpenFile(filepath.Join(tableDir, safeName+".txt"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// openProjectFiles opens output files for a specific project
+func (w *teeStreamWriter) openProjectFiles(projectID, projectPath, safeName, format string) error {
+	var err error
+
+	if format == "all" || format == "csv" {
+		csvDir := filepath.Join(projectPath, "csv")
+		if err = os.MkdirAll(csvDir, 0o755); err != nil {
+			return err
+		}
+		w.projectCSV[projectID], err = os.OpenFile(filepath.Join(csvDir, safeName+".csv"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+	}
+
+	if format == "all" || format == "json" {
+		jsonDir := filepath.Join(projectPath, "json")
+		if err = os.MkdirAll(jsonDir, 0o755); err != nil {
+			return err
+		}
+		w.projectJSON[projectID], err = os.OpenFile(filepath.Join(jsonDir, safeName+".jsonl"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+	}
+
+	if format == "all" || format == "table" {
+		tableDir := filepath.Join(projectPath, "table")
+		if err = os.MkdirAll(tableDir, 0o755); err != nil {
+			return err
+		}
+		w.projectTable[projectID], err = os.OpenFile(filepath.Join(tableDir, safeName+".txt"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeOrgHeader writes header to org-level files
+func (w *teeStreamWriter) writeOrgHeader(header []string, format string) error {
+	if format == "all" || format == "csv" {
+		if w.orgCSV != nil {
+			_, err := w.orgCSV.WriteString(strings.Join(header, ",") + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if format == "all" || format == "table" {
+		if w.orgTable != nil {
+			_, err := w.orgTable.WriteString(strings.Join(header, "\t") + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// JSON doesn't need a header line (each row is self-contained)
+	return nil
+}
+
+// writeProjectHeader writes header to project-level files
+func (w *teeStreamWriter) writeProjectHeader(projectID string, header []string, format string) error {
+	if format == "all" || format == "csv" {
+		if f := w.projectCSV[projectID]; f != nil {
+			_, err := f.WriteString(strings.Join(header, ",") + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if format == "all" || format == "table" {
+		if f := w.projectTable[projectID]; f != nil {
+			_, err := f.WriteString(strings.Join(header, "\t") + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// writeOrgRow writes a row to org-level files
+func (w *teeStreamWriter) writeOrgRow(row []string, format string) error {
+	if format == "all" || format == "csv" {
+		if w.orgCSV != nil {
+			_, err := w.orgCSV.WriteString(strings.Join(row, ",") + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if format == "all" || format == "json" {
+		if w.orgJSON != nil {
+			jsonBytes, err := json.Marshal(row)
+			if err != nil {
+				return err
+			}
+			_, err = w.orgJSON.WriteString(string(jsonBytes) + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if format == "all" || format == "table" {
+		if w.orgTable != nil {
+			_, err := w.orgTable.WriteString(strings.Join(row, "\t") + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// writeProjectRow writes a row to project-level files
+func (w *teeStreamWriter) writeProjectRow(projectID string, row []string, format string) error {
+	if format == "all" || format == "csv" {
+		if f := w.projectCSV[projectID]; f != nil {
+			_, err := f.WriteString(strings.Join(row, ",") + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if format == "all" || format == "json" {
+		if f := w.projectJSON[projectID]; f != nil {
+			jsonBytes, err := json.Marshal(row)
+			if err != nil {
+				return err
+			}
+			_, err = f.WriteString(string(jsonBytes) + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	if format == "all" || format == "table" {
+		if f := w.projectTable[projectID]; f != nil {
+			_, err := f.WriteString(strings.Join(row, "\t") + "\n")
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// closeAll closes all open file handles
+func (w *teeStreamWriter) closeAll() {
+	if w.orgCSV != nil {
+		w.orgCSV.Close()
+	}
+	if w.orgJSON != nil {
+		w.orgJSON.Close()
+	}
+	if w.orgTable != nil {
+		w.orgTable.Close()
+	}
+
+	for _, f := range w.projectCSV {
+		if f != nil {
+			f.Close()
+		}
+	}
+	for _, f := range w.projectJSON {
+		if f != nil {
+			f.Close()
+		}
+	}
+	for _, f := range w.projectTable {
+		if f != nil {
+			f.Close()
+		}
+	}
 }

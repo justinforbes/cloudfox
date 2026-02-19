@@ -18,9 +18,10 @@ type OrgCache struct {
 	AllProjects []CachedProject
 
 	// Quick lookups
-	ProjectByID map[string]*CachedProject
-	FolderByID  map[string]*CachedFolder
-	OrgByID     map[string]*CachedOrganization
+	ProjectByID     map[string]*CachedProject
+	ProjectByNumber map[string]*CachedProject
+	FolderByID      map[string]*CachedFolder
+	OrgByID         map[string]*CachedOrganization
 
 	// Populated indicates whether the cache has been populated
 	Populated bool
@@ -33,6 +34,8 @@ type CachedOrganization struct {
 	ID          string // Numeric org ID
 	Name        string // organizations/ORGID
 	DisplayName string
+	DirectoryID string // Cloud Identity directory customer ID
+	State       string // ACTIVE, DELETE_REQUESTED, etc.
 }
 
 // CachedFolder represents cached folder info
@@ -41,12 +44,14 @@ type CachedFolder struct {
 	Name        string // folders/FOLDERID
 	DisplayName string
 	Parent      string // Parent org or folder
+	State       string // ACTIVE, DELETE_REQUESTED, etc.
 }
 
 // CachedProject represents cached project info
 type CachedProject struct {
-	ID          string // Project ID
-	Name        string // projects/PROJECTID
+	ID          string // Project ID (e.g. "my-project")
+	Number      string // Project number (e.g. "123456789")
+	Name        string // projects/PROJECT_NUMBER
 	DisplayName string
 	Parent      string // Parent org or folder
 	State       string // ACTIVE, DELETE_REQUESTED, etc.
@@ -55,13 +60,14 @@ type CachedProject struct {
 // NewOrgCache creates a new empty org cache
 func NewOrgCache() *OrgCache {
 	return &OrgCache{
-		Organizations: []CachedOrganization{},
-		Folders:       []CachedFolder{},
-		AllProjects:   []CachedProject{},
-		ProjectByID:   make(map[string]*CachedProject),
-		FolderByID:    make(map[string]*CachedFolder),
-		OrgByID:       make(map[string]*CachedOrganization),
-		Populated:     false,
+		Organizations:   []CachedOrganization{},
+		Folders:         []CachedFolder{},
+		AllProjects:     []CachedProject{},
+		ProjectByID:     make(map[string]*CachedProject),
+		ProjectByNumber: make(map[string]*CachedProject),
+		FolderByID:      make(map[string]*CachedFolder),
+		OrgByID:         make(map[string]*CachedOrganization),
+		Populated:       false,
 	}
 }
 
@@ -89,7 +95,11 @@ func (c *OrgCache) AddProject(project CachedProject) {
 	defer c.mu.Unlock()
 
 	c.AllProjects = append(c.AllProjects, project)
-	c.ProjectByID[project.ID] = &c.AllProjects[len(c.AllProjects)-1]
+	ptr := &c.AllProjects[len(c.AllProjects)-1]
+	c.ProjectByID[project.ID] = ptr
+	if project.Number != "" {
+		c.ProjectByNumber[project.Number] = ptr
+	}
 }
 
 // MarkPopulated marks the cache as populated
@@ -137,6 +147,17 @@ func (c *OrgCache) GetProject(projectID string) *CachedProject {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.ProjectByID[projectID]
+}
+
+// GetProjectIDByNumber returns the project ID for a given project number.
+// Returns empty string if not found.
+func (c *OrgCache) GetProjectIDByNumber(number string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if p, ok := c.ProjectByNumber[number]; ok {
+		return p.ID
+	}
+	return ""
 }
 
 // GetFolder returns a folder by ID
@@ -214,6 +235,86 @@ func (c *OrgCache) GetProjectsInOrg(orgID string) []string {
 	}
 
 	return ids
+}
+
+// GetProjectAncestorFolders returns all folder IDs in the ancestry path for a project.
+// This walks up from the project's parent through all nested folders.
+func (c *OrgCache) GetProjectAncestorFolders(projectID string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	project := c.ProjectByID[projectID]
+	if project == nil {
+		return nil
+	}
+
+	var folderIDs []string
+	currentParent := project.Parent
+
+	// Walk up the folder chain
+	for {
+		if currentParent == "" {
+			break
+		}
+
+		// Check if parent is a folder
+		if len(currentParent) > 8 && currentParent[:8] == "folders/" {
+			folderID := currentParent[8:]
+			folderIDs = append(folderIDs, folderID)
+
+			// Get next parent
+			if folder := c.FolderByID[folderID]; folder != nil {
+				currentParent = folder.Parent
+			} else {
+				break
+			}
+		} else {
+			// Parent is an org or unknown, stop here
+			break
+		}
+	}
+
+	return folderIDs
+}
+
+// GetProjectOrgID returns the organization ID for a project.
+// Returns empty string if the project is not found or has no org.
+func (c *OrgCache) GetProjectOrgID(projectID string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	project := c.ProjectByID[projectID]
+	if project == nil {
+		return ""
+	}
+
+	currentParent := project.Parent
+
+	// Walk up until we find an org
+	for {
+		if currentParent == "" {
+			break
+		}
+
+		// Check if parent is an org
+		if len(currentParent) > 14 && currentParent[:14] == "organizations/" {
+			return currentParent[14:]
+		}
+
+		// Check if parent is a folder
+		if len(currentParent) > 8 && currentParent[:8] == "folders/" {
+			folderID := currentParent[8:]
+			if folder := c.FolderByID[folderID]; folder != nil {
+				currentParent = folder.Parent
+			} else {
+				break
+			}
+		} else {
+			break
+		}
+	}
+
+	return ""
 }
 
 // Context key for org cache

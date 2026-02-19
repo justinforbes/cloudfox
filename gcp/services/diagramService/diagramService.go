@@ -216,6 +216,8 @@ type LoadBalancerInfo struct {
 	Region          string
 	BackendServices []string
 	SecurityPolicy  string
+	// BackendDetails maps backend service name to its actual backends (instance groups, NEGs, etc.)
+	BackendDetails  map[string][]string
 }
 
 // VPCPeeringInfo represents VPC peering for diagram purposes
@@ -942,7 +944,7 @@ func DrawFirewallLegend(width int) string {
 // Load Balancer Diagram Functions
 // ========================================
 
-// DrawLoadBalancerDiagram generates an ASCII diagram showing load balancer architecture
+// DrawLoadBalancerDiagram generates an ASCII diagram showing load balancer traffic flow
 func DrawLoadBalancerDiagram(
 	loadBalancers []LoadBalancerInfo,
 	projectID string,
@@ -950,9 +952,9 @@ func DrawLoadBalancerDiagram(
 ) string {
 	var sb strings.Builder
 
-	title := "LOAD BALANCER ARCHITECTURE"
+	title := "LOAD BALANCER TRAFFIC FLOW"
 	if projectID != "" {
-		title = fmt.Sprintf("LOAD BALANCER ARCHITECTURE (Project: %s)", projectID)
+		title = fmt.Sprintf("LOAD BALANCER TRAFFIC FLOW (Project: %s)", projectID)
 	}
 
 	sb.WriteString(DrawBox(title, width))
@@ -968,20 +970,20 @@ func DrawLoadBalancerDiagram(
 		}
 	}
 
-	// Draw external load balancers
+	// Draw external load balancers with flow
 	if len(externalLBs) > 0 {
-		sb.WriteString(drawLoadBalancerSection("EXTERNAL LOAD BALANCERS (Internet-facing)", externalLBs, width))
+		sb.WriteString(drawLBFlowSection("EXTERNAL (Internet-facing)", externalLBs, width))
 		sb.WriteString("\n")
 	}
 
-	// Draw internal load balancers
+	// Draw internal load balancers with flow
 	if len(internalLBs) > 0 {
-		sb.WriteString(drawLoadBalancerSection("INTERNAL LOAD BALANCERS (Private)", internalLBs, width))
+		sb.WriteString(drawLBFlowSection("INTERNAL (VPC-only)", internalLBs, width))
 		sb.WriteString("\n")
 	}
 
-	// Draw architecture overview
-	sb.WriteString(drawLBArchitectureOverview(externalLBs, internalLBs, width))
+	// Summary stats
+	sb.WriteString(drawLBSummary(externalLBs, internalLBs, width))
 
 	// Legend
 	sb.WriteString(DrawLoadBalancerLegend(width))
@@ -989,7 +991,8 @@ func DrawLoadBalancerDiagram(
 	return sb.String()
 }
 
-func drawLoadBalancerSection(title string, lbs []LoadBalancerInfo, width int) string {
+// drawLBFlowSection draws individual load balancer flows showing frontend -> backend
+func drawLBFlowSection(title string, lbs []LoadBalancerInfo, width int) string {
 	var sb strings.Builder
 
 	sb.WriteString("┌")
@@ -1000,35 +1003,16 @@ func drawLoadBalancerSection(title string, lbs []LoadBalancerInfo, width int) st
 	sb.WriteString(strings.Repeat("─", width-2))
 	sb.WriteString("┤\n")
 
-	for _, lb := range lbs {
-		// Security indicator
-		securityLabel := ""
-		if lb.SecurityPolicy != "" {
-			securityLabel = " [Cloud Armor]"
+	for i, lb := range lbs {
+		// Draw flow for each load balancer
+		sb.WriteString(drawSingleLBFlow(lb, width))
+
+		// Add separator between LBs (but not after the last one)
+		if i < len(lbs)-1 {
+			sb.WriteString("│")
+			sb.WriteString(strings.Repeat("─", width-2))
+			sb.WriteString("│\n")
 		}
-
-		// Type and name
-		typeLine := fmt.Sprintf("  %s: %s (%s)%s", lb.Type, lb.Name, lb.Region, securityLabel)
-		if len(typeLine) > width-4 {
-			typeLine = typeLine[:width-7] + "..."
-		}
-		sb.WriteString(fmt.Sprintf("│ %-*s │\n", width-4, typeLine))
-
-		// IP and Port
-		ipLine := fmt.Sprintf("    IP: %s:%s", lb.IPAddress, lb.Port)
-		sb.WriteString(fmt.Sprintf("│ %-*s │\n", width-4, ipLine))
-
-		// Backend services
-		if len(lb.BackendServices) > 0 {
-			backends := strings.Join(lb.BackendServices, ", ")
-			if len(backends) > width-20 {
-				backends = backends[:width-23] + "..."
-			}
-			backendLine := fmt.Sprintf("    Backends: %s", backends)
-			sb.WriteString(fmt.Sprintf("│ %-*s │\n", width-4, backendLine))
-		}
-
-		sb.WriteString(DrawEmptyLine(width))
 	}
 
 	sb.WriteString("└")
@@ -1038,34 +1022,124 @@ func drawLoadBalancerSection(title string, lbs []LoadBalancerInfo, width int) st
 	return sb.String()
 }
 
-func drawLBArchitectureOverview(externalLBs, internalLBs []LoadBalancerInfo, width int) string {
+// drawSingleLBFlow draws a single load balancer's traffic flow
+func drawSingleLBFlow(lb LoadBalancerInfo, width int) string {
+	var sb strings.Builder
+
+	// Security indicator
+	armorLabel := ""
+	if lb.SecurityPolicy != "" {
+		armorLabel = " [Cloud Armor: " + lb.SecurityPolicy + "]"
+	}
+
+	// LB name and type header
+	headerLine := fmt.Sprintf("  %s (%s, %s)%s", lb.Name, lb.Type, lb.Region, armorLabel)
+	if len(headerLine) > width-4 {
+		headerLine = headerLine[:width-7] + "..."
+	}
+	sb.WriteString(fmt.Sprintf("│ %-*s │\n", width-4, headerLine))
+	sb.WriteString(DrawEmptyLine(width))
+
+	// Frontend (IP:Port)
+	frontendBox := fmt.Sprintf("%s:%s", lb.IPAddress, lb.Port)
+
+	// Build backend lines with actual backend targets
+	var backendLines []string
+	if len(lb.BackendServices) == 0 {
+		backendLines = []string{"(no backends)"}
+	} else {
+		for _, beSvc := range lb.BackendServices {
+			// Check if we have detailed backend info
+			if lb.BackendDetails != nil {
+				if targets, ok := lb.BackendDetails[beSvc]; ok && len(targets) > 0 {
+					// Show backend service with its targets
+					backendLines = append(backendLines, fmt.Sprintf("%s:", beSvc))
+					for _, target := range targets {
+						backendLines = append(backendLines, fmt.Sprintf("  -> %s", target))
+					}
+				} else {
+					backendLines = append(backendLines, beSvc)
+				}
+			} else {
+				backendLines = append(backendLines, beSvc)
+			}
+		}
+	}
+
+	// Calculate dynamic backend width based on longest line
+	backendWidth := 35
+	for _, line := range backendLines {
+		if len(line)+4 > backendWidth {
+			backendWidth = len(line) + 4
+		}
+	}
+	// Cap at reasonable max
+	maxBackendWidth := width - 35
+	if backendWidth > maxBackendWidth {
+		backendWidth = maxBackendWidth
+	}
+
+	frontendWidth := 23
+	arrowWidth := 7
+	padding := width - frontendWidth - backendWidth - arrowWidth - 8
+	if padding < 0 {
+		padding = 0
+	}
+
+	// Top of boxes
+	sb.WriteString(fmt.Sprintf("│   ┌%s┐       ┌%s┐%s│\n",
+		strings.Repeat("─", frontendWidth),
+		strings.Repeat("─", backendWidth),
+		strings.Repeat(" ", padding)))
+
+	// Frontend label
+	sb.WriteString(fmt.Sprintf("│   │ %-*s │       │ %-*s │%s│\n",
+		frontendWidth-2, "FRONTEND",
+		backendWidth-2, "BACKEND SERVICE -> TARGETS",
+		strings.Repeat(" ", padding)))
+
+	// Separator with arrow
+	sb.WriteString(fmt.Sprintf("│   ├%s┤  ───> ├%s┤%s│\n",
+		strings.Repeat("─", frontendWidth),
+		strings.Repeat("─", backendWidth),
+		strings.Repeat(" ", padding)))
+
+	// IP:Port line with first backend
+	sb.WriteString(fmt.Sprintf("│   │ %-*s │       │ %-*s │%s│\n",
+		frontendWidth-2, frontendBox,
+		backendWidth-2, safeGetIndex(backendLines, 0),
+		strings.Repeat(" ", padding)))
+
+	// Additional backend lines
+	for i := 1; i < len(backendLines); i++ {
+		sb.WriteString(fmt.Sprintf("│   │ %-*s │       │ %-*s │%s│\n",
+			frontendWidth-2, "",
+			backendWidth-2, backendLines[i],
+			strings.Repeat(" ", padding)))
+	}
+
+	// Bottom of boxes
+	sb.WriteString(fmt.Sprintf("│   └%s┘       └%s┘%s│\n",
+		strings.Repeat("─", frontendWidth),
+		strings.Repeat("─", backendWidth),
+		strings.Repeat(" ", padding)))
+
+	sb.WriteString(DrawEmptyLine(width))
+
+	return sb.String()
+}
+
+// drawLBSummary draws summary statistics
+func drawLBSummary(externalLBs, internalLBs []LoadBalancerInfo, width int) string {
 	var sb strings.Builder
 
 	sb.WriteString("┌")
 	sb.WriteString(strings.Repeat("─", width-2))
 	sb.WriteString("┐\n")
-	sb.WriteString(fmt.Sprintf("│ %-*s │\n", width-4, "ARCHITECTURE OVERVIEW"))
+	sb.WriteString(fmt.Sprintf("│ %-*s │\n", width-4, "SUMMARY"))
 	sb.WriteString("├")
 	sb.WriteString(strings.Repeat("─", width-2))
 	sb.WriteString("┤\n")
-
-	sb.WriteString("│                                                                                        │\n")
-
-	if len(externalLBs) > 0 {
-		sb.WriteString("│     ┌─────────────┐          ┌─────────────────────┐          ┌─────────────┐          │\n")
-		sb.WriteString("│     │  INTERNET   │  ─────>  │  External LB        │  ─────>  │  Backends   │          │\n")
-		sb.WriteString("│     │             │          │  (Cloud Armor)      │          │  (GCE/GKE)  │          │\n")
-		sb.WriteString("│     └─────────────┘          └─────────────────────┘          └─────────────┘          │\n")
-		sb.WriteString("│                                                                                        │\n")
-	}
-
-	if len(internalLBs) > 0 {
-		sb.WriteString("│     ┌─────────────┐          ┌─────────────────────┐          ┌─────────────┐          │\n")
-		sb.WriteString("│     │  VPC        │  ─────>  │  Internal LB        │  ─────>  │  Backends   │          │\n")
-		sb.WriteString("│     │  (Private)  │          │  (Regional)         │          │  (Private)  │          │\n")
-		sb.WriteString("│     └─────────────┘          └─────────────────────┘          └─────────────┘          │\n")
-		sb.WriteString("│                                                                                        │\n")
-	}
 
 	// Count with Cloud Armor
 	armorCount := 0
@@ -1075,20 +1149,42 @@ func drawLBArchitectureOverview(externalLBs, internalLBs []LoadBalancerInfo, wid
 		}
 	}
 
-	statsLine := fmt.Sprintf("   External: %d    Internal: %d    With Cloud Armor: %d", len(externalLBs), len(internalLBs), armorCount)
+	statsLine := fmt.Sprintf("  External LBs: %d    Internal LBs: %d    With Cloud Armor: %d/%d",
+		len(externalLBs), len(internalLBs), armorCount, len(externalLBs))
 	sb.WriteString(fmt.Sprintf("│ %-*s │\n", width-4, statsLine))
 
 	if len(externalLBs) > 0 && armorCount == 0 {
-		warningLine := "   ⚠ No external load balancers have Cloud Armor protection"
+		warningLine := "  ⚠ WARNING: No external load balancers have Cloud Armor protection"
+		sb.WriteString(fmt.Sprintf("│ %-*s │\n", width-4, warningLine))
+	} else if len(externalLBs) > armorCount {
+		warningLine := fmt.Sprintf("  ⚠ WARNING: %d external load balancer(s) missing Cloud Armor", len(externalLBs)-armorCount)
 		sb.WriteString(fmt.Sprintf("│ %-*s │\n", width-4, warningLine))
 	}
 
-	sb.WriteString("│                                                                                        │\n")
 	sb.WriteString("└")
 	sb.WriteString(strings.Repeat("─", width-2))
 	sb.WriteString("┘\n")
 
 	return sb.String()
+}
+
+// truncateString truncates a string to maxLen, adding "..." if needed
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
+}
+
+// safeGetIndex safely gets an index from a slice, returning empty string if out of bounds
+func safeGetIndex(slice []string, index int) string {
+	if index < len(slice) {
+		return slice[index]
+	}
+	return ""
 }
 
 // DrawLoadBalancerLegend draws the load balancer diagram legend

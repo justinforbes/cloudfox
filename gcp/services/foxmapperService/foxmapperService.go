@@ -205,6 +205,10 @@ type PrincipalAccessFile struct {
 	ViaEdge          bool     `json:"via_edge"`
 	EdgePath         []string `json:"edge_path,omitempty"`
 	Resource         string   `json:"resource,omitempty"`
+	// Scope information (may be in JSON or derived from Resource)
+	ScopeType        string   `json:"scope_type,omitempty"`
+	ScopeID          string   `json:"scope_id,omitempty"`
+	ScopeName        string   `json:"scope_name,omitempty"`
 }
 
 // New creates a new FoxMapperService
@@ -682,7 +686,7 @@ func (s *FoxMapperService) GetAttackSummary(principal string) string {
 					highestLevel = "folder"
 				}
 			}
-			return fmt.Sprintf("Privesc→%s (%d hops)", highestLevel, shortestHops)
+			return fmt.Sprintf("Privesc->%s (%d hops)", highestLevel, shortestHops)
 		}
 		return "Privesc"
 	}
@@ -743,7 +747,7 @@ func (s *FoxMapperService) GetPrivescSummary() map[string]interface{} {
 // FormatPrivescPath formats a privesc path for display
 func FormatPrivescPath(path PrivescPath) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s → %s (%d hops)\n", path.Source, path.Destination, path.HopCount))
+	sb.WriteString(fmt.Sprintf("%s -> %s (%d hops)\n", path.Source, path.Destination, path.HopCount))
 	for i, edge := range path.Edges {
 		scopeInfo := ""
 		if edge.ScopeBlocksEscalation {
@@ -854,6 +858,10 @@ type PrincipalAccess struct {
 	ViaEdge          bool     `json:"via_edge"`
 	EdgePath         []string `json:"edge_path,omitempty"`
 	HasCondition     bool     `json:"has_condition"`
+	// Scope information - WHERE the permission was granted
+	ScopeType        string   `json:"scope_type,omitempty"` // organization, folder, project
+	ScopeID          string   `json:"scope_id,omitempty"`   // The org/folder/project ID
+	ScopeName        string   `json:"scope_name,omitempty"` // Display name if available
 }
 
 // CategoryInfo provides summary info for a category
@@ -1131,6 +1139,9 @@ func (s *FoxMapperService) AnalyzeLateral(category string) []LateralFinding {
 func (s *FoxMapperService) analyzeLateralFromFindings(category string) []LateralFinding {
 	var findings []LateralFinding
 
+	// Get the project ID from the findings data for project-level scope derivation
+	projectID := s.LateralFindingsData.ProjectID
+
 	for _, f := range s.LateralFindingsData.Findings {
 		// Filter by category if specified
 		if category != "" && f.Category != category {
@@ -1140,6 +1151,21 @@ func (s *FoxMapperService) analyzeLateralFromFindings(category string) []Lateral
 		// Convert file format to internal format
 		var principals []PrincipalAccess
 		for _, p := range f.Principals {
+			// Get scope info from JSON fields, Resource, or derive from access_type
+			scopeType := p.ScopeType
+			scopeID := p.ScopeID
+			scopeName := p.ScopeName
+
+			if scopeType == "" {
+				if p.Resource != "" {
+					// Resource field exists in JSON
+					scopeType, scopeID, scopeName = s.parseResourceScope(p.Resource)
+				} else {
+					// Derive scope from access_type and available context
+					scopeType, scopeID, scopeName = s.deriveScopeFromContext(p.MemberID, p.AccessType, p.ViaEdge, projectID)
+				}
+			}
+
 			principals = append(principals, PrincipalAccess{
 				Principal:        p.Principal,
 				MemberID:         p.MemberID,
@@ -1149,6 +1175,9 @@ func (s *FoxMapperService) analyzeLateralFromFindings(category string) []Lateral
 				AccessType:       p.AccessType,
 				ViaEdge:          p.ViaEdge,
 				EdgePath:         p.EdgePath,
+				ScopeType:        scopeType,
+				ScopeID:          scopeID,
+				ScopeName:        scopeName,
 			})
 		}
 
@@ -1186,6 +1215,7 @@ func (s *FoxMapperService) analyzeLateralFromEdges(category string) []LateralFin
 				strings.Contains(edge.ShortReason, tech.Permission) {
 				node := s.GetNode(edge.Source)
 				if node != nil {
+					scopeType, scopeID, scopeName := s.parseResourceScope(edge.Resource)
 					principals = append(principals, PrincipalAccess{
 						Principal:        node.Email,
 						MemberID:         node.MemberID,
@@ -1194,6 +1224,9 @@ func (s *FoxMapperService) analyzeLateralFromEdges(category string) []LateralFin
 						IsServiceAccount: node.MemberType == "serviceAccount",
 						AccessType:       "via_privesc",
 						ViaEdge:          true,
+						ScopeType:        scopeType,
+						ScopeID:          scopeID,
+						ScopeName:        scopeName,
 					})
 				}
 			}
@@ -1334,6 +1367,9 @@ func (s *FoxMapperService) AnalyzeDataExfil(service string) []DataExfilFinding {
 func (s *FoxMapperService) analyzeDataExfilFromFindings(service string) []DataExfilFinding {
 	var findings []DataExfilFinding
 
+	// Get the project ID from the findings data for project-level scope derivation
+	projectID := s.DataExfilFindingsData.ProjectID
+
 	for _, f := range s.DataExfilFindingsData.Findings {
 		// Filter by service if specified
 		if service != "" && f.Service != service {
@@ -1343,6 +1379,21 @@ func (s *FoxMapperService) analyzeDataExfilFromFindings(service string) []DataEx
 		// Convert file format to internal format
 		var principals []PrincipalAccess
 		for _, p := range f.Principals {
+			// Get scope info from JSON fields, Resource, or derive from access_type
+			scopeType := p.ScopeType
+			scopeID := p.ScopeID
+			scopeName := p.ScopeName
+
+			if scopeType == "" {
+				if p.Resource != "" {
+					// Resource field exists in JSON
+					scopeType, scopeID, scopeName = s.parseResourceScope(p.Resource)
+				} else {
+					// Derive scope from access_type and available context
+					scopeType, scopeID, scopeName = s.deriveScopeFromContext(p.MemberID, p.AccessType, p.ViaEdge, projectID)
+				}
+			}
+
 			principals = append(principals, PrincipalAccess{
 				Principal:        p.Principal,
 				MemberID:         p.MemberID,
@@ -1352,6 +1403,9 @@ func (s *FoxMapperService) analyzeDataExfilFromFindings(service string) []DataEx
 				AccessType:       p.AccessType,
 				ViaEdge:          p.ViaEdge,
 				EdgePath:         p.EdgePath,
+				ScopeType:        scopeType,
+				ScopeID:          scopeID,
+				ScopeName:        scopeName,
 			})
 		}
 
@@ -1389,6 +1443,7 @@ func (s *FoxMapperService) analyzeDataExfilFromEdges(service string) []DataExfil
 				strings.Contains(edge.ShortReason, tech.Permission) {
 				node := s.GetNode(edge.Source)
 				if node != nil {
+					scopeType, scopeID, scopeName := s.parseResourceScope(edge.Resource)
 					principals = append(principals, PrincipalAccess{
 						Principal:        node.Email,
 						MemberID:         node.MemberID,
@@ -1397,6 +1452,9 @@ func (s *FoxMapperService) analyzeDataExfilFromEdges(service string) []DataExfil
 						IsServiceAccount: node.MemberType == "serviceAccount",
 						AccessType:       "via_privesc",
 						ViaEdge:          true,
+						ScopeType:        scopeType,
+						ScopeID:          scopeID,
+						ScopeName:        scopeName,
 					})
 				}
 			}
@@ -1443,6 +1501,8 @@ type WrongAdminFinding struct {
 	AdminLevel  string   `json:"admin_level"` // org, folder, project
 	Reasons     []string `json:"reasons"`
 	ProjectID   string   `json:"project_id"`
+	FolderID    string   `json:"folder_id,omitempty"`  // For folder-level admins
+	OrgID       string   `json:"org_id,omitempty"`     // For org-level admins
 }
 
 // ADMIN_ROLES are roles that grant explicit admin access
@@ -1484,12 +1544,17 @@ func (s *FoxMapperService) AnalyzeWrongAdmins() []WrongAdminFinding {
 		// This is a "wrong admin" - get reasons why they're admin
 		reasons := s.getAdminReasons(node)
 
+		// Get the highest admin resource ID (org, folder, or project)
+		folderID, orgID := s.getAdminResourceIDs(node)
+
 		finding := WrongAdminFinding{
 			Principal:  node.Email,
 			MemberType: node.MemberType,
 			AdminLevel: node.AdminLevel,
 			Reasons:    reasons,
 			ProjectID:  node.ProjectID,
+			FolderID:   folderID,
+			OrgID:      orgID,
 		}
 
 		if finding.AdminLevel == "" {
@@ -1656,4 +1721,94 @@ func (s *FoxMapperService) getPolicyLevel(resource string) string {
 		return "folder"
 	}
 	return "project"
+}
+
+// getAdminResourceIDs returns the folder ID and org ID where the node has admin access
+// Returns the highest level resources (org > folder > project)
+func (s *FoxMapperService) getAdminResourceIDs(node *Node) (folderID, orgID string) {
+	for _, policy := range s.Policies {
+		for _, binding := range policy.Bindings {
+			// Check for self-assignment roles (makes them admin)
+			if !SELF_ASSIGNMENT_ROLES[binding.Role] {
+				continue
+			}
+
+			for _, member := range binding.Members {
+				if s.memberMatchesNode(member, node) {
+					// Extract resource ID based on type
+					if strings.HasPrefix(policy.Resource, "organizations/") {
+						orgID = strings.TrimPrefix(policy.Resource, "organizations/")
+					} else if strings.HasPrefix(policy.Resource, "folders/") {
+						// Only set folderID if we don't already have org admin
+						// (org level is higher)
+						if orgID == "" {
+							folderID = strings.TrimPrefix(policy.Resource, "folders/")
+						}
+					}
+				}
+			}
+		}
+	}
+	return folderID, orgID
+}
+
+// parseResourceScope extracts scope information from a resource string
+// Returns scopeType, scopeID, scopeName
+// Resource formats: "organizations/123", "folders/456", "projects/myproject", etc.
+func (s *FoxMapperService) parseResourceScope(resource string) (scopeType, scopeID, scopeName string) {
+	if resource == "" {
+		return "unknown", "", ""
+	}
+
+	if strings.HasPrefix(resource, "organizations/") {
+		scopeType = "organization"
+		scopeID = strings.TrimPrefix(resource, "organizations/")
+		// Try to get display name from metadata if available
+		scopeName = scopeID
+	} else if strings.HasPrefix(resource, "folders/") {
+		scopeType = "folder"
+		scopeID = strings.TrimPrefix(resource, "folders/")
+		scopeName = scopeID
+	} else if strings.HasPrefix(resource, "projects/") {
+		scopeType = "project"
+		scopeID = strings.TrimPrefix(resource, "projects/")
+		scopeName = scopeID
+	} else {
+		// Resource-level permission (e.g., storage bucket, BigQuery dataset)
+		scopeType = "resource"
+		scopeID = resource
+		scopeName = resource
+	}
+
+	return scopeType, scopeID, scopeName
+}
+
+// deriveScopeFromContext derives scope information when the Resource field is empty
+// This is needed for pre-computed findings that don't include the resource field.
+// For "project_iam" access type, we know the permission was granted at project level.
+// For "via_privesc" access type, we look up the edge to find where the permission was granted.
+func (s *FoxMapperService) deriveScopeFromContext(memberID, accessType string, viaEdge bool, fallbackProjectID string) (scopeType, scopeID, scopeName string) {
+	// For project_iam access, the permission was granted at the project level
+	if accessType == "project_iam" {
+		return "project", fallbackProjectID, fallbackProjectID
+	}
+
+	// For via_privesc with viaEdge=true, look up the edge to find the resource
+	if viaEdge && accessType == "via_privesc" {
+		// Find the first edge from this principal to determine scope
+		for _, edge := range s.Edges {
+			if edge.Source == memberID {
+				if edge.Resource != "" {
+					return s.parseResourceScope(edge.Resource)
+				}
+			}
+		}
+	}
+
+	// Fallback: if we have a project ID, assume project-level
+	if fallbackProjectID != "" {
+		return "project", fallbackProjectID, fallbackProjectID
+	}
+
+	return "unknown", "", ""
 }

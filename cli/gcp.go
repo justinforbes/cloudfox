@@ -138,18 +138,22 @@ var (
 					totalNodes, adminNodes, nodesWithPrivesc := foxMapperCache.GetStats()
 					ageDays := foxMapperCache.GetDataAgeDays()
 
-					if ageDays >= 7 {
+					if ageDays >= 30 {
 						GCPLogger.WarnM(fmt.Sprintf("FoxMapper data is %d days old - consider running 'foxmapper gcp graph create' to refresh",
 							ageDays), "gcp")
+					} else {
+						GCPLogger.InfoM(fmt.Sprintf("FoxMapper data is %d days old", ageDays), "gcp")
 					}
-					GCPLogger.SuccessM(fmt.Sprintf("FoxMapper data loaded: %d principals, %d admins, %d with privesc (data age: %d days)",
-						totalNodes, adminNodes, nodesWithPrivesc, ageDays), "gcp")
+					GCPLogger.SuccessM(fmt.Sprintf("FoxMapper data loaded: %d principals, %d admins, %d with privesc",
+						totalNodes, adminNodes, nodesWithPrivesc), "gcp")
 				}
 			}
 
 			// Always try to load org cache for cross-project analysis
 			// Cache auto-refreshes after 24 hours
-			orgCache := loadOrPopulateOrgCache(account, GCPRefreshCache)
+			// Force refresh when running the organizations command to ensure fresh data
+			refreshCache := GCPRefreshCache || cmd.Name() == "organizations"
+			orgCache := loadOrPopulateOrgCache(account, refreshCache)
 			if orgCache != nil && orgCache.IsPopulated() {
 				ctx = gcpinternal.SetOrgCacheInContext(ctx, orgCache)
 			}
@@ -372,6 +376,8 @@ func enumerateAndCacheOrgs(account string) *gcpinternal.OrgCache {
 				ID:          org.Name[len("organizations/"):], // Strip prefix
 				Name:        org.Name,
 				DisplayName: org.DisplayName,
+				DirectoryID: org.DirectoryID,
+				State:       org.State,
 			})
 		}
 	}
@@ -385,6 +391,7 @@ func enumerateAndCacheOrgs(account string) *gcpinternal.OrgCache {
 				Name:        folder.Name,
 				DisplayName: folder.DisplayName,
 				Parent:      folder.Parent,
+				State:       folder.State,
 			})
 		}
 	}
@@ -393,8 +400,14 @@ func enumerateAndCacheOrgs(account string) *gcpinternal.OrgCache {
 	projects, err := orgsSvc.SearchProjects("")
 	if err == nil {
 		for _, project := range projects {
+			// Extract project number from Name (format: "projects/123456789")
+			projectNumber := ""
+			if strings.HasPrefix(project.Name, "projects/") {
+				projectNumber = strings.TrimPrefix(project.Name, "projects/")
+			}
 			cache.AddProject(gcpinternal.CachedProject{
 				ID:          project.ProjectID,
+				Number:      projectNumber,
 				Name:        project.Name,
 				DisplayName: project.DisplayName,
 				Parent:      project.Parent,
@@ -513,6 +526,7 @@ func init() {
 		commands.GCPKeysCommand,
 		commands.GCPEndpointsCommand,
 		commands.GCPWorkloadIdentityCommand,
+		commands.GCPIdentityFederationCommand,
 		commands.GCPOrganizationsCommand,
 		commands.GCPCloudBuildCommand,
 		commands.GCPMemorystoreCommand,

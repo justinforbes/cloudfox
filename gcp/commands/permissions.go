@@ -96,13 +96,20 @@ type PermissionsModule struct {
 	// Module-specific fields - now per-project for hierarchical output
 	ProjectPerms      map[string][]ExplodedPermission          // projectID -> permissions
 	OrgPerms          map[string][]ExplodedPermission          // orgID -> org-level permissions
+	FolderPerms       map[string][]ExplodedPermission          // folderID -> folder-level permissions
 	EntityPermissions []IAMService.EntityPermissions           // Legacy: aggregated for stats
 	GroupInfos        []IAMService.GroupInfo                   // Legacy: aggregated for stats
 	OrgBindings       []IAMService.PolicyBinding               // org-level bindings
 	FolderBindings    map[string][]IAMService.PolicyBinding    // folder-level bindings
-	LootMap           map[string]map[string]*internal.LootFile // projectID -> loot files
-	EnumLoot          *internal.LootFile                       // permissions-enumeration loot file
-	mu                sync.Mutex
+
+	// Per-scope loot files for inheritance-aware output
+	OrgLoot     map[string]*internal.LootFile // orgID -> loot commands for org-level bindings
+	FolderLoot  map[string]*internal.LootFile // folderID -> loot commands for folder-level bindings
+	ProjectLoot map[string]*internal.LootFile // projectID -> loot commands for project-level bindings
+	EnumLoot    *internal.LootFile            // permissions-enumeration loot file
+
+	OrgCache *gcpinternal.OrgCache // OrgCache for hierarchy lookups
+	mu       sync.Mutex
 
 	// Organization info for output path
 	OrgIDs   []string
@@ -133,11 +140,14 @@ func runGCPPermissionsCommand(cmd *cobra.Command, args []string) {
 		BaseGCPModule:     gcpinternal.NewBaseGCPModule(cmdCtx),
 		ProjectPerms:      make(map[string][]ExplodedPermission),
 		OrgPerms:          make(map[string][]ExplodedPermission),
+		FolderPerms:       make(map[string][]ExplodedPermission),
 		EntityPermissions: []IAMService.EntityPermissions{},
 		GroupInfos:        []IAMService.GroupInfo{},
 		OrgBindings:       []IAMService.PolicyBinding{},
 		FolderBindings:    make(map[string][]IAMService.PolicyBinding),
-		LootMap:           make(map[string]map[string]*internal.LootFile),
+		OrgLoot:           make(map[string]*internal.LootFile),
+		FolderLoot:        make(map[string]*internal.LootFile),
+		ProjectLoot:       make(map[string]*internal.LootFile),
 		OrgIDs:            []string{},
 		OrgNames:          make(map[string]string),
 		EnumLoot:          &internal.LootFile{Name: "permissions-enumeration", Contents: ""},
@@ -155,6 +165,9 @@ func runGCPPermissionsCommand(cmd *cobra.Command, args []string) {
 func (m *PermissionsModule) Execute(ctx context.Context, logger internal.Logger) {
 	logger.InfoM("Enumerating ALL permissions with full inheritance explosion...", globals.GCP_PERMISSIONS_MODULE_NAME)
 	logger.InfoM("This includes organization, folder, and project-level bindings", globals.GCP_PERMISSIONS_MODULE_NAME)
+
+	// Get OrgCache for hierarchy lookups (used for inheritance-aware routing)
+	m.OrgCache = gcpinternal.GetOrgCacheFromContext(ctx)
 
 	// First, try to enumerate organization-level bindings
 	m.enumerateOrganizationBindings(ctx, logger)
@@ -220,6 +233,9 @@ func (m *PermissionsModule) Execute(ctx context.Context, logger internal.Logger)
 func (m *PermissionsModule) getAllExplodedPerms() []ExplodedPermission {
 	var all []ExplodedPermission
 	for _, perms := range m.OrgPerms {
+		all = append(all, perms...)
+	}
+	for _, perms := range m.FolderPerms {
 		all = append(all, perms...)
 	}
 	for _, perms := range m.ProjectPerms {
@@ -318,6 +334,7 @@ func (m *PermissionsModule) processProject(ctx context.Context, projectID string
 
 	var projectPerms []ExplodedPermission
 	var orgPerms []ExplodedPermission
+	var folderPerms []ExplodedPermission
 
 	for _, ep := range entityPerms {
 		for _, perm := range ep.Permissions {
@@ -350,23 +367,20 @@ func (m *PermissionsModule) processProject(ctx context.Context, projectID string
 
 			// Detect cross-project access
 			if ep.EntityType == "ServiceAccount" {
-				parts := strings.Split(ep.Email, "@")
-				if len(parts) == 2 {
-					saParts := strings.Split(parts[1], ".")
-					if len(saParts) >= 1 {
-						saProject := saParts[0]
-						if saProject != projectID {
-							exploded.IsCrossProject = true
-							exploded.SourceProject = saProject
-						}
-					}
+				saProject := extractProjectFromPrincipal(ep.Email, m.OrgCache)
+				if saProject != "" && saProject != projectID {
+					exploded.IsCrossProject = true
+					exploded.SourceProject = saProject
 				}
 			}
 
-			// Route to appropriate scope: org-level permissions go to org, rest to project
-			if perm.ResourceType == "organization" {
+			// Route to appropriate scope: org, folder, or project
+			switch perm.ResourceType {
+			case "organization":
 				orgPerms = append(orgPerms, exploded)
-			} else {
+			case "folder":
+				folderPerms = append(folderPerms, exploded)
+			default:
 				projectPerms = append(projectPerms, exploded)
 			}
 		}
@@ -381,20 +395,27 @@ func (m *PermissionsModule) processProject(ctx context.Context, projectID string
 		m.OrgPerms[ep.ResourceScopeID] = append(m.OrgPerms[ep.ResourceScopeID], ep)
 	}
 
+	// Store folder-level permissions (keyed by folder ID)
+	for _, ep := range folderPerms {
+		m.FolderPerms[ep.ResourceScopeID] = append(m.FolderPerms[ep.ResourceScopeID], ep)
+	}
+
 	// Legacy aggregated fields for stats
 	m.EntityPermissions = append(m.EntityPermissions, entityPerms...)
 	m.GroupInfos = append(m.GroupInfos, groupInfos...)
 
-	// Generate loot per-project
-	if m.LootMap[projectID] == nil {
-		m.LootMap[projectID] = make(map[string]*internal.LootFile)
-		m.LootMap[projectID]["permissions-commands"] = &internal.LootFile{
-			Name:     "permissions-commands",
-			Contents: "# GCP Permissions Commands\n# Generated by CloudFox\n\n",
+	// Generate loot per-scope based on exploded permissions
+	// We use a set to track which service accounts we've already added per scope
+	addedSAsOrg := make(map[string]map[string]bool)     // orgID -> email -> added
+	addedSAsFolder := make(map[string]map[string]bool)  // folderID -> email -> added
+	addedSAsProject := make(map[string]map[string]bool) // projectID -> email -> added
+
+	allPerms := append(append(projectPerms, orgPerms...), folderPerms...)
+	for _, ep := range allPerms {
+		if ep.EntityType != "ServiceAccount" {
+			continue
 		}
-	}
-	for _, ep := range entityPerms {
-		m.addEntityToLoot(projectID, ep)
+		m.addPermissionToLoot(ep, addedSAsOrg, addedSAsFolder, addedSAsProject)
 	}
 	m.mu.Unlock()
 
@@ -437,55 +458,111 @@ func parseConditionTitle(condition string) string {
 // ------------------------------
 // Loot File Management
 // ------------------------------
-func (m *PermissionsModule) addEntityToLoot(projectID string, ep IAMService.EntityPermissions) {
-	// Only add service accounts with high-privilege permissions
-	hasHighPriv := false
-	var highPrivPerms []string
 
-	for _, perm := range ep.Permissions {
-		if isHighPrivilegePermission(perm.Permission) {
-			hasHighPriv = true
-			highPrivPerms = append(highPrivPerms, perm.Permission)
+// addPermissionToLoot adds a service account to the appropriate scope-based loot file.
+// It tracks which SAs have been added per scope to avoid duplicates.
+func (m *PermissionsModule) addPermissionToLoot(ep ExplodedPermission,
+	addedSAsOrg map[string]map[string]bool,
+	addedSAsFolder map[string]map[string]bool,
+	addedSAsProject map[string]map[string]bool) {
+
+	if ep.EntityType != "ServiceAccount" {
+		return
+	}
+
+	scopeType := ep.ResourceScopeType
+	scopeID := ep.ResourceScopeID
+	email := ep.EntityEmail
+
+	// Determine which loot file and tracking map to use
+	var lootFile *internal.LootFile
+	var addedSet map[string]bool
+
+	switch scopeType {
+	case "organization":
+		if m.OrgLoot[scopeID] == nil {
+			m.OrgLoot[scopeID] = &internal.LootFile{
+				Name:     "permissions-commands",
+				Contents: "# GCP Permissions Commands (Organization Level)\n# Generated by CloudFox\n\n",
+			}
+		}
+		lootFile = m.OrgLoot[scopeID]
+		if addedSAsOrg[scopeID] == nil {
+			addedSAsOrg[scopeID] = make(map[string]bool)
+		}
+		addedSet = addedSAsOrg[scopeID]
+
+	case "folder":
+		if m.FolderLoot[scopeID] == nil {
+			m.FolderLoot[scopeID] = &internal.LootFile{
+				Name:     "permissions-commands",
+				Contents: "# GCP Permissions Commands (Folder Level)\n# Generated by CloudFox\n\n",
+			}
+		}
+		lootFile = m.FolderLoot[scopeID]
+		if addedSAsFolder[scopeID] == nil {
+			addedSAsFolder[scopeID] = make(map[string]bool)
+		}
+		addedSet = addedSAsFolder[scopeID]
+
+	default: // project
+		if m.ProjectLoot[scopeID] == nil {
+			m.ProjectLoot[scopeID] = &internal.LootFile{
+				Name:     "permissions-commands",
+				Contents: "# GCP Permissions Commands (Project Level)\n# Generated by CloudFox\n\n",
+			}
+		}
+		lootFile = m.ProjectLoot[scopeID]
+		if addedSAsProject[scopeID] == nil {
+			addedSAsProject[scopeID] = make(map[string]bool)
+		}
+		addedSet = addedSAsProject[scopeID]
+	}
+
+	// Skip if already added to this scope
+	if addedSet[email] {
+		return
+	}
+	addedSet[email] = true
+
+	// Extract project from SA email for commands
+	saProject := ep.EffectiveProject
+	if saProject == "" {
+		// Try to extract from email
+		parts := strings.Split(email, "@")
+		if len(parts) == 2 {
+			saParts := strings.Split(parts[1], ".")
+			if len(saParts) >= 1 {
+				saProject = saParts[0]
+			}
 		}
 	}
 
-	if ep.EntityType == "ServiceAccount" {
-		lootFile := m.LootMap[projectID]["permissions-commands"]
-		if lootFile == nil {
-			return
-		}
-
-		if hasHighPriv {
-			lootFile.Contents += fmt.Sprintf(
-				"# Service Account: %s [HIGH PRIVILEGE]\n"+
-					"# High-privilege permissions: %s\n"+
-					"# Roles: %s\n",
-				ep.Email,
-				strings.Join(highPrivPerms, ", "),
-				strings.Join(ep.Roles, ", "),
-			)
-		} else {
-			lootFile.Contents += fmt.Sprintf(
-				"# Service Account: %s\n"+
-					"# Roles: %s\n",
-				ep.Email,
-				strings.Join(ep.Roles, ", "),
-			)
-		}
-
-		lootFile.Contents += fmt.Sprintf(
-			"gcloud iam service-accounts describe %s --project=%s\n"+
-				"gcloud iam service-accounts keys list --iam-account=%s --project=%s\n"+
-				"gcloud iam service-accounts get-iam-policy %s --project=%s\n"+
-				"gcloud iam service-accounts keys create ./key.json --iam-account=%s --project=%s\n"+
-				"gcloud auth print-access-token --impersonate-service-account=%s\n\n",
-			ep.Email, ep.ProjectID,
-			ep.Email, ep.ProjectID,
-			ep.Email, ep.ProjectID,
-			ep.Email, ep.ProjectID,
-			ep.Email,
-		)
+	// Add service account commands
+	highPriv := ""
+	if ep.IsHighPrivilege {
+		highPriv = " [HIGH PRIVILEGE]"
 	}
+
+	lootFile.Contents += fmt.Sprintf(
+		"# Service Account: %s%s\n"+
+			"# Role: %s (at %s/%s)\n",
+		email, highPriv,
+		ep.Role, scopeType, scopeID,
+	)
+
+	lootFile.Contents += fmt.Sprintf(
+		"gcloud iam service-accounts describe %s --project=%s\n"+
+			"gcloud iam service-accounts keys list --iam-account=%s --project=%s\n"+
+			"gcloud iam service-accounts get-iam-policy %s --project=%s\n"+
+			"gcloud iam service-accounts keys create ./key.json --iam-account=%s --project=%s\n"+
+			"gcloud auth print-access-token --impersonate-service-account=%s\n\n",
+		email, saProject,
+		email, saProject,
+		email, saProject,
+		email, saProject,
+		email,
+	)
 }
 
 // isHighPrivilegePermission checks if a permission is considered high-privilege
@@ -503,6 +580,134 @@ func (m *PermissionsModule) initializeEnumerationLoot() {
 	m.EnumLoot.Contents = "# GCP Permissions Enumeration Commands\n"
 	m.EnumLoot.Contents += "# Generated by CloudFox\n"
 	m.EnumLoot.Contents += "# Use these commands to enumerate entities, roles, and permissions\n\n"
+}
+
+// collectAllLootFiles collects all loot files for org-level output (all scopes combined)
+func (m *PermissionsModule) collectAllLootFiles() []internal.LootFile {
+	var lootFiles []internal.LootFile
+
+	// Combine all org, folder, and project loot into one file for org-level output
+	combinedLoot := &internal.LootFile{
+		Name:     "permissions-commands",
+		Contents: "# GCP Permissions Commands (All Scopes)\n# Generated by CloudFox\n\n",
+	}
+
+	// Add org-level loot
+	for orgID, loot := range m.OrgLoot {
+		if loot != nil && loot.Contents != "" {
+			combinedLoot.Contents += fmt.Sprintf("# === Organization: %s ===\n", orgID)
+			// Skip the header line from the individual loot
+			lines := strings.Split(loot.Contents, "\n")
+			for i, line := range lines {
+				if i >= 2 { // Skip first 2 header lines
+					combinedLoot.Contents += line + "\n"
+				}
+			}
+		}
+	}
+
+	// Add folder-level loot
+	for folderID, loot := range m.FolderLoot {
+		if loot != nil && loot.Contents != "" {
+			combinedLoot.Contents += fmt.Sprintf("# === Folder: %s ===\n", folderID)
+			lines := strings.Split(loot.Contents, "\n")
+			for i, line := range lines {
+				if i >= 2 {
+					combinedLoot.Contents += line + "\n"
+				}
+			}
+		}
+	}
+
+	// Add project-level loot
+	for projectID, loot := range m.ProjectLoot {
+		if loot != nil && loot.Contents != "" {
+			combinedLoot.Contents += fmt.Sprintf("# === Project: %s ===\n", projectID)
+			lines := strings.Split(loot.Contents, "\n")
+			for i, line := range lines {
+				if i >= 2 {
+					combinedLoot.Contents += line + "\n"
+				}
+			}
+		}
+	}
+
+	// Only add if there's actual content beyond the header
+	if len(combinedLoot.Contents) > 60 { // More than just the header
+		lootFiles = append(lootFiles, *combinedLoot)
+	}
+
+	// Add enumeration loot file
+	if m.EnumLoot != nil && m.EnumLoot.Contents != "" {
+		lootFiles = append(lootFiles, *m.EnumLoot)
+	}
+
+	return lootFiles
+}
+
+// collectLootFilesForProject collects loot files for a specific project with inheritance.
+// This includes: org-level loot + ancestor folder loot + project-level loot
+func (m *PermissionsModule) collectLootFilesForProject(projectID string) []internal.LootFile {
+	var lootFiles []internal.LootFile
+
+	combinedLoot := &internal.LootFile{
+		Name:     "permissions-commands",
+		Contents: "# GCP Permissions Commands\n# Generated by CloudFox\n\n",
+	}
+
+	// Get ancestry for this project
+	var projectOrgID string
+	var ancestorFolders []string
+	if m.OrgCache != nil && m.OrgCache.IsPopulated() {
+		projectOrgID = m.OrgCache.GetProjectOrgID(projectID)
+		ancestorFolders = m.OrgCache.GetProjectAncestorFolders(projectID)
+	}
+
+	// Add org-level loot if this project belongs to an org
+	if projectOrgID != "" {
+		if loot, ok := m.OrgLoot[projectOrgID]; ok && loot != nil && loot.Contents != "" {
+			combinedLoot.Contents += fmt.Sprintf("# === Inherited from Organization: %s ===\n", projectOrgID)
+			lines := strings.Split(loot.Contents, "\n")
+			for i, line := range lines {
+				if i >= 2 {
+					combinedLoot.Contents += line + "\n"
+				}
+			}
+		}
+	}
+
+	// Add folder-level loot for ancestor folders (in order from org to project)
+	// Reverse the slice to go from org-level folders to project-level folders
+	for i := len(ancestorFolders) - 1; i >= 0; i-- {
+		folderID := ancestorFolders[i]
+		if loot, ok := m.FolderLoot[folderID]; ok && loot != nil && loot.Contents != "" {
+			combinedLoot.Contents += fmt.Sprintf("# === Inherited from Folder: %s ===\n", folderID)
+			lines := strings.Split(loot.Contents, "\n")
+			for i, line := range lines {
+				if i >= 2 {
+					combinedLoot.Contents += line + "\n"
+				}
+			}
+		}
+	}
+
+	// Add project-level loot
+	if loot, ok := m.ProjectLoot[projectID]; ok && loot != nil && loot.Contents != "" {
+		combinedLoot.Contents += fmt.Sprintf("# === Project: %s ===\n", projectID)
+		lines := strings.Split(loot.Contents, "\n")
+		for i, line := range lines {
+			if i >= 2 {
+				combinedLoot.Contents += line + "\n"
+			}
+		}
+	}
+
+	// Only add if there's actual content beyond the header
+	if len(combinedLoot.Contents) > 50 {
+		lootFiles = append(lootFiles, *combinedLoot)
+	}
+
+	return lootFiles
 }
 
 // generateEnumerationLoot generates commands to enumerate permissions
@@ -838,12 +1043,6 @@ func (m *PermissionsModule) writeOutput(ctx context.Context, logger internal.Log
 func (m *PermissionsModule) writeHierarchicalOutput(ctx context.Context, logger internal.Logger) {
 	header := m.getTableHeader()
 
-	// Build hierarchical output data
-	outputData := internal.HierarchicalOutputData{
-		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
-		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
-	}
-
 	// Determine org ID - prefer discovered orgs, fall back to hierarchy
 	orgID := ""
 	if len(m.OrgIDs) > 0 {
@@ -852,23 +1051,26 @@ func (m *PermissionsModule) writeHierarchicalOutput(ctx context.Context, logger 
 		orgID = m.Hierarchy.Organizations[0].ID
 	}
 
-	// Collect all loot files
-	var allLootFiles []internal.LootFile
-	for _, projectLoot := range m.LootMap {
-		for _, loot := range projectLoot {
-			if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
-				allLootFiles = append(allLootFiles, *loot)
-			}
-		}
+	// Collect all loot files for org-level output
+	allLootFiles := m.collectAllLootFiles()
+
+	// Get all permissions for output
+	allPerms := m.getAllExplodedPerms()
+
+	// Check if we should use single-pass tee streaming for large datasets
+	if orgID != "" && len(allPerms) >= 50000 {
+		m.writeHierarchicalOutputTee(ctx, logger, orgID, header, allPerms, allLootFiles)
+		return
 	}
-	// Add enumeration loot file
-	if m.EnumLoot != nil && m.EnumLoot.Contents != "" {
-		allLootFiles = append(allLootFiles, *m.EnumLoot)
+
+	// Standard output path for smaller datasets
+	outputData := internal.HierarchicalOutputData{
+		OrgLevelData:     make(map[string]internal.CloudfoxOutput),
+		ProjectLevelData: make(map[string]internal.CloudfoxOutput),
 	}
 
 	if orgID != "" {
 		// DUAL OUTPUT: Complete aggregated output at org level
-		allPerms := m.getAllExplodedPerms()
 		body := m.permsToTableBody(allPerms)
 		tables := []internal.TableFile{{
 			Name:   "permissions",
@@ -877,7 +1079,7 @@ func (m *PermissionsModule) writeHierarchicalOutput(ctx context.Context, logger 
 		}}
 		outputData.OrgLevelData[orgID] = PermissionsOutput{Table: tables, Loot: allLootFiles}
 
-		// DUAL OUTPUT: Filtered per-project output
+		// DUAL OUTPUT: Filtered per-project output with inherited loot
 		for projectID, perms := range m.ProjectPerms {
 			if len(perms) == 0 {
 				continue
@@ -888,11 +1090,12 @@ func (m *PermissionsModule) writeHierarchicalOutput(ctx context.Context, logger 
 				Header: header,
 				Body:   body,
 			}}
-			outputData.ProjectLevelData[projectID] = PermissionsOutput{Table: tables, Loot: nil}
+			// Get loot for this project with inheritance (org + folders + project)
+			projectLoot := m.collectLootFilesForProject(projectID)
+			outputData.ProjectLevelData[projectID] = PermissionsOutput{Table: tables, Loot: projectLoot}
 		}
 	} else if len(m.ProjectIDs) > 0 {
 		// FALLBACK: No org discovered, output complete data to first project
-		allPerms := m.getAllExplodedPerms()
 		body := m.permsToTableBody(allPerms)
 		tables := []internal.TableFile{{
 			Name:   "permissions",
@@ -920,6 +1123,94 @@ func (m *PermissionsModule) writeHierarchicalOutput(ctx context.Context, logger 
 	}
 }
 
+// writeHierarchicalOutputTee uses single-pass streaming for large datasets.
+// It streams through all permissions once, writing each row to:
+// 1. The org-level output (always)
+// 2. The appropriate project-level output based on EffectiveProject
+func (m *PermissionsModule) writeHierarchicalOutputTee(ctx context.Context, logger internal.Logger, orgID string, header []string, allPerms []ExplodedPermission, lootFiles []internal.LootFile) {
+	logger.InfoM(fmt.Sprintf("Using single-pass tee streaming for %d permissions", len(allPerms)), globals.GCP_PERMISSIONS_MODULE_NAME)
+
+	pathBuilder := m.BuildPathBuilder()
+
+	// Build the table data
+	body := m.permsToTableBody(allPerms)
+	tables := []internal.TableFile{{
+		Name:   "permissions",
+		Header: header,
+		Body:   body,
+	}}
+
+	// Build reverse lookup: for each folder, which projects are under it
+	// This allows O(1) lookup during row routing
+	folderToProjects := make(map[string][]string)
+	orgToProjects := make(map[string][]string)
+
+	if m.OrgCache != nil && m.OrgCache.IsPopulated() {
+		for _, projectID := range m.ProjectIDs {
+			// Get the org this project belongs to
+			projectOrgID := m.OrgCache.GetProjectOrgID(projectID)
+			if projectOrgID != "" {
+				orgToProjects[projectOrgID] = append(orgToProjects[projectOrgID], projectID)
+			}
+
+			// Get all ancestor folders for this project
+			ancestorFolders := m.OrgCache.GetProjectAncestorFolders(projectID)
+			for _, folderID := range ancestorFolders {
+				folderToProjects[folderID] = append(folderToProjects[folderID], projectID)
+			}
+		}
+	}
+
+	// Create a row router that routes based on scope type and OrgCache
+	rowRouter := func(row []string) []string {
+		// Row format: [ScopeType, ScopeID, ScopeName, EntityType, Identity, Permission, ...]
+		scopeType := row[0]
+		scopeID := row[1]
+
+		switch scopeType {
+		case "project":
+			// Direct project permission - route to that project only
+			return []string{scopeID}
+		case "organization":
+			// Org permission - route to all projects under this org
+			if projects, ok := orgToProjects[scopeID]; ok {
+				return projects
+			}
+			// Fallback if OrgCache not populated: route to all projects
+			return m.ProjectIDs
+		case "folder":
+			// Folder permission - route to all projects under this folder
+			if projects, ok := folderToProjects[scopeID]; ok {
+				return projects
+			}
+			// Fallback if folder not in cache: route to all projects
+			return m.ProjectIDs
+		default:
+			return nil
+		}
+	}
+
+	// Use the tee streaming function
+	config := internal.TeeStreamingConfig{
+		OrgID:                orgID,
+		ProjectIDs:           m.ProjectIDs,
+		Tables:               tables,
+		LootFiles:            lootFiles,
+		ProjectLootCollector: m.collectLootFilesForProject,
+		RowRouter:            rowRouter,
+		PathBuilder:          pathBuilder,
+		Format:               m.Format,
+		Verbosity:            m.Verbosity,
+		Wrap:                 m.WrapTable,
+	}
+
+	err := internal.HandleHierarchicalOutputTee(config)
+	if err != nil {
+		logger.ErrorM(fmt.Sprintf("Error writing tee streaming output: %v", err), globals.GCP_PERMISSIONS_MODULE_NAME)
+		m.CommandCounter.Error++
+	}
+}
+
 // writeFlatOutput writes all output to a single directory (legacy mode)
 func (m *PermissionsModule) writeFlatOutput(ctx context.Context, logger internal.Logger) {
 	header := m.getTableHeader()
@@ -938,19 +1229,8 @@ func (m *PermissionsModule) writeFlatOutput(ctx context.Context, logger internal
 		return body[i][5] < body[j][5]
 	})
 
-	// Collect all loot files
-	var lootFiles []internal.LootFile
-	for _, projectLoot := range m.LootMap {
-		for _, loot := range projectLoot {
-			if loot != nil && loot.Contents != "" && !strings.HasSuffix(loot.Contents, "# Generated by CloudFox\n\n") {
-				lootFiles = append(lootFiles, *loot)
-			}
-		}
-	}
-	// Add enumeration loot file
-	if m.EnumLoot != nil && m.EnumLoot.Contents != "" {
-		lootFiles = append(lootFiles, *m.EnumLoot)
-	}
+	// Collect all loot files for flat output
+	lootFiles := m.collectAllLootFiles()
 
 	tables := []internal.TableFile{{
 		Name:   "permissions",

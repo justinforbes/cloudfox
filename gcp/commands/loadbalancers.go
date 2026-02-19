@@ -1,11 +1,12 @@
 package commands
 
 import (
-	"github.com/BishopFox/cloudfox/gcp/shared"
 	"context"
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/BishopFox/cloudfox/gcp/shared"
 
 	diagramservice "github.com/BishopFox/cloudfox/gcp/services/diagramService"
 	loadbalancerservice "github.com/BishopFox/cloudfox/gcp/services/loadbalancerService"
@@ -167,7 +168,7 @@ func (m *LoadBalancersModule) addToLoot(projectID string, lb loadbalancerservice
 		return
 	}
 	lootFile.Contents += fmt.Sprintf(
-		"## Load Balancer: %s (Project: %s)\n"+
+		"#### Load Balancer: %s (Project: %s)\n"+
 			"# Type: %s, Scheme: %s, IP: %s, Port: %s\n\n",
 		lb.Name, lb.ProjectID, lb.Type, lb.Scheme, lb.IPAddress, lb.Port)
 
@@ -241,9 +242,27 @@ func (m *LoadBalancersModule) generateLoadBalancerDiagram() string {
 		return ""
 	}
 
+	// Build a map of backend service name -> actual backends (instance groups, NEGs)
+	backendDetailsMap := make(map[string][]string)
+	for _, backends := range m.ProjectBackendServices {
+		for _, be := range backends {
+			if len(be.Backends) > 0 {
+				backendDetailsMap[be.Name] = be.Backends
+			}
+		}
+	}
+
 	// Convert to diagram service types
 	diagramLBs := make([]diagramservice.LoadBalancerInfo, 0, len(allLBs))
 	for _, lb := range allLBs {
+		// Build backend details for this LB
+		lbBackendDetails := make(map[string][]string)
+		for _, beSvc := range lb.BackendServices {
+			if targets, ok := backendDetailsMap[beSvc]; ok {
+				lbBackendDetails[beSvc] = targets
+			}
+		}
+
 		diagramLBs = append(diagramLBs, diagramservice.LoadBalancerInfo{
 			Name:            lb.Name,
 			Type:            lb.Type,
@@ -253,6 +272,7 @@ func (m *LoadBalancersModule) generateLoadBalancerDiagram() string {
 			Region:          lb.Region,
 			BackendServices: lb.BackendServices,
 			SecurityPolicy:  lb.SecurityPolicy,
+			BackendDetails:  lbBackendDetails,
 		})
 	}
 
@@ -360,7 +380,7 @@ func (m *LoadBalancersModule) buildTablesForProject(projectID string) []internal
 
 	if lbs, ok := m.ProjectLoadBalancers[projectID]; ok && len(lbs) > 0 {
 		tableFiles = append(tableFiles, internal.TableFile{
-			Name:   "load-balancers",
+			Name:   "load-balancers-frontends",
 			Header: m.getLBHeader(),
 			Body:   m.lbsToTableBody(lbs),
 		})
@@ -376,7 +396,7 @@ func (m *LoadBalancersModule) buildTablesForProject(projectID string) []internal
 
 	if services, ok := m.ProjectBackendServices[projectID]; ok && len(services) > 0 {
 		tableFiles = append(tableFiles, internal.TableFile{
-			Name:   "backend-services",
+			Name:   "load-balancers-backend-services",
 			Header: m.getBackendHeader(),
 			Body:   m.backendServicesToTableBody(services),
 		})
@@ -435,7 +455,7 @@ func (m *LoadBalancersModule) writeFlatOutput(ctx context.Context, logger intern
 
 	if len(allLBs) > 0 {
 		tables = append(tables, internal.TableFile{
-			Name:   "load-balancers",
+			Name:   "load-balancers-frontends",
 			Header: m.getLBHeader(),
 			Body:   m.lbsToTableBody(allLBs),
 		})
@@ -451,7 +471,7 @@ func (m *LoadBalancersModule) writeFlatOutput(ctx context.Context, logger intern
 
 	if len(allBackends) > 0 {
 		tables = append(tables, internal.TableFile{
-			Name:   "backend-services",
+			Name:   "load-balancers-backend-services",
 			Header: m.getBackendHeader(),
 			Body:   m.backendServicesToTableBody(allBackends),
 		})

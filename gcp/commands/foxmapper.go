@@ -75,6 +75,7 @@ type FoxMapperModule struct {
 	OrgID     string
 	ProjectID string
 	DataPath  string
+	OrgCache  *gcpinternal.OrgCache
 
 	// Output data
 	Admins          []*foxmapperservice.Node
@@ -112,6 +113,9 @@ func runGCPFoxMapperCommand(cmd *cobra.Command, args []string) {
 }
 
 func (m *FoxMapperModule) Execute(ctx context.Context, logger internal.Logger) {
+	// Get OrgCache for project number resolution
+	m.OrgCache = gcpinternal.GetOrgCacheFromContext(ctx)
+
 	logger.InfoM("Looking for FoxMapper data and building privilege escalation graph...", "foxmapper")
 
 	// Custom path specified - load directly
@@ -252,7 +256,8 @@ func (m *FoxMapperModule) generateOutputForProject(logger internal.Logger, proje
 	var output FoxMapperOutput
 
 	// Main table: principals with admin or path to admin
-	mainHeader := []string{"Principal", "Type", "Project", "Is Admin", "Admin Level", "Path to Admin", "Privesc To", "Hops"}
+	// Read left to right: Project -> Type -> Principal -> Admin Status -> Privesc Target -> Privesc Admin Level -> Hops
+	mainHeader := []string{"Project", "Type", "Principal", "Is Admin", "Admin Level", "Privesc To", "Privesc Admin Level", "Hops"}
 	var mainBody [][]string
 
 	// First add admins
@@ -262,10 +267,10 @@ func (m *FoxMapperModule) generateOutputForProject(logger internal.Logger, proje
 			adminLevel = "project"
 		}
 		mainBody = append(mainBody, []string{
-			admin.Email,
-			admin.MemberType,
 			admin.ProjectID,
-			"YES",
+			admin.MemberType,
+			admin.Email,
+			"Yes",
 			adminLevel,
 			"-",
 			"-",
@@ -278,25 +283,66 @@ func (m *FoxMapperModule) generateOutputForProject(logger internal.Logger, proje
 		paths := fm.GetPrivescPaths(node.Email)
 		shortestPath := "-"
 		privescTo := "-"
+		privescAdminLevel := "-"
 		if len(paths) > 0 {
-			shortestPath = strconv.Itoa(paths[0].HopCount)
+			bestPath := paths[0]
+			shortestPath = strconv.Itoa(bestPath.HopCount)
 			// Get the destination (admin) from the best path
-			privescTo = paths[0].Destination
+			privescTo = bestPath.Destination
 			// Clean up the display
 			if strings.HasPrefix(privescTo, "serviceAccount:") {
 				privescTo = strings.TrimPrefix(privescTo, "serviceAccount:")
 			} else if strings.HasPrefix(privescTo, "user:") {
 				privescTo = strings.TrimPrefix(privescTo, "user:")
 			}
+
+			// Format privesc admin level
+			destNode := fm.GetNode(bestPath.Destination)
+			switch bestPath.AdminLevel {
+			case "org":
+				privescAdminLevel = "Org"
+			case "folder":
+				// Try to extract folder from the destination node's IAM bindings
+				if destNode != nil && len(destNode.IAMBindings) > 0 {
+					for _, binding := range destNode.IAMBindings {
+						if resource, ok := binding["resource"].(string); ok {
+							if strings.HasPrefix(resource, "folders/") {
+								folderID := strings.TrimPrefix(resource, "folders/")
+								privescAdminLevel = fmt.Sprintf("Folder: %s", folderID)
+								break
+							}
+						}
+					}
+				}
+				if privescAdminLevel == "-" {
+					privescAdminLevel = "Folder"
+				}
+			case "project":
+				// Try to get the project ID from the destination node or principal
+				if destNode != nil && destNode.ProjectID != "" {
+					privescAdminLevel = fmt.Sprintf("Project: %s", destNode.ProjectID)
+				} else {
+					destProject := extractProjectFromPrincipal(bestPath.Destination, m.OrgCache)
+					if destProject != "" {
+						privescAdminLevel = fmt.Sprintf("Project: %s", destProject)
+					} else {
+						privescAdminLevel = "Project"
+					}
+				}
+			default:
+				if bestPath.AdminLevel != "" {
+					privescAdminLevel = bestPath.AdminLevel
+				}
+			}
 		}
 		mainBody = append(mainBody, []string{
-			node.Email,
-			node.MemberType,
 			node.ProjectID,
+			node.MemberType,
+			node.Email,
 			"No",
 			"-",
-			"YES",
 			privescTo,
+			privescAdminLevel,
 			shortestPath,
 		})
 	}
@@ -473,7 +519,8 @@ func (m *FoxMapperModule) generateOutput(logger internal.Logger, identifier stri
 	var output FoxMapperOutput
 
 	// Main table: principals with admin or path to admin
-	mainHeader := []string{"Principal", "Type", "Project", "Is Admin", "Admin Level", "Path to Admin", "Privesc To", "Hops"}
+	// Read left to right: Project -> Type -> Principal -> Admin Status -> Privesc Target -> Privesc Admin Level -> Hops
+	mainHeader := []string{"Project", "Type", "Principal", "Is Admin", "Admin Level", "Privesc To", "Privesc Admin Level", "Hops"}
 	var mainBody [][]string
 
 	// First add admins
@@ -483,10 +530,10 @@ func (m *FoxMapperModule) generateOutput(logger internal.Logger, identifier stri
 			adminLevel = "project"
 		}
 		mainBody = append(mainBody, []string{
-			admin.Email,
-			admin.MemberType,
 			admin.ProjectID,
-			"YES",
+			admin.MemberType,
+			admin.Email,
+			"Yes",
 			adminLevel,
 			"-",
 			"-",
@@ -499,25 +546,66 @@ func (m *FoxMapperModule) generateOutput(logger internal.Logger, identifier stri
 		paths := m.FoxMapper.GetPrivescPaths(node.Email)
 		shortestPath := "-"
 		privescTo := "-"
+		privescAdminLevel := "-"
 		if len(paths) > 0 {
-			shortestPath = strconv.Itoa(paths[0].HopCount)
+			bestPath := paths[0]
+			shortestPath = strconv.Itoa(bestPath.HopCount)
 			// Get the destination (admin) from the best path
-			privescTo = paths[0].Destination
+			privescTo = bestPath.Destination
 			// Clean up the display
 			if strings.HasPrefix(privescTo, "serviceAccount:") {
 				privescTo = strings.TrimPrefix(privescTo, "serviceAccount:")
 			} else if strings.HasPrefix(privescTo, "user:") {
 				privescTo = strings.TrimPrefix(privescTo, "user:")
 			}
+
+			// Format privesc admin level
+			destNode := m.FoxMapper.GetNode(bestPath.Destination)
+			switch bestPath.AdminLevel {
+			case "org":
+				privescAdminLevel = "Org"
+			case "folder":
+				// Try to extract folder from the destination node's IAM bindings
+				if destNode != nil && len(destNode.IAMBindings) > 0 {
+					for _, binding := range destNode.IAMBindings {
+						if resource, ok := binding["resource"].(string); ok {
+							if strings.HasPrefix(resource, "folders/") {
+								folderID := strings.TrimPrefix(resource, "folders/")
+								privescAdminLevel = fmt.Sprintf("Folder: %s", folderID)
+								break
+							}
+						}
+					}
+				}
+				if privescAdminLevel == "-" {
+					privescAdminLevel = "Folder"
+				}
+			case "project":
+				// Try to get the project ID from the destination node or principal
+				if destNode != nil && destNode.ProjectID != "" {
+					privescAdminLevel = fmt.Sprintf("Project: %s", destNode.ProjectID)
+				} else {
+					destProject := extractProjectFromPrincipal(bestPath.Destination, m.OrgCache)
+					if destProject != "" {
+						privescAdminLevel = fmt.Sprintf("Project: %s", destProject)
+					} else {
+						privescAdminLevel = "Project"
+					}
+				}
+			default:
+				if bestPath.AdminLevel != "" {
+					privescAdminLevel = bestPath.AdminLevel
+				}
+			}
 		}
 		mainBody = append(mainBody, []string{
-			node.Email,
-			node.MemberType,
 			node.ProjectID,
+			node.MemberType,
+			node.Email,
 			"No",
 			"-",
-			"YES",
 			privescTo,
+			privescAdminLevel,
 			shortestPath,
 		})
 	}

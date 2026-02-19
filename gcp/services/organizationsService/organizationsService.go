@@ -102,6 +102,7 @@ func (s *OrganizationsService) SearchOrganizations() ([]OrganizationInfo, error)
 		orgInfo := OrganizationInfo{
 			Name:        org.Name,
 			DisplayName: org.DisplayName,
+			DirectoryID: org.GetDirectoryCustomerId(),
 			State:       org.State.String(),
 		}
 		if org.CreateTime != nil {

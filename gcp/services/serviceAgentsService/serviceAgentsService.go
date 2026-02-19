@@ -123,12 +123,19 @@ func (s *ServiceAgentsService) getResourceManagerService(ctx context.Context) (*
 	return cloudresourcemanager.NewService(ctx)
 }
 
-// GetServiceAgents retrieves all service agents with IAM bindings
-func (s *ServiceAgentsService) GetServiceAgents(projectID string) ([]ServiceAgentInfo, error) {
+// GetServiceAgents retrieves all service agents with IAM bindings.
+// If orgCache is provided, it resolves project numbers to IDs for accurate cross-project detection.
+func (s *ServiceAgentsService) GetServiceAgents(projectID string, orgCache ...*gcpinternal.OrgCache) ([]ServiceAgentInfo, error) {
 	ctx := context.Background()
 	service, err := s.getResourceManagerService(ctx)
 	if err != nil {
 		return nil, gcpinternal.ParseGCPError(err, "cloudresourcemanager.googleapis.com")
+	}
+
+	// Get optional OrgCache
+	var cache *gcpinternal.OrgCache
+	if len(orgCache) > 0 {
+		cache = orgCache[0]
 	}
 
 	var agents []ServiceAgentInfo
@@ -156,11 +163,19 @@ func (s *ServiceAgentsService) GetServiceAgents(projectID string) ([]ServiceAgen
 				continue // Not a service agent
 			}
 
-			// Extract source project from email
+			// Extract source project from email (may be a project number or ID)
 			sourceProject := s.extractSourceProject(email)
 
-			// Check for cross-project access
-			isCrossProject := sourceProject != "" && sourceProject != projectID
+			// Resolve project number to ID using OrgCache if available
+			sourceProjectID := sourceProject
+			if cache != nil && cache.IsPopulated() && sourceProject != "" {
+				if resolved := cache.GetProjectIDByNumber(sourceProject); resolved != "" {
+					sourceProjectID = resolved
+				}
+			}
+
+			// Check for cross-project access using resolved ID
+			isCrossProject := sourceProjectID != "" && sourceProjectID != projectID
 
 			// Add or update agent
 			if agent, exists := seenAgents[email]; exists {
@@ -169,7 +184,7 @@ func (s *ServiceAgentsService) GetServiceAgents(projectID string) ([]ServiceAgen
 				agent := &ServiceAgentInfo{
 					Email:          email,
 					ProjectID:      projectID,
-					SourceProject:  sourceProject,
+					SourceProject:  sourceProjectID,
 					ServiceName:    agentType,
 					AgentType:      agentType,
 					Roles:          []string{binding.Role},

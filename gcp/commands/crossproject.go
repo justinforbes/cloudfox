@@ -140,7 +140,7 @@ func (m *CrossProjectModule) Execute(ctx context.Context, logger internal.Logger
 	svc := crossprojectservice.New()
 
 	// Analyze cross-project bindings
-	bindings, err := svc.AnalyzeCrossProjectAccess(m.ProjectIDs)
+	bindings, err := svc.AnalyzeCrossProjectAccess(m.ProjectIDs, m.OrgCache)
 	if err != nil {
 		m.CommandCounter.Error++
 		gcpinternal.HandleGCPError(err, logger, globals.GCP_CROSSPROJECT_MODULE_NAME,
@@ -160,7 +160,7 @@ func (m *CrossProjectModule) Execute(ctx context.Context, logger internal.Logger
 	}
 
 	// Find lateral movement paths
-	paths, err := svc.FindLateralMovementPaths(m.ProjectIDs)
+	paths, err := svc.FindLateralMovementPaths(m.ProjectIDs, m.OrgCache)
 	if err != nil {
 		m.CommandCounter.Error++
 		gcpinternal.HandleGCPError(err, logger, globals.GCP_CROSSPROJECT_MODULE_NAME,
