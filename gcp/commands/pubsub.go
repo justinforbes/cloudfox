@@ -474,6 +474,7 @@ gcloud pubsub subscriptions pull %s --project=%s --limit=100 --auto-ack
 		sub.Name, sub.ProjectID,
 		sub.Name, sub.ProjectID,
 		sub.Name, sub.ProjectID,
+		sub.Name, sub.ProjectID,
 		sub.Name, sub.Name, sub.ProjectID,
 		sub.Name, sub.ProjectID,
 		sub.Name, sub.Name, sub.ProjectID,
