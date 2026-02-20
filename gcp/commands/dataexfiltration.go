@@ -1471,7 +1471,13 @@ func (m *DataExfiltrationModule) foxMapperFindingsToTableBodyForProject(projectI
 				}
 			}
 
+			scopeType := p.ScopeType
+			if scopeType == "" {
+				scopeType = "-"
+			}
+
 			body = append(body, []string{
+				scopeType,
 				principalProject,
 				principalType,
 				p.Principal,

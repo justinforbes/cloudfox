@@ -152,7 +152,7 @@ func (s *DataflowService) analyzeJobRisk(job JobInfo) (string, []string) {
 	}
 
 	// Check for external temp/staging locations
-	if job.TempLocation != "" && !strings.Contains(job.TempLocation, projectID(job.ProjectID)) {
+	if job.TempLocation != "" && !strings.Contains(job.TempLocation, job.ProjectID) {
 		reasons = append(reasons, "Temp location may be in external project")
 		score += 1
 	}
@@ -165,10 +165,6 @@ func (s *DataflowService) analyzeJobRisk(job JobInfo) (string, []string) {
 		return "LOW", reasons
 	}
 	return "INFO", reasons
-}
-
-func projectID(id string) string {
-	return id
 }
 
 func extractName(fullName string) string {

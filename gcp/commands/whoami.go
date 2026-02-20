@@ -884,20 +884,22 @@ func (m *WhoAmIModule) identifyPrivEscPathsFromAnalysis(ctx context.Context, rel
 		for _, path := range finding.Paths {
 			// Build command from first edge if available
 			command := ""
+			permission := ""
 			if len(path.Edges) > 0 {
 				command = generatePrivescCommandFromEdge(path.Edges[0])
+				permission = path.Edges[0].ShortReason
 			}
 
 			privEscPath := PrivilegeEscalationPath{
 				ProjectID:     "", // FoxMapper doesn't track project per edge
-				Permission:    path.Edges[0].ShortReason,
+				Permission:    permission,
 				Category:      "Privesc",
 				Description:   fmt.Sprintf("Can escalate to %s admin via %d-hop path", path.AdminLevel, path.HopCount),
 				SourceRole:    finding.Principal,
 				SourceScope:   path.AdminLevel,
 				Command:       command,
 				Confidence:    "confirmed",
-				RequiredPerms: path.Edges[0].ShortReason,
+				RequiredPerms: permission,
 			}
 
 			if path.ScopeBlocked {
@@ -920,7 +922,7 @@ func generatePrivescCommandFromEdge(edge foxmapperservice.Edge) string {
 		return "gcloud iam service-accounts keys create key.json --iam-account=TARGET_SA"
 	} else if strings.Contains(reason, "iam.serviceaccounts.actas") {
 		return "# Use actAs to run services as the target SA"
-	} else if strings.Contains(reason, "setiamdolicy") {
+	} else if strings.Contains(reason, "setiampolicy") {
 		return "# Modify IAM policy to grant yourself additional permissions"
 	} else if strings.Contains(reason, "cloudfunctions") {
 		return "gcloud functions deploy FUNC --runtime=python311 --service-account=TARGET_SA"

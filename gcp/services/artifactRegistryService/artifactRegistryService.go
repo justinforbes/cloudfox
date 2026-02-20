@@ -285,15 +285,21 @@ func parseDockerImageName(imageName string) DockerImageDetails {
 	// Split the image name by '/'
 	parts := strings.Split(imageName, "/")
 
-	// Extract details based on the known structure of the image name.
-	// Assuming the format is always consistent as described.
+	// Validate expected format: projects/{project}/locations/{location}/repositories/{repo}/dockerImages/{image@digest}
+	if len(parts) < 8 {
+		return DockerImageDetails{ImageName: imageName}
+	}
+
 	projectID := parts[1]
 	location := parts[3]
 	repository := parts[5]
 	// The image name and digest are after the last '/', separated by '@'
 	imageAndDigest := strings.Split(parts[7], "@")
 	imageName = imageAndDigest[0]
-	digest := imageAndDigest[1]
+	digest := ""
+	if len(imageAndDigest) > 1 {
+		digest = imageAndDigest[1]
+	}
 
 	// URL-decode the image name (e.g., "library%2Fnginx" -> "library/nginx")
 	decodedImageName, err := url.PathUnescape(imageName)

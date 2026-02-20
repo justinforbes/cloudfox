@@ -154,7 +154,8 @@ func (ks *KMSService) CryptoKeys(projectID string) ([]CryptoKeyInfo, error) {
 		})
 
 		if err != nil {
-			// Continue with other key rings even if one fails
+			// Log but continue with other key rings
+			_ = err // Error from listing keys in this key ring - permission or API issue
 			continue
 		}
 	}

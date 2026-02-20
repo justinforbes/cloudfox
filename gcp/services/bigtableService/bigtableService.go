@@ -100,8 +100,8 @@ func (s *BigtableService) ListInstances(projectID string) (*BigtableResult, erro
 		}
 
 		// Get clusters
-		clustersResp, _ := service.Projects.Instances.Clusters.List(instance.Name).Context(ctx).Do()
-		if clustersResp != nil {
+		clustersResp, clusterErr := service.Projects.Instances.Clusters.List(instance.Name).Context(ctx).Do()
+		if clusterErr == nil && clustersResp != nil {
 			for _, cluster := range clustersResp.Clusters {
 				info.Clusters = append(info.Clusters, ClusterInfo{
 					Name:       extractName(cluster.Name),
@@ -113,8 +113,8 @@ func (s *BigtableService) ListInstances(projectID string) (*BigtableResult, erro
 		}
 
 		// Get tables and their IAM policies
-		tablesResp, _ := service.Projects.Instances.Tables.List(instance.Name).Context(ctx).Do()
-		if tablesResp != nil {
+		tablesResp, tableErr := service.Projects.Instances.Tables.List(instance.Name).Context(ctx).Do()
+		if tableErr == nil && tablesResp != nil {
 			for _, table := range tablesResp.Tables {
 				tableInfo := BigtableTableInfo{
 					Name:         extractName(table.Name),

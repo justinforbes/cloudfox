@@ -6,14 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/BishopFox/cloudfox/globals"
-	"github.com/BishopFox/cloudfox/internal"
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
 	apikeys "google.golang.org/api/apikeys/v2"
 )
-
-var logger internal.Logger
 
 type APIKeysService struct {
 	session *gcpinternal.SafeSession
@@ -293,13 +289,10 @@ func (s *APIKeysService) ListAPIKeysWithKeyStrings(projectID string) ([]APIKeyIn
 	for i := range keys {
 		keyString, err := s.GetKeyString(keys[i].Name)
 		if err != nil {
-			// Log but don't fail - we might not have permission
-			parsedErr := gcpinternal.ParseGCPError(err, "apikeys.googleapis.com")
-			gcpinternal.HandleGCPError(parsedErr, logger, globals.GCP_APIKEYS_MODULE_NAME,
-				fmt.Sprintf("Could not get key string for %s", keys[i].Name))
-		} else {
-			keys[i].KeyString = keyString
+			// Skip - we might not have permission to get key strings
+			continue
 		}
+		keys[i].KeyString = keyString
 	}
 
 	return keys, nil

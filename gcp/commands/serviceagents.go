@@ -140,9 +140,9 @@ func (m *ServiceAgentsModule) processProject(ctx context.Context, projectID stri
 	svc := serviceagentsservice.New()
 	agents, err := svc.GetServiceAgents(projectID, m.OrgCache)
 	if err != nil {
-		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-			logger.ErrorM(fmt.Sprintf("Error getting service agents: %v", err), globals.GCP_SERVICEAGENTS_MODULE_NAME)
-		}
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_SERVICEAGENTS_MODULE_NAME,
+			fmt.Sprintf("Could not get service agents in project %s", projectID))
 		return
 	}
 

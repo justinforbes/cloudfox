@@ -409,6 +409,7 @@ func (m *MonitoringAlertsModule) enumerateUptimeChecks(ctx context.Context, proj
 			Name:        check.Name,
 			DisplayName: check.DisplayName,
 			ProjectID:   projectID,
+			Enabled:     !check.IsInternal, // Active checks returned by API are enabled; internal checks are system-managed
 		}
 
 		// Parse resource type

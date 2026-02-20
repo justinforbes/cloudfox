@@ -376,14 +376,27 @@ func (s *ResourceIAMService) GetSecretManagerIAM(ctx context.Context, projectID 
 		return nil, gcpinternal.ParseGCPError(err, "secretmanager.googleapis.com")
 	}
 
-	// List secrets
+	// List secrets (with pagination)
 	parent := fmt.Sprintf("projects/%s", projectID)
-	resp, err := smService.Projects.Secrets.List(parent).Context(ctx).Do()
-	if err != nil {
-		return nil, gcpinternal.ParseGCPError(err, "secretmanager.googleapis.com")
+	pageToken := ""
+	var allSecrets []*secretmanager.Secret
+	for {
+		call := smService.Projects.Secrets.List(parent).Context(ctx)
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+		resp, err := call.Do()
+		if err != nil {
+			return nil, gcpinternal.ParseGCPError(err, "secretmanager.googleapis.com")
+		}
+		allSecrets = append(allSecrets, resp.Secrets...)
+		if resp.NextPageToken == "" {
+			break
+		}
+		pageToken = resp.NextPageToken
 	}
 
-	for _, secret := range resp.Secrets {
+	for _, secret := range allSecrets {
 		// Get IAM policy for this secret
 		policy, err := smService.Projects.Secrets.GetIamPolicy(secret.Name).Context(ctx).Do()
 		if err != nil {

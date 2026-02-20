@@ -147,7 +147,11 @@ func (m *LoadBalancersModule) processProject(ctx context.Context, projectID stri
 
 	// Get SSL policies
 	sslPolicies, err := svc.ListSSLPolicies(projectID)
-	if err == nil {
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_LOADBALANCERS_MODULE_NAME,
+			fmt.Sprintf("Could not list SSL policies in project %s", projectID))
+	} else {
 		m.mu.Lock()
 		m.ProjectSSLPolicies[projectID] = sslPolicies
 		m.mu.Unlock()
@@ -155,7 +159,11 @@ func (m *LoadBalancersModule) processProject(ctx context.Context, projectID stri
 
 	// Get backend services
 	backends, err := svc.ListBackendServices(projectID)
-	if err == nil {
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_LOADBALANCERS_MODULE_NAME,
+			fmt.Sprintf("Could not list backend services in project %s", projectID))
+	} else {
 		m.mu.Lock()
 		m.ProjectBackendServices[projectID] = backends
 		m.mu.Unlock()

@@ -3,6 +3,7 @@ package cloudbuildservice
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	gcpinternal "github.com/BishopFox/cloudfox/internal/gcp"
 	"github.com/BishopFox/cloudfox/internal/gcp/sdk"
@@ -353,6 +354,5 @@ func containsSecretKeyword(key string) bool {
 }
 
 func containsIgnoreCase(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr ||
-		len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr))
+	return strings.Contains(strings.ToUpper(s), strings.ToUpper(substr))
 }

@@ -740,7 +740,12 @@ func (s *FoxMapperService) GetPrivescSummary() map[string]interface{} {
 		"project_admins":      projectAdmins,
 		"sa_with_privesc":     saWithPrivesc,
 		"user_with_privesc":   userWithPrivesc,
-		"percent_with_privesc": float64(nodesWithPrivesc) / float64(totalNodes-adminNodes) * 100,
+		"percent_with_privesc": func() float64 {
+			if totalNodes-adminNodes == 0 {
+				return 0
+			}
+			return float64(nodesWithPrivesc) / float64(totalNodes-adminNodes) * 100
+		}(),
 	}
 }
 

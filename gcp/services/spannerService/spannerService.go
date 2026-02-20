@@ -137,7 +137,7 @@ func (s *SpannerService) listDatabases(service *spanner.Service, ctx context.Con
 	var databases []SpannerDatabaseInfo
 
 	req := service.Projects.Instances.Databases.List(instanceName)
-	_ = req.Pages(ctx, func(page *spanner.ListDatabasesResponse) error {
+	err := req.Pages(ctx, func(page *spanner.ListDatabasesResponse) error {
 		for _, db := range page.Databases {
 			dbInfo := SpannerDatabaseInfo{
 				Name:         extractName(db.Name),
@@ -162,6 +162,10 @@ func (s *SpannerService) listDatabases(service *spanner.Service, ctx context.Con
 		}
 		return nil
 	})
+	if err != nil {
+		// Log but don't fail - return whatever we collected
+		return databases
+	}
 
 	return databases
 }

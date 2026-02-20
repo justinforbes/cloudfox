@@ -130,13 +130,23 @@ func (m *BeyondCorpModule) processProject(ctx context.Context, projectID string,
 	m.mu.Unlock()
 
 	// Get app connectors
-	connectors, _ := svc.ListAppConnectors(projectID)
+	connectors, err := svc.ListAppConnectors(projectID)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_BEYONDCORP_MODULE_NAME,
+			fmt.Sprintf("Could not list app connectors in project %s", projectID))
+	}
 	m.mu.Lock()
 	m.ProjectAppConnectors[projectID] = connectors
 	m.mu.Unlock()
 
 	// Get app connections
-	connections, _ := svc.ListAppConnections(projectID)
+	connections, err := svc.ListAppConnections(projectID)
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_BEYONDCORP_MODULE_NAME,
+			fmt.Sprintf("Could not list app connections in project %s", projectID))
+	}
 	m.mu.Lock()
 	m.ProjectAppConnections[projectID] = connections
 	for _, conn := range connections {

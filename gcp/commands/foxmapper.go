@@ -507,9 +507,9 @@ func (m *FoxMapperModule) generateLootContentForProject(projectID string, fm *fo
 
 // printProjectSummary prints a summary for a single project
 func (m *FoxMapperModule) printProjectSummary(logger internal.Logger, projectID string, summary map[string]interface{}) {
-	totalNodes := summary["total_nodes"].(int)
-	adminNodes := summary["admin_nodes"].(int)
-	nodesWithPrivesc := summary["nodes_with_privesc"].(int)
+	totalNodes, _ := summary["total_nodes"].(int)
+	adminNodes, _ := summary["admin_nodes"].(int)
+	nodesWithPrivesc, _ := summary["nodes_with_privesc"].(int)
 
 	logger.InfoM(fmt.Sprintf("[%s] %d principals, %d admins, %d with privesc path",
 		projectID, totalNodes, adminNodes, nodesWithPrivesc), "foxmapper")
@@ -774,9 +774,9 @@ func (m *FoxMapperModule) generateLootContent(identifier string) string {
 }
 
 func (m *FoxMapperModule) printSummary(logger internal.Logger, identifier string) {
-	totalNodes := m.Summary["total_nodes"].(int)
-	adminNodes := m.Summary["admin_nodes"].(int)
-	nodesWithPrivesc := m.Summary["nodes_with_privesc"].(int)
+	totalNodes, _ := m.Summary["total_nodes"].(int)
+	adminNodes, _ := m.Summary["admin_nodes"].(int)
+	nodesWithPrivesc, _ := m.Summary["nodes_with_privesc"].(int)
 
 	logger.InfoM(fmt.Sprintf("Analysis complete for: %s", identifier), "foxmapper")
 	logger.InfoM(fmt.Sprintf("Total principals: %d", totalNodes), "foxmapper")
@@ -784,7 +784,7 @@ func (m *FoxMapperModule) printSummary(logger internal.Logger, identifier string
 	logger.InfoM(fmt.Sprintf("Principals with path to admin: %d", nodesWithPrivesc), "foxmapper")
 
 	if nodesWithPrivesc > 0 {
-		percent := m.Summary["percent_with_privesc"].(float64)
+		percent, _ := m.Summary["percent_with_privesc"].(float64)
 		logger.InfoM(fmt.Sprintf("Percent with privesc: %.1f%%", percent), "foxmapper")
 	}
 

@@ -209,7 +209,7 @@ func (m *EndpointsModule) processProject(ctx context.Context, projectID string, 
 func (m *EndpointsModule) getStaticExternalIPs(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
 	// Global addresses
 	req := svc.GlobalAddresses.List(projectID)
-	_ = req.Pages(ctx, func(page *compute.AddressList) error {
+	if err := req.Pages(ctx, func(page *compute.AddressList) error {
 		for _, addr := range page.Items {
 			if addr.AddressType == "EXTERNAL" {
 				user := ""
@@ -238,11 +238,14 @@ func (m *EndpointsModule) getStaticExternalIPs(ctx context.Context, svc *compute
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list global addresses in project %s", projectID))
+	}
 
 	// Regional addresses - use AggregatedList to avoid needing compute.regions.list permission
 	addrReq := svc.Addresses.AggregatedList(projectID)
-	_ = addrReq.Pages(ctx, func(page *compute.AddressAggregatedList) error {
+	if err := addrReq.Pages(ctx, func(page *compute.AddressAggregatedList) error {
 		for scopeName, scopedList := range page.Items {
 			if scopedList.Addresses == nil {
 				continue
@@ -281,13 +284,16 @@ func (m *EndpointsModule) getStaticExternalIPs(ctx context.Context, svc *compute
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list regional addresses in project %s", projectID))
+	}
 }
 
 // getInstanceIPs retrieves instances with both external and internal IPs
 func (m *EndpointsModule) getInstanceIPs(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
 	req := svc.Instances.AggregatedList(projectID)
-	_ = req.Pages(ctx, func(page *compute.InstanceAggregatedList) error {
+	if err := req.Pages(ctx, func(page *compute.InstanceAggregatedList) error {
 		for zone, scopedList := range page.Items {
 			if scopedList.Instances == nil {
 				continue
@@ -356,7 +362,10 @@ func (m *EndpointsModule) getInstanceIPs(ctx context.Context, svc *compute.Servi
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list instances in project %s", projectID))
+	}
 }
 
 // getPortsForInstance determines open ports for an instance based on firewall rules
@@ -396,7 +405,7 @@ func (m *EndpointsModule) getPortsForInstance(network string, tags *compute.Tags
 func (m *EndpointsModule) getLoadBalancers(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
 	// Regional forwarding rules
 	req := svc.ForwardingRules.AggregatedList(projectID)
-	_ = req.Pages(ctx, func(page *compute.ForwardingRuleAggregatedList) error {
+	if err := req.Pages(ctx, func(page *compute.ForwardingRuleAggregatedList) error {
 		for region, scopedList := range page.Items {
 			if scopedList.ForwardingRules == nil {
 				continue
@@ -453,11 +462,14 @@ func (m *EndpointsModule) getLoadBalancers(ctx context.Context, svc *compute.Ser
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list regional forwarding rules in project %s", projectID))
+	}
 
 	// Global forwarding rules
 	globalReq := svc.GlobalForwardingRules.List(projectID)
-	_ = globalReq.Pages(ctx, func(page *compute.ForwardingRuleList) error {
+	if err := globalReq.Pages(ctx, func(page *compute.ForwardingRuleList) error {
 		for _, rule := range page.Items {
 			if rule.LoadBalancingScheme == "EXTERNAL" || rule.LoadBalancingScheme == "EXTERNAL_MANAGED" {
 				ports := "ALL"
@@ -489,14 +501,17 @@ func (m *EndpointsModule) getLoadBalancers(ctx context.Context, svc *compute.Ser
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list global forwarding rules in project %s", projectID))
+	}
 }
 
 // getVPNGateways retrieves VPN gateway external IPs
 func (m *EndpointsModule) getVPNGateways(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
 	// Classic VPN Gateways
 	req := svc.TargetVpnGateways.AggregatedList(projectID)
-	_ = req.Pages(ctx, func(page *compute.TargetVpnGatewayAggregatedList) error {
+	if err := req.Pages(ctx, func(page *compute.TargetVpnGatewayAggregatedList) error {
 		for region, scopedList := range page.Items {
 			if scopedList.TargetVpnGateways == nil {
 				continue
@@ -521,11 +536,14 @@ func (m *EndpointsModule) getVPNGateways(ctx context.Context, svc *compute.Servi
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list classic VPN gateways in project %s", projectID))
+	}
 
 	// HA VPN Gateways
 	haReq := svc.VpnGateways.AggregatedList(projectID)
-	_ = haReq.Pages(ctx, func(page *compute.VpnGatewayAggregatedList) error {
+	if err := haReq.Pages(ctx, func(page *compute.VpnGatewayAggregatedList) error {
 		for region, scopedList := range page.Items {
 			if scopedList.VpnGateways == nil {
 				continue
@@ -551,13 +569,16 @@ func (m *EndpointsModule) getVPNGateways(ctx context.Context, svc *compute.Servi
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list HA VPN gateways in project %s", projectID))
+	}
 }
 
 // getCloudNAT retrieves Cloud NAT external IPs
 func (m *EndpointsModule) getCloudNAT(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
 	req := svc.Routers.AggregatedList(projectID)
-	_ = req.Pages(ctx, func(page *compute.RouterAggregatedList) error {
+	if err := req.Pages(ctx, func(page *compute.RouterAggregatedList) error {
 		for region, scopedList := range page.Items {
 			if scopedList.Routers == nil {
 				continue
@@ -583,14 +604,17 @@ func (m *EndpointsModule) getCloudNAT(ctx context.Context, svc *compute.Service,
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list Cloud NAT routers in project %s", projectID))
+	}
 }
 
 // getPrivateServiceConnect retrieves Private Service Connect endpoints
 func (m *EndpointsModule) getPrivateServiceConnect(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
 	// Service Attachments (producer side)
 	saReq := svc.ServiceAttachments.AggregatedList(projectID)
-	_ = saReq.Pages(ctx, func(page *compute.ServiceAttachmentAggregatedList) error {
+	if err := saReq.Pages(ctx, func(page *compute.ServiceAttachmentAggregatedList) error {
 		for region, scopedList := range page.Items {
 			if scopedList.ServiceAttachments == nil {
 				continue
@@ -611,7 +635,10 @@ func (m *EndpointsModule) getPrivateServiceConnect(ctx context.Context, svc *com
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list service attachments in project %s", projectID))
+	}
 }
 
 // getCloudRunServices retrieves Cloud Run services
@@ -1098,7 +1125,7 @@ func (m *EndpointsModule) getPubSubPushEndpoints(ctx context.Context, projectID 
 // analyzeFirewallRules analyzes firewall rules and builds port mapping
 func (m *EndpointsModule) analyzeFirewallRules(ctx context.Context, svc *compute.Service, projectID string, logger internal.Logger) {
 	req := svc.Firewalls.List(projectID)
-	_ = req.Pages(ctx, func(page *compute.FirewallList) error {
+	if err := req.Pages(ctx, func(page *compute.FirewallList) error {
 		for _, fw := range page.Items {
 			if fw.Direction != "INGRESS" {
 				continue
@@ -1127,7 +1154,10 @@ func (m *EndpointsModule) analyzeFirewallRules(ctx context.Context, svc *compute
 			m.mu.Unlock()
 		}
 		return nil
-	})
+	}); err != nil {
+		gcpinternal.HandleGCPError(err, logger, "endpoints",
+			fmt.Sprintf("Could not list firewall rules in project %s", projectID))
+	}
 }
 
 // addEndpoint adds an endpoint thread-safely

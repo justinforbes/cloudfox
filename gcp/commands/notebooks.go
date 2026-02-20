@@ -136,9 +136,14 @@ func (m *NotebooksModule) processProject(ctx context.Context, projectID string, 
 		m.mu.Unlock()
 	}
 
-	// Get runtimes
+	// Get runtimes (might not be available in all projects)
 	runtimes, err := svc.ListRuntimes(projectID)
-	if err == nil {
+	if err != nil {
+		// Don't increment error counter - runtimes API may not be enabled
+		if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
+			logger.InfoM(fmt.Sprintf("Could not list runtimes in project %s (may not be enabled)", projectID), globals.GCP_NOTEBOOKS_MODULE_NAME)
+		}
+	} else {
 		m.mu.Lock()
 		m.ProjectRuntimes[projectID] = runtimes
 		m.mu.Unlock()

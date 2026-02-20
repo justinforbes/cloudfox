@@ -301,7 +301,12 @@ func (m *NetworkTopologyModule) enumerateNetworks(ctx context.Context, projectID
 				ProjectID:         projectID,
 				SelfLink:          network.SelfLink,
 				Description:       network.Description,
-				RoutingMode:       network.RoutingConfig.RoutingMode,
+				RoutingMode: func() string {
+				if network.RoutingConfig != nil {
+					return network.RoutingConfig.RoutingMode
+				}
+				return ""
+			}(),
 				AutoCreateSubnets: network.AutoCreateSubnetworks,
 				MTU:               network.Mtu,
 				CreationTimestamp: network.CreationTimestamp,

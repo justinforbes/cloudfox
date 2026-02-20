@@ -214,6 +214,11 @@ func (s *VPCSCService) parseAccessLevel(level *accesscontextmanager.AccessLevel,
 		}
 	}
 
+	// Handle custom access levels (CEL expressions)
+	if level.Custom != nil && level.Custom.Expr != nil && level.Custom.Expr.Expression != "" {
+		info.Description = fmt.Sprintf("Custom CEL: %s", level.Custom.Expr.Expression)
+	}
+
 	return info
 }
 

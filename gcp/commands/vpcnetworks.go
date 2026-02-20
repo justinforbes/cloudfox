@@ -149,7 +149,11 @@ func (m *VPCNetworksModule) processProject(ctx context.Context, projectID string
 
 	// Get subnets
 	subnets, err := svc.ListSubnets(projectID)
-	if err == nil {
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_VPCNETWORKS_MODULE_NAME,
+			fmt.Sprintf("Could not list subnets in project %s", projectID))
+	} else {
 		m.mu.Lock()
 		m.ProjectSubnets[projectID] = subnets
 		for _, subnet := range subnets {
@@ -160,7 +164,11 @@ func (m *VPCNetworksModule) processProject(ctx context.Context, projectID string
 
 	// Get peerings
 	peerings, err := svc.ListVPCPeerings(projectID)
-	if err == nil {
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_VPCNETWORKS_MODULE_NAME,
+			fmt.Sprintf("Could not list VPC peerings in project %s", projectID))
+	} else {
 		m.mu.Lock()
 		m.ProjectPeerings[projectID] = peerings
 		for _, peering := range peerings {
@@ -171,7 +179,11 @@ func (m *VPCNetworksModule) processProject(ctx context.Context, projectID string
 
 	// Get routes
 	routes, err := svc.ListRoutes(projectID)
-	if err == nil {
+	if err != nil {
+		m.CommandCounter.Error++
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_VPCNETWORKS_MODULE_NAME,
+			fmt.Sprintf("Could not list routes in project %s", projectID))
+	} else {
 		m.mu.Lock()
 		m.ProjectRoutes[projectID] = routes
 		m.mu.Unlock()

@@ -124,7 +124,9 @@ func getIPAddressesForTargetTag(instances []ComputeEngineService.ComputeEngineIn
 	var ips []string
 	for _, instance := range instances {
 		if contains(instance.Tags.Items, tag) {
-			ips = append(ips, instance.NetworkInterfaces[0].NetworkIP)
+			if len(instance.NetworkInterfaces) > 0 {
+				ips = append(ips, instance.NetworkInterfaces[0].NetworkIP)
+			}
 		}
 	}
 	return ips, nil

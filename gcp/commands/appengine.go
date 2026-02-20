@@ -586,11 +586,20 @@ func (m *AppEngineModule) buildTablesForProject(projectID string, apps []AppEngi
 				app.LocationID,
 				app.ServingStatus,
 				app.DefaultHostname,
-				"No services deployed",
-				"", "", "", "", "",
-				app.ServiceAccount,
-				"-", // Priv Esc
-				"", "", "", "", "", "",
+				"No services deployed", // Service
+				"-",                    // Version
+				"-",                    // Runtime
+				"-",                    // Environment
+				"-",                    // Ingress
+				"-",                    // Public
+				app.ServiceAccount,     // Service Account
+				"-",                    // SA Attack Paths
+				"-",                    // Default SA
+				"-",                    // Deprecated
+				"-",                    // Env Vars
+				"-",                    // Secrets
+				"-",                    // VPC Connector
+				"-",                    // URL
 			})
 		}
 	}

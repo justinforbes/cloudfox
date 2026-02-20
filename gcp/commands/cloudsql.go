@@ -249,6 +249,14 @@ func (m *CloudSQLModule) addInstanceToLoot(projectID string, instance CloudSQLSe
 		)
 	}
 
+	// Surface security issues if any were detected
+	if len(instance.SecurityIssues) > 0 {
+		lootFile.Contents += "# Security Issues:\n"
+		for _, issue := range instance.SecurityIssues {
+			lootFile.Contents += fmt.Sprintf("#   - %s\n", issue)
+		}
+	}
+
 	lootFile.Contents += "\n"
 }
 

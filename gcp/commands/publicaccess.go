@@ -826,6 +826,14 @@ func hasPublicDataflowConfig(job *dataflow.Job) bool {
 	return false
 }
 
+// getClusterState safely extracts cluster state, handling nil Status
+func getClusterState(cluster *dataproc.Cluster) string {
+	if cluster.Status != nil {
+		return cluster.Status.State
+	}
+	return "UNKNOWN"
+}
+
 // checkDataprocClusters checks Dataproc clusters for public access
 func (m *PublicAccessModule) checkDataprocClusters(ctx context.Context, projectID string, logger internal.Logger) {
 	dpService, err := dataproc.NewService(ctx)
@@ -857,7 +865,7 @@ func (m *PublicAccessModule) checkDataprocClusters(ctx context.Context, projectI
 								Location:       region,
 								AccessLevel:    member,
 								Role:           binding.Role,
-								AdditionalInfo: fmt.Sprintf("Status: %s", cluster.Status.State),
+								AdditionalInfo: fmt.Sprintf("Status: %s", getClusterState(cluster)),
 							}
 							m.addResource(resource)
 						}

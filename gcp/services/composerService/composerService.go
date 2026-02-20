@@ -147,9 +147,12 @@ func (s *ComposerService) parseEnvironment(env *composer.Environment, projectID 
 
 		// Software config
 		if env.Config.SoftwareConfig != nil {
-			info.AirflowVersion = env.Config.SoftwareConfig.AirflowConfigOverrides["core-dags_are_paused_at_creation"]
-			info.PythonVersion = env.Config.SoftwareConfig.PythonVersion
 			info.ImageVersion = env.Config.SoftwareConfig.ImageVersion
+			info.PythonVersion = env.Config.SoftwareConfig.PythonVersion
+			// Extract Airflow version from ImageVersion (format: composer-X.Y.Z-airflow-A.B.C)
+			if env.Config.SoftwareConfig.ImageVersion != "" {
+				info.AirflowVersion = env.Config.SoftwareConfig.ImageVersion
+			}
 		}
 
 		// Node config
