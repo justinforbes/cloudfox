@@ -14,7 +14,7 @@ import (
 
 var GCPCrossProjectCommand = &cobra.Command{
 	Use:     globals.GCP_CROSSPROJECT_MODULE_NAME,
-	Aliases: []string{"cross-project", "xproject", "lateral"},
+	Aliases: []string{"cross-project", "xproject"},
 	Short:   "Analyze cross-project access patterns for lateral movement",
 	Long: `Analyze cross-project access patterns to identify lateral movement paths and data flows.
 
