@@ -405,8 +405,8 @@ type ProjectProcessor func(ctx context.Context, projectID string, logger interna
 //
 // Usage:
 //
-//	func (m *BucketsModule) Execute(ctx context.Context, logger internal.Logger) {
-//	    m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_BUCKETS_MODULE_NAME, m.processProject)
+//	func (m *StorageModule) Execute(ctx context.Context, logger internal.Logger) {
+//	    m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_STORAGE_MODULE_NAME, m.processProject)
 //	    m.writeOutput(ctx, logger)
 //	}
 func (b *BaseGCPModule) RunProjectEnumeration(
@@ -491,7 +491,7 @@ func parseMultiValueFlag(flagValue string) []string {
 //
 // Usage:
 //
-//	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_BUCKETS_MODULE_NAME)
+//	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_STORAGE_MODULE_NAME)
 //	if err != nil {
 //	    return // error already logged
 //	}

@@ -305,8 +305,8 @@ var GCPAllChecksCommand = &cobra.Command{
 		// Modules excluded from all-checks (run separately, not part of standard enumeration)
 		excludeFromAllChecks := map[string]bool{
 			"privesc":        true, // Already ran above
-			"bucket-enum":    true, // Sensitive data enum modules (run separately)
-			"log-enum":       true,
+			"storage-enum":   true, // Sensitive data enum modules (run separately)
+			"logging-enum":   true,
 			"bigquery-enum":  true,
 			"bigtable-enum":  true,
 			"spanner-enum":   true,
@@ -508,7 +508,7 @@ func init() {
 	// Available commands
 	GCPCommands.AddCommand(
 		// Core/existing commands
-		commands.GCPBucketsCommand,
+		commands.GCPStorageCommand,
 		commands.GCPArtifactRegistryCommand,
 		commands.GCPBigQueryCommand,
 		commands.GCPSecretsCommand,
@@ -574,8 +574,8 @@ func init() {
 		// Pentest/Exploitation commands
 		commands.GCPPrivescCommand,
 		commands.GCPOrgPoliciesCommand,
-		commands.GCPBucketEnumCommand,
-		commands.GCPLogEnumCommand,
+		commands.GCPStorageEnumCommand,
+		commands.GCPLoggingEnumCommand,
 		commands.GCPBigQueryEnumCommand,
 		commands.GCPBigtableEnumCommand,
 		commands.GCPSpannerEnumCommand,

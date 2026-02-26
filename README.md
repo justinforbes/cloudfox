@@ -232,8 +232,8 @@ For detailed documentation on each GCP command, see the [GCP Commands Wiki](http
 | GCP | [notebooks](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#notebooks) | Enumerate Vertex AI Workbench notebooks |
 | GCP | [workload-identity](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#workload-identity) | Enumerate GKE Workload Identity and Workload Identity Federation |
 | GCP | [inventory](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#inventory) | Quick resource inventory - works without Cloud Asset API |
-| GCP | [buckets](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#buckets) | Enumerate GCP Cloud Storage buckets with security configuration |
-| GCP | [bucket-enum](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#bucket-enum) | Enumerate GCS buckets for sensitive files (credentials, secrets, configs) |
+| GCP | [storage](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#storage) | Enumerate GCP Cloud Storage buckets with security configuration |
+| GCP | [storage-enum](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#storage-enum) | Enumerate GCS buckets for sensitive files (credentials, secrets, configs) |
 | GCP | [bigquery](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#bigquery) | Enumerate GCP BigQuery datasets and tables with security analysis |
 | GCP | [cloudsql](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#cloudsql) | Enumerate Cloud SQL instances with security analysis |
 | GCP | [spanner](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#spanner) | Enumerate Cloud Spanner instances and databases |
@@ -270,6 +270,10 @@ For detailed documentation on each GCP command, see the [GCP Commands Wiki](http
 | GCP | [public-access](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#public-access) | Find resources with allUsers/allAuthenticatedUsers access across 16 GCP services |
 | GCP | [cross-project](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#cross-project) | Analyze cross-project IAM bindings, logging sinks, and Pub/Sub exports for lateral movement |
 | GCP | [foxmapper](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#foxmapper) | Run FoxMapper (graph-based IAM analysis) for privilege escalation path discovery |
+| GCP | [logging-enum](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#logging-enum) | Scan Cloud Logging entries for sensitive data (credentials, tokens, PII) |
+| GCP | [bigquery-enum](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#bigquery-enum) | Scan BigQuery datasets, tables, and columns for sensitive data indicators |
+| GCP | [bigtable-enum](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#bigtable-enum) | Scan Bigtable instances, tables, and column families for sensitive data indicators |
+| GCP | [spanner-enum](https://github.com/BishopFox/cloudfox/wiki/GCP-Commands#spanner-enum) | Scan Spanner database schemas for sensitive table and column names |
 
 
 

@@ -14,9 +14,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var GCPBucketsCommand = &cobra.Command{
-	Use:     globals.GCP_BUCKETS_MODULE_NAME,
-	Aliases: []string{"storage", "gcs"},
+var GCPStorageCommand = &cobra.Command{
+	Use:     globals.GCP_STORAGE_MODULE_NAME,
+	Aliases: []string{"buckets", "gcs"},
 	Short:   "Enumerate GCP Cloud Storage buckets with security configuration",
 	Long: `Enumerate GCP Cloud Storage buckets across projects with security-relevant details.
 
@@ -48,7 +48,7 @@ Security Columns:
     "X rules" = Number of lifecycle rules configured
 - Versioning: Object versioning (helps recovery, compliance)
 - Encryption: "Google-managed" or "CMEK" (customer-managed keys)`,
-	Run: runGCPBucketsCommand,
+	Run: runGCPStorageCommand,
 }
 
 // ------------------------------
@@ -78,9 +78,9 @@ func (o BucketsOutput) LootFiles() []internal.LootFile   { return o.Loot }
 // ------------------------------
 // Command Entry Point
 // ------------------------------
-func runGCPBucketsCommand(cmd *cobra.Command, args []string) {
+func runGCPStorageCommand(cmd *cobra.Command, args []string) {
 	// Initialize command context
-	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_BUCKETS_MODULE_NAME)
+	cmdCtx, err := gcpinternal.InitializeCommandContext(cmd, globals.GCP_STORAGE_MODULE_NAME)
 	if err != nil {
 		return // Error already logged
 	}
@@ -103,16 +103,16 @@ func (m *BucketsModule) Execute(ctx context.Context, logger internal.Logger) {
 	// Try to get FoxMapper cache (preferred - graph-based analysis)
 	m.FoxMapperCache = gcpinternal.GetFoxMapperCacheFromContext(ctx)
 	if m.FoxMapperCache != nil && m.FoxMapperCache.IsPopulated() {
-		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_BUCKETS_MODULE_NAME)
+		logger.InfoM("Using FoxMapper graph data for attack path analysis", globals.GCP_STORAGE_MODULE_NAME)
 	}
 
 	// Run enumeration with concurrency
-	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_BUCKETS_MODULE_NAME, m.processProject)
+	m.RunProjectEnumeration(ctx, logger, m.ProjectIDs, globals.GCP_STORAGE_MODULE_NAME, m.processProject)
 
 	// Get all buckets for stats
 	allBuckets := m.getAllBuckets()
 	if len(allBuckets) == 0 {
-		logger.InfoM("No buckets found", globals.GCP_BUCKETS_MODULE_NAME)
+		logger.InfoM("No buckets found", globals.GCP_STORAGE_MODULE_NAME)
 		return
 	}
 
@@ -125,9 +125,9 @@ func (m *BucketsModule) Execute(ctx context.Context, logger internal.Logger) {
 	}
 
 	if publicCount > 0 {
-		logger.SuccessM(fmt.Sprintf("Found %d bucket(s), %d PUBLIC", len(allBuckets), publicCount), globals.GCP_BUCKETS_MODULE_NAME)
+		logger.SuccessM(fmt.Sprintf("Found %d bucket(s), %d PUBLIC", len(allBuckets), publicCount), globals.GCP_STORAGE_MODULE_NAME)
 	} else {
-		logger.SuccessM(fmt.Sprintf("Found %d bucket(s)", len(allBuckets)), globals.GCP_BUCKETS_MODULE_NAME)
+		logger.SuccessM(fmt.Sprintf("Found %d bucket(s)", len(allBuckets)), globals.GCP_STORAGE_MODULE_NAME)
 	}
 
 	// Write output
@@ -148,7 +148,7 @@ func (m *BucketsModule) getAllBuckets() []CloudStorageService.BucketInfo {
 // ------------------------------
 func (m *BucketsModule) processProject(ctx context.Context, projectID string, logger internal.Logger) {
 	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.InfoM(fmt.Sprintf("Enumerating buckets in project: %s", projectID), globals.GCP_BUCKETS_MODULE_NAME)
+		logger.InfoM(fmt.Sprintf("Enumerating buckets in project: %s", projectID), globals.GCP_STORAGE_MODULE_NAME)
 	}
 
 	// Create service and fetch buckets
@@ -156,7 +156,7 @@ func (m *BucketsModule) processProject(ctx context.Context, projectID string, lo
 	buckets, err := cs.Buckets(projectID)
 	if err != nil {
 		m.CommandCounter.Error++
-		gcpinternal.HandleGCPError(err, logger, globals.GCP_BUCKETS_MODULE_NAME,
+		gcpinternal.HandleGCPError(err, logger, globals.GCP_STORAGE_MODULE_NAME,
 			fmt.Sprintf("Could not enumerate buckets in project %s", projectID))
 		return
 	}
@@ -181,7 +181,7 @@ func (m *BucketsModule) processProject(ctx context.Context, projectID string, lo
 	m.mu.Unlock()
 
 	if globals.GCP_VERBOSITY >= globals.GCP_VERBOSE_ERRORS {
-		logger.InfoM(fmt.Sprintf("Found %d bucket(s) in project %s", len(buckets), projectID), globals.GCP_BUCKETS_MODULE_NAME)
+		logger.InfoM(fmt.Sprintf("Found %d bucket(s) in project %s", len(buckets), projectID), globals.GCP_STORAGE_MODULE_NAME)
 	}
 }
 
@@ -248,7 +248,7 @@ func (m *BucketsModule) writeOutput(ctx context.Context, logger internal.Logger)
 		}
 	}
 	if publicCount > 0 {
-		logger.InfoM(fmt.Sprintf("[FINDING] Found %d publicly accessible bucket(s)!", publicCount), globals.GCP_BUCKETS_MODULE_NAME)
+		logger.InfoM(fmt.Sprintf("[FINDING] Found %d publicly accessible bucket(s)!", publicCount), globals.GCP_STORAGE_MODULE_NAME)
 	}
 
 	// Decide between hierarchical and flat output
@@ -273,7 +273,7 @@ func (m *BucketsModule) writeHierarchicalOutput(ctx context.Context, logger inte
 	for projectID, buckets := range m.ProjectBuckets {
 		body := m.bucketsToTableBody(buckets)
 		tables := []internal.TableFile{{
-			Name:   globals.GCP_BUCKETS_MODULE_NAME,
+			Name:   globals.GCP_STORAGE_MODULE_NAME,
 			Header: header,
 			Body:   body,
 		}}
@@ -304,7 +304,7 @@ func (m *BucketsModule) writeHierarchicalOutput(ctx context.Context, logger inte
 		outputData,
 	)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), globals.GCP_BUCKETS_MODULE_NAME)
+		logger.ErrorM(fmt.Sprintf("Error writing hierarchical output: %v", err), globals.GCP_STORAGE_MODULE_NAME)
 		m.CommandCounter.Error++
 	}
 }
@@ -326,7 +326,7 @@ func (m *BucketsModule) writeFlatOutput(ctx context.Context, logger internal.Log
 	}
 
 	tableFiles := []internal.TableFile{{
-		Name:   globals.GCP_BUCKETS_MODULE_NAME,
+		Name:   globals.GCP_STORAGE_MODULE_NAME,
 		Header: header,
 		Body:   body,
 	}}
@@ -356,7 +356,7 @@ func (m *BucketsModule) writeFlatOutput(ctx context.Context, logger internal.Log
 		output,
 	)
 	if err != nil {
-		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_BUCKETS_MODULE_NAME)
+		logger.ErrorM(fmt.Sprintf("Error writing output: %v", err), globals.GCP_STORAGE_MODULE_NAME)
 		m.CommandCounter.Error++
 	}
 }
