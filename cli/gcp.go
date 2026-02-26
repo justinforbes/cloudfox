@@ -302,7 +302,17 @@ var GCPAllChecksCommand = &cobra.Command{
 			GCPLogger.InfoM("", "all-checks")
 		}
 
-		// Count total modules to execute (excluding self, hidden, and privesc which we already ran)
+		// Modules excluded from all-checks (run separately, not part of standard enumeration)
+		excludeFromAllChecks := map[string]bool{
+			"privesc":        true, // Already ran above
+			"bucket-enum":    true, // Sensitive data enum modules (run separately)
+			"log-enum":       true,
+			"bigquery-enum":  true,
+			"bigtable-enum":  true,
+			"spanner-enum":   true,
+		}
+
+		// Count total modules to execute (excluding self, hidden, and excluded modules)
 		var modulesToRun []*cobra.Command
 		for _, childCmd := range GCPCommands.Commands() {
 			if childCmd == cmd { // Skip the run-all command itself
@@ -311,7 +321,7 @@ var GCPAllChecksCommand = &cobra.Command{
 			if childCmd.Hidden { // Skip hidden commands
 				continue
 			}
-			if childCmd.Use == "privesc" { // Skip privesc since we already ran it
+			if excludeFromAllChecks[childCmd.Use] {
 				continue
 			}
 			modulesToRun = append(modulesToRun, childCmd)
@@ -565,6 +575,10 @@ func init() {
 		commands.GCPPrivescCommand,
 		commands.GCPOrgPoliciesCommand,
 		commands.GCPBucketEnumCommand,
+		commands.GCPLogEnumCommand,
+		commands.GCPBigQueryEnumCommand,
+		commands.GCPBigtableEnumCommand,
+		commands.GCPSpannerEnumCommand,
 		commands.GCPCrossProjectCommand,
 		commands.GCPSourceReposCommand,
 		commands.GCPServiceAgentsCommand,
